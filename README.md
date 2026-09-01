@@ -35,7 +35,7 @@ Optimisé pour les micro-serveurs et SBC (Single Board Computers) :
 
 ```bash
 # Cloner le dépôt
-git clone [https://github.com/ton-compte/LightweightMC.git](https://github.com/ton-compte/LightweightMC.git)
+git clone [https://github.com/ddrmax/LightweightMC.git](https://github.com/ddrmax/LightweightMC.git)
 cd LightweightMC
 
 # Préparer le build
