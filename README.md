@@ -1,46 +1,44 @@
 # LightweightMC 🚀
 
-**LightweightMC** est un moteur de serveur Minecraft alternatif, développé de zéro en **C++20**. Conçu spécifiquement pour s'exécuter sur du matériel à ressources très limitées (SBC ARM, Raspberry Pi, TV Box Android flashées), il abandonne l'architecture JVM classique au profit d'une approche **100 % événementielle** et de la **résolution temporelle à la demande**.
+**LightweightMC** is an alternative Minecraft server engine, developed from scratch in **C++20**. Designed specifically to run on hardware with very limited resources (ARM SBCs, Raspberry Pi, reflashed Android TV boxes), it abandons the traditional JVM architecture in favor of a **100% event-driven** approach and **on-demand time resolution**.
 
 ---
 
-## 🔑 Caractéristiques Principales
+## 🔑 Key Features
 
-* **Zéro JVM, Zéro Garbage Collector :** Binaire natif C++20 avec empreinte RAM minimale (< 30 Mo au démarrage).
-* **Architecture 100 % Événementielle :** Gestion du réseau basée sur `epoll` / non-bloquant pour encaisser les connexions sans bloquer le thread principal.
-* **Timestamp Catch-up (Lazy Evaluation) :** Suppression des boucles de *ticks* sur les chunks déchargés. Le calcul des fours, cultures et inventaires s'effectue par différence temporelle ($\Delta t$) au réveil.
-* **Format I/O sur mesure (`.mcc`) :** Stockage hybride des chunks combinant **SQLite** et compression ultra-rapide **LZ4**.
-* **Gestion Stricte du Rayon de Chunks :**
-  * `Active` (0 à 12 chunks) : Simulation complète et ticks temps réel sur toute la distance d'affichage standard.
-  * `Frozen` (> 12 chunks en bordure de cache) : Présents en RAM pour l'affichage, IA & Redstone en pause.
-  * `Unloaded` (Hors de portée) : Sauvegardés sur disque avec horodatage UNIX.
-
----
-
-## 📊 Matériel Cible
-
-Optimisé pour les micro-serveurs et SBC (Single Board Computers) :
-* **SoC :** ARMv7 / ARMv8 (Raspberry Pi 2/3/4, RK3318, Allwinner, Orange Pi).
-* **RAM requise :** < 256 Mo libres.
-* **OS :** Linux (Debian, Armbian, Alpine).
+* **No JVM, No Garbage Collector:** Native C++20 binary with a minimal RAM footprint (< 30 MB at startup).
+* **100% Event-Driven Architecture:** Network handling based on `epoll` / non-blocking I/O to manage connections without blocking the main thread.
+* **Timestamp Catch-up (Lazy Evaluation):** Elimination of *tick* loops for unloaded chunks. Calculations for furnaces, crops, and inventories are performed using time deltas ($\Delta t$) upon reactivation.
+* **Custom I/O Format (`.mcc`):** Hybrid chunk storage combining **SQLite** and ultra-fast **LZ4** compression.
+* **Strict Chunk Radius Management:**
+  * `Active` (0 to 12 chunks): Full simulation and real-time ticking across the standard render distance.
+  * `Frozen` (> 12 chunks at cache edge): Kept in RAM for rendering; AI & Redstone paused.
+  * `Unloaded` (Out of range): Saved to disk with a UNIX timestamp.
 
 ---
+
+## 📊 Target Hardware
+
+Optimized for micro-servers and SBCs (Single Board Computers):
+* **SoC:** ARMv7 / ARMv8 (Raspberry Pi 2/3/4, RK3318, Allwinner, Orange Pi).
+* **Required RAM:** < 256 MB free.
+* **OS:** Linux (Debian, Armbian, Alpine). ---
 
 ## 🛠️ Compilation
 
-### Prérequis
-* GCC 11+ ou Clang 13+ (support C++20)
+### Prerequisites
+* GCC 11+ or Clang 13+ (C++20 support)
 * CMake 3.20+
 * `liblz4-dev` & `libsqlite3-dev`
 
 ```bash
-# Cloner le dépôt
+# Clone the repository
 git clone [https://github.com/ddrmax/LightweightMC.git](https://github.com/ddrmax/LightweightMC.git)
 cd LightweightMC
 
-# Préparer le build
+# Prepare the build
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 
-# Compiler
+# Compile
 make -j$(nproc)
