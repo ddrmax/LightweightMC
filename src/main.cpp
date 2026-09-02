@@ -3,13 +3,16 @@
 
 LightweightMC::Core::Server g_server;
 
-void handleSignal(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) {
+void handleSignal(int signal)
+{
+    if (signal == SIGINT || signal == SIGTERM)
+    {
         g_server.stop();
     }
 }
 
-int main() {
+int main()
+{
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 

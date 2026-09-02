@@ -5,39 +5,46 @@
 #include <vector>
 #include <cstdint>
 
-namespace LightweightMC::Storage {
+namespace LightweightMC::Storage
+{
 
-struct BlockCoord {
-    int relX, relY, relZ;
-    bool operator==(const BlockCoord& o) const {
-        return relX == o.relX && relY == o.relY && relZ == o.relZ;
-    }
-};
+    struct BlockCoord
+    {
+        int relX, relY, relZ;
+        bool operator==(const BlockCoord &o) const
+        {
+            return relX == o.relX && relY == o.relY && relZ == o.relZ;
+        }
+    };
 
-struct BlockCoordHash {
-    std::size_t operator()(const BlockCoord& c) const {
-        return std::hash<int>()(c.relX) ^ (std::hash<int>()(c.relY) << 1) ^ (std::hash<int>()(c.relZ) << 2);
-    }
-};
+    struct BlockCoordHash
+    {
+        std::size_t operator()(const BlockCoord &c) const
+        {
+            return std::hash<int>()(c.relX) ^ (std::hash<int>()(c.relY) << 1) ^ (std::hash<int>()(c.relZ) << 2);
+        }
+    };
 
-class WorldStorage {
-private:
-    sqlite3* m_db{nullptr};
+    class WorldStorage
+    {
+    private:
+        sqlite3 *m_db{nullptr};
+        sqlite3_stmt *m_getChunkStmt = nullptr;
 
-public:
-    WorldStorage() = default;
-    ~WorldStorage();
+    public:
+        WorldStorage() = default;
+        ~WorldStorage();
 
-    bool init(const std::string& dbPath);
-    
-    // World Gen and persistancy
-    bool isChunkGenerated(int chunkX, int chunkZ);
-    void generateChunk(int chunkX, int chunkZ);
-    void pregenerateWorld(int radius);
+        bool init(const std::string &dbPath);
 
-    // Bloc related
-    void saveBlockChange(int chunkX, int chunkZ, int relX, int relY, int relZ, uint16_t blockId);
-    std::unordered_map<BlockCoord, uint16_t, BlockCoordHash> getChunkBlocks(int chunkX, int chunkZ);
-};
+        // World Gen and persistancy
+        bool isChunkGenerated(int chunkX, int chunkZ);
+        void generateChunk(int chunkX, int chunkZ);
+        void pregenerateWorld(int radius);
+
+        // Bloc related
+        void saveBlockChange(int chunkX, int chunkZ, int relX, int relY, int relZ, uint16_t blockId);
+        std::unordered_map<BlockCoord, uint16_t, BlockCoordHash> getChunkBlocks(int chunkX, int chunkZ);
+    };
 
 } // namespace LightweightMC::Storage

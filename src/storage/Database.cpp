@@ -1,25 +1,30 @@
 #include "storage/Database.hpp"
 #include "core/Logger.hpp"
 
-namespace LightweightMC::Storage {
+namespace LightweightMC::Storage
+{
 
-Database::Database(std::string path) : m_path(std::move(path)) {}
+    Database::Database(std::string path) : m_path(std::move(path)) {}
 
-Database::~Database() {
-    if (m_db) sqlite3_close(m_db);
-}
-
-bool Database::init() {
-    if (sqlite3_open(m_path.c_str(), &m_db) != SQLITE_OK) {
-        Core::Logger::error("Impossible d'ouvrir la base SQLite");
-        return false;
+    Database::~Database()
+    {
+        if (m_db)
+            sqlite3_close(m_db);
     }
 
-    // Activer le mode WAL pour la vitesse
-    sqlite3_exec(m_db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
-    sqlite3_exec(m_db, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
+    bool Database::init()
+    {
+        if (sqlite3_open(m_path.c_str(), &m_db) != SQLITE_OK)
+        {
+            Core::Logger::error("Impossible d'ouvrir la base SQLite");
+            return false;
+        }
 
-    const char* sql = R"(
+        // Activer le mode WAL pour la vitesse
+        sqlite3_exec(m_db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
+        sqlite3_exec(m_db, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
+
+        const char *sql = R"(
         CREATE TABLE IF NOT EXISTS books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_uuid TEXT UNIQUE,
@@ -35,7 +40,7 @@ bool Database::init() {
         );
     )";
 
-    return sqlite3_exec(m_db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
-}
+        return sqlite3_exec(m_db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+    }
 
 } // namespace LightweightMC::Storage
