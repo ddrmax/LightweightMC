@@ -40,20 +40,20 @@ namespace LightweightMC::Network
         return value;
     }
 
-    void Packet::writeVarInt(std::vector<uint8_t> &buffer, int32_t value)
+void Packet::writeVarInt(std::vector<uint8_t> &buffer, int32_t value)
+{
+    uint32_t uval = static_cast<uint32_t>(value);
+    while (true)
     {
-        uint32_t uval = static_cast<uint32_t>(value);
-        while (true)
+        if ((uval & ~0x7F) == 0)
         {
-            if ((uval & ~0x7F) == 0)
-            {
-                buffer.push_back(uval);
-                return;
-            }
-            buffer.push_back((uval & 0x7F) | 0x80);
-            uval >>= 7;
+            buffer.push_back(static_cast<uint8_t>(uval));
+            return;
         }
+        buffer.push_back(static_cast<uint8_t>((uval & 0x7F) | 0x80));
+        uval >>= 7;
     }
+}
 
     std::string Packet::readString(const uint8_t *buffer, size_t &offset)
     {
@@ -65,11 +65,11 @@ namespace LightweightMC::Network
         return str;
     }
 
-    void Packet::writeString(std::vector<uint8_t> &vec, const std::string &str)
-    {
-        Packet::writeVarInt(vec, static_cast<int32_t>(str.size()));
-        vec.insert(vec.end(), str.begin(), str.end());
-    }
+void Packet::writeString(std::vector<uint8_t> &vec, const std::string &str)
+{
+    Packet::writeVarInt(vec, static_cast<int32_t>(str.size()));
+    vec.insert(vec.end(), str.begin(), str.end());
+}
 
     void Packet::writeDouble(std::vector<uint8_t> &vec, double val)
     {

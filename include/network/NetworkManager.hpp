@@ -54,6 +54,7 @@ namespace LightweightMC::Network
         int16_t selectedSlot = 0;
         std::unordered_map<int, ItemStack> inventory;
         std::vector<uint8_t> rxBuffer; // TCP Buffer
+        std::vector<uint8_t> sendBuffer;
     };
 
     class NetworkManager
@@ -70,7 +71,11 @@ namespace LightweightMC::Network
 
         void setNonBlocking(int fd);
         void handleClientData(int clientFd);
+        void handleDisconnect(int fd);
         void sendPacket(int fd, int32_t packetId, const std::vector<uint8_t> &payload);
+        void flushSendBuffer(ClientSession &client);
+
+        void teleportPlayer(int fd, double x, double y, double z, float yaw = 0.0f, float pitch = 0.0f);
 
         void sendPlayPackets(int clientFd, const std::string &username);
         void sendFlatChunk(int clientFd, int chunkX, int chunkZ);
