@@ -23,6 +23,9 @@ Optimized for micro-servers and SBCs (Single Board Computers):
 * **SoC:** ARMv7 / ARMv8 (Raspberry Pi 2/3/4, RK3318, Allwinner, Orange Pi).
 * **Required RAM:** < 256 MB free.
 * **OS:** Linux (Debian, Armbian, Alpine). ---
+## ⛓️‍💥 Version Breaking History:
+* September 16, 2026: World data from earlier versions where uncompressed, new worls data is compressed, LightweightMC doesn't support uncompressed data anymore
+
 
 ## 🛠️ Compilation
 

@@ -31,8 +31,8 @@ namespace LightweightMC::Network
             if (offset >= maxLen)
                 return -1; // Incomplete
             byte = buffer[offset++];
-            int32_t value = (byte & 0x7F);
-            value |= (value << (7 * numRead));
+            int32_t bVal = (byte & 0x7F);
+            value |= (bVal << (7 * numRead));
             numRead++;
             if (numRead > 5)
                 return -1; // Protocol Error

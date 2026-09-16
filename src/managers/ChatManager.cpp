@@ -1,0 +1,1 @@
+#include "managers/ChatManager.hpp"

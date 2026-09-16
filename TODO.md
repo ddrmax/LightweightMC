@@ -7,9 +7,8 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
 ## 🏗️ Build & Multi-Version Architecture
 
 - [ ] **Compile-Time Protocol Versioning**
-  - [ ] Abstract protocol definitions using C++20 templates and constexpr flags (e.g., `-DMC_VERSION_1_8=1`).
   - [ ] Isolate version-specific packet IDs, serialization rules, and bitwise metadata structures into header-only protocol modules (`src/protocol/v1_8/`, `src/protocol/v1_9/`).
-  - [ ] Add CMake build options (`-DMC_PROTOCOL_VERSION=1.8`) to compile dedicated server binaries targetting specific Minecraft protocol specifications without runtime overhead.
+  - [ ] Add ViaVersion / ViaBackwards / ViaRewind style support to support players with Minecraft 1.8 up to latest 26.X relase.
 
 ---
 
@@ -41,6 +40,7 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [x] Private messaging `/tell`, `/w`, `/msg` (bi-directional whisper routing).
   - [x] Teleportation commands: `/tp <x y z>`, `/tp <player>`, `/tp <p1 p2>`, `/tpall`.
 - [ ] **Administration Commands**
+  - [x] Commands `/antiscan <block|add|reload>` & `/hunter <block|add|reload>` (AntiScan Feature).
 - [ ] **PaperMC / Bukkit Style Commands (Refer to PaperMC Commands Reference)**
   - [x] Commands `/version`, `/ver`, `/about` (displays the version information about the server).
 
@@ -49,6 +49,25 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
 - [x] `0x08 Player Position And Look` packet handling for server-side teleportation and client coordinate syncing.
 - [x] Basic block interaction handling (`0x23 Block Change`).
 
+### 2. 👥 Player Tracking & Visibility
+- [ ] **Player Animations & Status Flags**
+  - [x] Arm-swing animation propagation (`0x0B Animation`).
+
+
+### 📦 Inventories & Tile Entity Storage
+- [ ] **Window & Slot Management**
+  - [x] Dispatch `0x30 Window Items` on player login.
+  - [x] Handle inventory click packets (`0x0E Click Window`).
+  - [x] Synchronize hotbar slot selection (`0x09 Held Item Change`).
+
+### 💾 Database & State Persistence
+- [ ] **SQLite Integration**
+  - [x] `players` table: UUID, username, inventory binary data, location, gamemode.
+
+### 🔒 Extras Features
+- [ ] **🔑 Core Management & Security**
+  - [x] Hunter : integration of PebbleHost's Minecraft "server scanning" IP list, that will send garbage (simulates another type of service when detecting these IPs). 
+  - [x] Hunter : Custom list of IPs that can be added via commands 
 
 ---
 
@@ -77,15 +96,10 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [ ] Synchronize relative movement and rotation updates (`0x14 Entity Relative Move`, `0x18 Entity Teleport`).
   - [ ] Despawn entities leaving the client's view distance (`0x13 Destroy Entities`).
 - [ ] **Player Animations & Status Flags**
-  - [ ] Arm-swing animation propagation (`0x0B Animation`).
   - [ ] Metadata synchronization for sneaking, sprinting, and action states.
   - [] Tile Entity initialization via `0x35 Update Block Entity` (for containers like Chests, Furnaces, Brewing Stands, Signs).
 
 ### 3. 📦 Inventories & Tile Entity Storage
-- [ ] **Window & Slot Management**
-  - [ ] Dispatch `0x30 Window Items` on player login.
-  - [ ] Handle inventory click packets (`0x0E Click Window`).
-  - [ ] Synchronize hotbar slot selection (`0x09 Held Item Change`).
 - [ ] **Container State Persistence**
   - [ ] Server-side storage for Chests, Furnaces, and Brewing Stand inventories.
   - [ ] Container opening animations and window tracking (`0x2D Open Window`).
@@ -119,7 +133,6 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
     - [ ] `/lwmc chunkinfo [<world>]`.
 ### 5. 💾 Database & State Persistence
 - [ ] **SQLite Integration**
-  - [ ] `players` table: UUID, username, inventory binary data, location, gamemode.
   - [ ] `blocks` / `tile_entities` table: Modified world block state persistence.
   - [ ] Periodic asynchronous auto-save thread.
 
@@ -137,4 +150,4 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [ ] WorldGuard : An advanced region management tool for server admins.
 - [ ] **🔑 Core Management & Security**
   - [ ] LuckPerms : Fine tuned permissions management.
-  - [ ] Hunter : integration of PebbleHost's Minecraft "server scanning" IP list, that will send garbage (simulates another type of service when detecting these IPs). 
+  - [ ] Hunter : adding unblock/remove feature to allow a server (only for custom adresses) 

@@ -2,6 +2,9 @@
 #include "network/NetworkManager.hpp"
 #include "world/ChunkManager.hpp"
 #include "storage/Database.hpp"
+#include <iostream>
+#include <string>
+#include <thread>
 #include <atomic>
 
 namespace LightweightMC::Core
@@ -16,12 +19,15 @@ namespace LightweightMC::Core
         Storage::Database m_database;
 
         void printBanner();
+        void initServerCommands();
+        void processConsoleInput(const std::string &inputLine);
+        void startConsoleThread(const std::atomic<bool> &running);
 
     public:
         Server();
         ~Server();
 
-        void start(uint16_t port);
+        void start();
         void stop();
     };
 
