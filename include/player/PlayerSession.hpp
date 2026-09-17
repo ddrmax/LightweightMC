@@ -51,6 +51,7 @@ namespace LightweightMC::Player
         std::unordered_set<ChunkPos, ChunkPosHash> loadedChunks{};
 
         int16_t selectedSlot{0};
+        uint8_t openWindowId{0}; // next window ID to assign when opening a container
         std::unordered_map<int, ItemStack> inventory{};
 
         std::vector<uint8_t> rxBuffer{};

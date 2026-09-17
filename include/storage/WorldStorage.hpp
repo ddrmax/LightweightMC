@@ -49,6 +49,9 @@ namespace LightweightMC::Storage
         // Block & Chunk Storage (LZ4 Compressed)
         void saveBlockChange(int chunkX, int chunkZ, int relX, int relY, int relZ, uint16_t blockId);
         std::unordered_map<BlockCoord, uint16_t, BlockCoordHash> getChunkBlocks(int chunkX, int chunkZ);
+
+        // Returns the combined block data (blockId << 4 | meta) at a world position, or 0 if air/unknown
+        uint16_t getBlockAt(int chunkX, int chunkZ, int relX, int relY, int relZ);
     };
 
 } // namespace LightweightMC::Storage

@@ -314,4 +314,40 @@ namespace LightweightMC::Storage
         return blocks;
     }
 
+    uint16_t WorldStorage::getBlockAt(int chunkX, int chunkZ, int relX, int relY, int relZ)
+    {
+        // Only section 0 (Y 0-15) is currently stored
+        if (relY < 0 || relY >= 16 || relX < 0 || relX >= 16 || relZ < 0 || relZ >= 16)
+            return 0;
+
+        if (!isChunkGenerated(chunkX, chunkZ))
+            return 0;
+
+        sqlite3_reset(m_getChunkStmt);
+        sqlite3_clear_bindings(m_getChunkStmt);
+        sqlite3_bind_int(m_getChunkStmt, 1, chunkX);
+        sqlite3_bind_int(m_getChunkStmt, 2, chunkZ);
+
+        if (sqlite3_step(m_getChunkStmt) == SQLITE_ROW)
+        {
+            const void *blobData = sqlite3_column_blob(m_getChunkStmt, 0);
+            int blobSize = sqlite3_column_bytes(m_getChunkStmt, 0);
+
+            if (blobData && blobSize > 0)
+            {
+                std::vector<uint8_t> rawBuffer = decompressBuffer(
+                    static_cast<const uint8_t *>(blobData), blobSize, UNCOMPRESSED_SECTION_SIZE);
+
+                if (rawBuffer.size() == UNCOMPRESSED_SECTION_SIZE)
+                {
+                    const uint16_t *blocksArray = reinterpret_cast<const uint16_t *>(rawBuffer.data());
+                    int index = (relY * 256) + (relZ * 16) + relX;
+                    return blocksArray[index];
+                }
+            }
+        }
+
+        return 0;
+    }
+
 } // namespace LightweightMC::Storage

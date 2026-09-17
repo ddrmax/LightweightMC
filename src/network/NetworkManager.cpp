@@ -83,7 +83,7 @@ namespace LightweightMC::Network
             Core::Logger::error("Failed to initialize SQLite player database.");
             return false;
         }
-
+        m_worldStorage.pregenerateWorld(200);
         m_serverFd = socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;
         setsockopt(m_serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -628,7 +628,7 @@ namespace LightweightMC::Network
 
                     broadcastPacket(0x18, teleport, clientFd);
                 }
-                else if (packetId == 0x07) // Player Digging
+              else if (packetId == 0x07) // Player Digging
                 {
                     int32_t status = Packet::readVarInt(data, offset);
 
@@ -690,8 +690,18 @@ namespace LightweightMC::Network
                     {
                         uint8_t itemCount = data[offset++];
                         (void)itemCount;
-                        uint16_t itemDamage = Packet::readShort(data, offset);
+                        int16_t itemDamage = Packet::readShort(data, offset);
 
+                        // Read cursor position on the clicked face (0-15 each byte)
+                        uint8_t cursorX = 0, cursorY = 0, cursorZ = 0;
+                        if (offset + 2 < static_cast<size_t>(dataStart + packetLen))
+                        {
+                            cursorX = data[offset++];
+                            cursorY = data[offset++];
+                            cursorZ = data[offset++];
+                        }
+
+                        // Adjust target position based on face clicked
                         if (face == 0)
                             y--;
                         else if (face == 1)
@@ -705,16 +715,161 @@ namespace LightweightMC::Network
                         else if (face == 5)
                             x++;
 
+                        // ------------------------------------
+                        // Compute orientation metadata from player yaw/pitch
+                        // MC yaw: 0=south, 90=west, 180=north, 270=east (clockwise from south)
+                        // ------------------------------------
+                        uint8_t orientMeta = 0;
+                        uint16_t blockId = static_cast<uint16_t>(itemSlot);
+
+                        // Normalise yaw to [0, 360)
+                        float yaw = session.yaw;
+                        while (yaw < 0.0f)   yaw += 360.0f;
+                        while (yaw >= 360.0f) yaw -= 360.0f;
+
+                        // 4-way horizontal direction from yaw:
+                        //  0 = south (yaw 315-360 or 0-44)  → meta 3 for stairs
+                        //  1 = west  (yaw 45-134)            → meta 1
+                        //  2 = north (yaw 135-224)           → meta 2
+                        //  3 = east  (yaw 225-314)           → meta 0
+                        // Standard "facing" meta: 2=N,3=S,4=W,5=E
+                        uint8_t yawDir4 = 0; // 0=south,1=west,2=north,3=east
+                        if (yaw < 45.0f || yaw >= 315.0f)
+                            yawDir4 = 0; // south
+                        else if (yaw < 135.0f)
+                            yawDir4 = 1; // west
+                        else if (yaw < 225.0f)
+                            yawDir4 = 2; // north
+                        else
+                            yawDir4 = 3; // east
+
+                        // facing5: 2=north, 3=south, 4=west, 5=east (for dispensers/furnaces/pistons)
+                        uint8_t facing5 = 3; // default south
+                        switch (yawDir4)
+                        {
+                        case 0: facing5 = 3; break; // south
+                        case 1: facing5 = 4; break; // west
+                        case 2: facing5 = 2; break; // north
+                        case 3: facing5 = 5; break; // east
+                        }
+                        // Override with face for vertical blocks (top/bottom)
+                        if (face == 0) facing5 = 0; // down
+                        if (face == 1) facing5 = 1; // up
+
+                        // --- Determine block-specific orientation metadata ---
+                        bool isStairs = (blockId == 53  || // oak stairs
+                                         blockId == 67  || // cobblestone stairs
+                                         blockId == 108 || // brick stairs
+                                         blockId == 109 || // stone brick stairs
+                                         blockId == 114 || // nether brick stairs
+                                         blockId == 128 || // sandstone stairs
+                                         blockId == 134 || // spruce stairs
+                                         blockId == 135 || // birch stairs
+                                         blockId == 136 || // jungle stairs
+                                         blockId == 156 || // quartz stairs
+                                         blockId == 163 || // acacia stairs
+                                         blockId == 164);  // dark oak stairs
+
+                        bool isSlab = (blockId == 44 || blockId == 126);
+                        bool isLever = (blockId == 69);
+                        bool isButton = (blockId == 77 || blockId == 143);
+                        bool isLog = (blockId == 17 || blockId == 162);
+
+                        if (isStairs)
+                        {
+                            // Stairs meta: 0=east,1=west,2=south,3=north; bit3=upside-down
+                            // Updated mapping for standard orientation:
+                            switch (yawDir4)
+                            {
+                            case 0: orientMeta = 2; break; // South
+                            case 1: orientMeta = 1; break; // West
+                            case 2: orientMeta = 3; break; // North
+                            case 3: orientMeta = 0; break; // East
+                            }
+                            // Upside-down if clicked on top half of bottom face or placed on ceiling
+                            bool upsideDown = (face == 0) || (face == 1 && cursorY > 8);
+                            if (upsideDown)
+                                orientMeta |= 0x04;
+                        }
+                        else if (isSlab)
+                        {
+                            // Lower half (meta & ~8) = bottom; +8 = top half
+                            uint8_t slabType = static_cast<uint8_t>(itemDamage & 0x07);
+                            orientMeta = slabType;
+                            bool topHalf = (face == 0) || (face == 1 && cursorY > 8);
+                            if (topHalf)
+                                orientMeta |= 0x08;
+                        }
+                        else if (isLever)
+                        {
+                            // face==0 (bottom) → ceiling lever: 0=east-west, 7=north-south
+                            // face==1 (top)    → floor lever:   5=east-west, 6=north-south
+                            // face 2-5 (wall)  → wall lever: 1=east,2=west,3=south,4=north
+                            if (face == 0)
+                                orientMeta = (yawDir4 == 0 || yawDir4 == 2) ? 7 : 0;
+                            else if (face == 1)
+                                orientMeta = (yawDir4 == 0 || yawDir4 == 2) ? 6 : 5;
+                            else
+                                orientMeta = facing5 - 1; // 1=east wall,2=west wall,3=south wall,4=north wall
+                        }
+                        else if (isButton)
+                        {
+                            // face 0=ceiling(5), 1=floor(0), 2=north(4), 3=south(3), 4=west(2), 5=east(1)
+                            switch (face)
+                            {
+                            case 0: orientMeta = 5; break;
+                            case 1: orientMeta = 0; break;
+                            case 2: orientMeta = 4; break;
+                            case 3: orientMeta = 3; break;
+                            case 4: orientMeta = 2; break;
+                            case 5: orientMeta = 1; break;
+                            }
+                        }
+                        else if (isLog)
+                        {
+                            // Log axis: 0=vertical(y), 4=east-west(x), 8=north-south(z)
+                            uint8_t logType = static_cast<uint8_t>(itemDamage & 0x03);
+                            if (face == 0 || face == 1)
+                                orientMeta = logType | 0x00; // y-axis
+                            else if (face == 4 || face == 5)
+                                orientMeta = logType | 0x04; // x-axis
+                            else
+                                orientMeta = logType | 0x08; // z-axis
+                        }
+                        else
+                        {
+                            // Default: use facing5 for directional blocks (furnace, dispenser, etc.)
+                            // or fall back to raw itemDamage metadata for non-directional blocks
+                            bool isDirectional = (blockId == 23  || // dispenser
+                                                  blockId == 26  || // bed
+                                                  blockId == 29  || // sticky piston
+                                                  blockId == 33  || // piston
+                                                  blockId == 54  || // chest
+                                                  blockId == 58  || // crafting table (no facing)
+                                                  blockId == 61  || // furnace (off)
+                                                  blockId == 62  || // furnace (on)
+                                                  blockId == 130 || // ender chest
+                                                  blockId == 146 || // trapped chest
+                                                  blockId == 154 || // hopper
+                                                  blockId == 158);  // dropper
+                            if (isDirectional && face > 1)
+                                orientMeta = facing5;
+                            else
+                                orientMeta = static_cast<uint8_t>(itemDamage & 0x0F);
+                        }
+
                         int chunkX = Packet::floorDiv(x, 16);
                         int chunkZ = Packet::floorDiv(z, 16);
                         int relX = Packet::floorMod(x, 16);
                         int relZ = Packet::floorMod(z, 16);
 
-                        auto translatedBlock = Protocol::ProtocolTranslator::translateBlockFromClient(47, static_cast<uint16_t>(itemSlot), static_cast<uint8_t>(itemDamage & 0x0F));
+                        auto translatedBlock = Protocol::ProtocolTranslator::translateBlockFromClient(
+                            47, static_cast<uint16_t>(itemSlot), orientMeta);
                         uint16_t blockData = translatedBlock.toCombinedData();
 
                         m_worldStorage.saveBlockChange(chunkX, chunkZ, relX, y, relZ, blockData);
 
+                        // Broadcast Block Change (0x23) to all players
                         std::vector<uint8_t> blockChange;
                         uint64_t posEnc = ((static_cast<uint64_t>(x) & 0x3FFFFFF) << 38) |
                                           ((static_cast<uint64_t>(y) & 0xFFF) << 26) |
@@ -725,8 +880,106 @@ namespace LightweightMC::Network
                         Packet::writeVarInt(blockChange, blockData);
 
                         broadcastPacket(0x23, blockChange);
+
+                        // ------------------------------------
+                        // Open container GUI if block is a known container type
+                        // ------------------------------------
+                        uint8_t pureBlockId = static_cast<uint8_t>(blockId);
+                        struct ContainerDef
+                        {
+                            const char *type;
+                            const char *title;
+                            uint8_t slots;
+                        };
+
+                        // Check if this block is a container and get its definition
+                        ContainerDef container{"", "", 0};
+                        bool isContainer = false;
+
+                        if (pureBlockId == 54 || pureBlockId == 146) // chest / trapped chest
+                        {
+                            container = {"minecraft:chest", "Chest", 27};
+                            isContainer = true;
+                        }
+                        else if (pureBlockId == 61 || pureBlockId == 62) // furnace
+                        {
+                            container = {"minecraft:furnace", "Furnace", 3};
+                            isContainer = true;
+                        }
+                        else if (pureBlockId == 23) // dispenser
+                        {
+                            container = {"minecraft:dispenser", "Dispenser", 9};
+                            isContainer = true;
+                        }
+                        else if (pureBlockId == 158) // dropper
+                        {
+                            container = {"minecraft:dropper", "Dropper", 9};
+                            isContainer = true;
+                        }
+                        else if (pureBlockId == 154) // hopper
+                        {
+                            container = {"minecraft:hopper", "Hopper", 5};
+                            isContainer = true;
+                        }
+                        else if (pureBlockId == 117) // brewing stand
+                        {
+                            container = {"minecraft:brewing_stand", "Brewing Stand", 4};
+                            isContainer = true;
+                        }
+                        else if (pureBlockId == 116) // enchanting table
+                        {
+                            container = {"minecraft:enchanting_table", "Enchantment Table", 2};
+                            isContainer = true;
+                        }
+                        else if (pureBlockId == 145) // anvil
+                        {
+                            container = {"minecraft:anvil", "Repair & Name", 3};
+                            isContainer = true;
+                        }
+
+                        if (isContainer)
+                        {
+                            // Assign a window ID (1-100, wrap around)
+                            session.openWindowId = (session.openWindowId % 100) + 1;
+                            uint8_t winId = session.openWindowId;
+
+                            // Build title JSON
+                            std::string titleJson = "{\"text\":\"" + std::string(container.title) + "\"}";
+
+                            // Send Open Window packet (0x2D)
+                            std::vector<uint8_t> openWin;
+                            openWin.push_back(winId);
+                            // Inventory type string (VarInt length-prefixed)
+                            std::string invType = container.type;
+                            Packet::writeVarInt(openWin, static_cast<int32_t>(invType.size()));
+                            openWin.insert(openWin.end(), invType.begin(), invType.end());
+                            // Title JSON (VarInt length-prefixed)
+                            Packet::writeVarInt(openWin, static_cast<int32_t>(titleJson.size()));
+                            openWin.insert(openWin.end(), titleJson.begin(), titleJson.end());
+                            // Number of slots
+                            openWin.push_back(container.slots);
+                            // Entity ID (only for horses; 0 otherwise)
+                            Packet::writeInt(openWin, 0);
+Core::Logger::info("[DEBUG] Sending 0x2D: WinID=" + std::to_string(winId) + ", Title=" + container.title);
+                            sendPacket(clientFd, 0x2D, openWin);
+
+                            // Send Window Items (0x30) with empty slots for the container
+                            // (container inventory not yet persistent; filled with empty stacks)
+                            std::vector<uint8_t> winItems;
+                            winItems.push_back(winId);
+                            Packet::writeShort(winItems, static_cast<int16_t>(container.slots));
+                            for (int s = 0; s < container.slots; ++s)
+                                Packet::writeShort(winItems, -1); // empty slot
+Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", Slots=" + std::to_string(container.slots));
+                            sendPacket(clientFd, 0x30, winItems);
+
+                            Core::Logger::info("[Container] Opened " + std::string(container.title) +
+                                               " for player " + session.username +
+                                               " (windowId=" + std::to_string(winId) + ")");
+                        }
                     }
                 }
+
                 else if (packetId == 0x09) // Held Item Change
                 {
                     int16_t slot = Packet::readShort(data, offset);

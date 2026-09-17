@@ -68,7 +68,7 @@ class TeleportCommand : public Command
 public:
     std::string getName() const override { return "tp"; }
     std::string getDescription() const override { return "Teleports a player to another player or coordinates."; }
-    std::string getUsage() const override { return "/tp <player> <target> OU /tp [player] <x> <y> <z>"; }
+    std::string getUsage() const override { return "/tp <player> <target> OR /tp [player] <x> <y> <z>"; }
     int getRequiredOpLevel() const override { return 2; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
@@ -319,7 +319,7 @@ class KickCommand : public Command
 {
 public:
     std::string getName() const override { return "kick"; }
-    std::string getDescription() const override { return "Kicks a player from the server.r.r."; }
+    std::string getDescription() const override { return "Kicks a player from the server."; }
     std::string getUsage() const override { return "/kick <player> [reason]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
@@ -518,7 +518,7 @@ public:
         if (args[0] == "Entity" && args.size() >= 2 && args[1] == "List")
         {
             // TODO: List loaded entities
-            ctx.reply("Entites chargees : 0");
+            ctx.reply("Loaded entities: 0");
         }
         else if (args[0] == "Track" && args.size() >= 2)
         {
@@ -696,7 +696,7 @@ public:
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Timeout d'inactivite definit a " + args[0] + " Minutes.");
+        ctx.reply("Idle timeout set to " + args[0] + " minute(s).");
     }
 };
 
@@ -901,7 +901,7 @@ public:
 };
 
 // ==========================================
-// ---Monde, Blocs & Chunks
+// ---World, Blocks & Chunks
 // ==========================================
 
 class CloneCommand : public Command
@@ -1388,12 +1388,12 @@ public:
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Scoreboard mis a jour.");
+        ctx.reply("Scoreboard updated.");
     }
 };
 
 // ==========================================
-// ---Execution, Scripts & Fonctions
+// ---Execution, Scripts & Functions
 // ==========================================
 
 class ExecuteCommand : public Command
@@ -1432,7 +1432,7 @@ public:
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Fonction executee.");
+        ctx.reply("Function executed.");
     }
 };
 
