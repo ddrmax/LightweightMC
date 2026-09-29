@@ -5,6 +5,11 @@
 #include <vector>
 #include <cstdint>
 
+namespace LightweightMC::Network::Protocol
+{
+    class EraAdapter; // Forward declaration (defined in network/protocol/EraAdapter.hpp)
+}
+
 namespace LightweightMC::Player
 {
     enum class ClientState
@@ -56,6 +61,12 @@ namespace LightweightMC::Player
 
         std::vector<uint8_t> rxBuffer{};
         std::vector<uint8_t> sendBuffer{};
+
+        // Multi-version protocol support: the era adapter chosen during handshake.
+        // Non-null once the client has sent a Handshake packet. Callers do not own
+        // the pointer (adapters are process-lifetime singletons from EraAdapter::create).
+        Network::Protocol::EraAdapter *adapter{nullptr};
+        int32_t clientProtocol{47}; // Protocol number reported by the client in the handshake.
     };
 }
 using LightweightMC::Player::ChunkPos;

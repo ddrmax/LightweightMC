@@ -8,6 +8,8 @@
 #include "managers/ScoreboardManager.hpp"
 #include "managers/PlayerManager.hpp"
 #include "network/protocol/ProtocolTranslator.hpp"
+#include "network/protocol/EraAdapter.hpp"
+#include "network/protocol/ProtocolVersion.hpp"
 
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -52,8 +54,21 @@ namespace LightweightMC::Network
 
         LightweightMC::Player::PlayerSession &session = it->second;
 
+        // Route the packet ID through this session's era adapter so multi-version
+        // clients each get the correct wire ID. The literal IDs used throughout the
+        // codebase are 1.8 wire IDs, so we look them up by (era, 1.8 wire ID) via the
+        // generated reverse tables. Unmapped IDs (-1), or pre-handshake sessions with no
+        // adapter yet, pass through unchanged.
+        int32_t wireId = packetId;
+        if (session.adapter != nullptr)
+        {
+            const int32_t mapped = Protocol::ProtocolVersion::s2cWireIdFromLegacy(session.adapter->era(), packetId);
+            if (mapped >= 0)
+                wireId = mapped;
+        }
+
         std::vector<uint8_t> body;
-        Packet::writeVarInt(body, packetId);
+        Packet::writeVarInt(body, wireId);
         body.insert(body.end(), payload.begin(), payload.end());
 
         std::vector<uint8_t> frame;
@@ -83,7 +98,26 @@ namespace LightweightMC::Network
             Core::Logger::error("Failed to initialize SQLite player database.");
             return false;
         }
-        m_worldStorage.pregenerateWorld(200);
+
+        // Select the world generation preset from server.properties ([world] gen-style)
+        const std::string genStyle = ConfigManager::getInstance().getString("world", "gen-style", "overworld");
+        if (genStyle == "superflat")
+        {
+            m_worldStorage.setGenerationStyle(Storage::GenStyle::SUPERFLAT);
+            Core::Logger::info("World generation style: superflat (" + ConfigManager::getInstance().getString("world", "superflat-preset", "minecraft:flat") + ")");
+        }
+        else if (genStyle == "overworld")
+        {
+            m_worldStorage.setGenerationStyle(Storage::GenStyle::OVERWORLD);
+            Core::Logger::info("World generation style: overworld (1 bedrock / 59 stone / 3 dirt / 1 grass)");
+        }
+        else
+        {
+            Core::Logger::warn("[NetworkManager] Unknown gen-style '" + genStyle + "', falling back to 'overworld'");
+            m_worldStorage.setGenerationStyle(Storage::GenStyle::OVERWORLD);
+        }
+
+        m_worldStorage.pregenerateWorld(20);
         m_serverFd = socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;
         setsockopt(m_serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -154,11 +188,13 @@ namespace LightweightMC::Network
         }
         session.rxBuffer.insert(session.rxBuffer.end(), buf, buf + bytes);
 
-        auto packetSender = [this](int f, int32_t p, const std::vector<uint8_t> &b) {
+        auto packetSender = [this](int f, int32_t p, const std::vector<uint8_t> &b)
+        {
             sendPacket(f, p, b);
         };
 
-        auto broadcastSender = [this](int32_t p, const std::vector<uint8_t> &b, int i) {
+        auto broadcastSender = [this](int32_t p, const std::vector<uint8_t> &b, int i)
+        {
             broadcastPacket(p, b, i);
         };
 
@@ -177,19 +213,57 @@ namespace LightweightMC::Network
             size_t dataStart = offset;
             const uint8_t *data = session.rxBuffer.data();
 
+            // Bounds-checked read helpers live in Packet (see Packet::read*Bounded).
+            // Every field of a client packet is validated against `packetEnd` so that
+            // malformed or truncated data can never make Packet::read* walk past the
+            // buffer (stack/heap corruption).
+            const size_t packetEnd = dataStart + static_cast<size_t>(packetLen);
+
             int32_t packetId = Packet::readVarInt(data, offset);
 
             if (session.state == ClientState::HANDSHAKE)
             {
                 if (packetId == 0x00)
                 {
-                    int32_t protoVersion = Packet::readVarInt(data, offset);
-                    (void)protoVersion;
-                    std::string host = Packet::readString(data, offset);
+                    int32_t protoVersion = Packet::readVarIntBounded(data, offset, packetEnd, 1);
+                    std::string host = Packet::readStringBounded(data, offset, packetEnd);
                     uint16_t port = (data[offset] << 8) | data[offset + 1];
+                    if (offset + 2 <= packetEnd)
+                        offset += 2;
                     (void)port;
-                    offset += 2;
-                    int32_t nextState = Packet::readVarInt(data, offset);
+                    int32_t nextState = Packet::readVarIntBounded(data, offset, packetEnd, 1);
+
+                    // Multi-version support: record the client's protocol number and
+                    // bind it to the era adapter for that version. The adapter is a
+                    // process-lifetime singleton (see EraAdapter::create), so the
+                    // pointer is never freed while the session lives. A malformed
+                    // handshake (protoVersion == -1) keeps the default 47/1.8 era.
+                    if (protoVersion >= 0)
+                        session.clientProtocol = protoVersion;
+                    session.adapter = Protocol::EraAdapter::create(session.clientProtocol);
+
+                    std::string ipPort = Core::getIpAndPortFromFd(clientFd);
+                    Core::Logger::info("[NET] Handshake from " + ipPort + " protocol=" + std::to_string(session.clientProtocol) +
+                                       (session.adapter ? "" : " [UNSUPPORTED ERA - legacy handlers only]"));
+
+                    const Protocol::ProtocolVersionInfo *versionInfo =
+                        Protocol::ProtocolVersion::resolve(session.clientProtocol);
+                    if (versionInfo)
+                    {
+                        Core::Logger::info("Handshake from " + ipPort +
+                                           " protocol=" + std::to_string(protoVersion) +
+                                           " (" + versionInfo->version + ", era=" +
+                                           Protocol::eraName(versionInfo->era) + ")");
+                    }
+                    else
+                    {
+                        const Protocol::ProtocolVersionInfo *nearest =
+                            Protocol::ProtocolVersion::nearestSupported(protoVersion);
+                        Core::Logger::info("Handshake from " + ipPort +
+                                           " protocol=" + std::to_string(protoVersion) +
+                                           " (unsupported; nearest supported: " +
+                                           (nearest ? std::string(nearest->version) : std::string("?")) + ")");
+                    }
 
                     if (nextState == 1)
                         session.state = ClientState::STATUS;
@@ -210,7 +284,7 @@ namespace LightweightMC::Network
 
                     std::string motd = SECTION "2" SECTION "n" SECTION "l" SECTION "o"
                                                "LightweightMC C++ Engine " SECTION "c" SECTION "n" SECTION "l" SECTION "o"
-                                               "V0.0.4" SECTION "r";
+                                               "V0.0.5" SECTION "r";
 
                     double currentTps = 20.0;
                     double currentRam = LightweightMC::Core::getProcessRAM();
@@ -226,12 +300,12 @@ namespace LightweightMC::Network
                                  "id" : "00000000-0000-0000-0000-000000000000"
                   },
                   {"name" : ")" SECTION "eTPS: " SECTION "f" +
-                                              tpsStr + R"( )" SECTION "7| " SECTION "eRAM: " SECTION "f" + ramStr + R"( MB",
+                                             tpsStr + R"( )" SECTION "7| " SECTION "eRAM: " SECTION "f" + ramStr + R"( MB",
           "id": "00000000-0000-0000-0000-000000000001"
       },
       {
           "name": ")" SECTION "7Online players: " SECTION "b" +
-                                              std::to_string(onlinePlayers) + R"(",
+                                             std::to_string(onlinePlayers) + R"(",
           "id": "00000000-0000-0000-0000-000000000002"
       }
   ])";
@@ -239,7 +313,8 @@ namespace LightweightMC::Network
                     std::string statusJson = R"({
     "version": {
         "name": "LightweightMC 1.8",
-        "protocol": 47
+        "protocol": )" + std::to_string(session.clientProtocol) +
+                                             R"(
     },
     "players": {
         "max": 100,
@@ -253,6 +328,7 @@ namespace LightweightMC::Network
 })";
                     std::vector<uint8_t> payload;
                     Packet::writeString(payload, statusJson);
+                    Core::Logger::info("Sent Server version " + std::to_string(session.clientProtocol) + " to client.");
                     sendPacket(clientFd, 0x00, payload);
                 }
                 else if (packetId == 0x01)
@@ -268,7 +344,7 @@ namespace LightweightMC::Network
             {
                 if (packetId == 0x00)
                 {
-                    session.username = Packet::readString(data, offset);
+                    session.username = Packet::readStringBounded(data, offset, packetEnd);
                     Core::Logger::info("Login Start received for: " + session.username);
 
                     std::string playerUuid = Player::PlayerManager::getPlayerUuid(session.username);
@@ -285,13 +361,14 @@ namespace LightweightMC::Network
             {
                 if (packetId == 0x00)
                 { // Keep Alive
-                    size_t payloadSize = packetLen - (offset - dataStart);
-                    std::vector<uint8_t> payload(data + offset, data + offset + payloadSize);
+                    int32_t id = Packet::readVarIntBounded(data, offset, packetEnd, 1);
+                    std::vector<uint8_t> payload;
+                    Packet::writeVarInt(payload, id);
                     sendPacket(clientFd, 0x00, payload);
                 }
                 else if (packetId == 0x01) // Chat Message
                 {
-                    std::string message = Packet::readString(data, offset);
+                    std::string message = Packet::readStringBounded(data, offset, packetEnd);
 
                     if (!message.empty() && message[0] == '/')
                     {
@@ -605,9 +682,9 @@ namespace LightweightMC::Network
                 }
                 else if (packetId == 0x04 || packetId == 0x06) // Player Position & Look
                 {
-                    session.x = Packet::readDouble(data, offset);
-                    session.y = Packet::readDouble(data, offset);
-                    session.z = Packet::readDouble(data, offset);
+                    session.x = Packet::readDoubleBounded(data, offset, packetEnd);
+                    session.y = Packet::readDoubleBounded(data, offset, packetEnd);
+                    session.z = Packet::readDoubleBounded(data, offset, packetEnd);
 
                     std::vector<uint8_t> teleport;
                     Packet::writeVarInt(teleport, clientFd);
@@ -628,23 +705,27 @@ namespace LightweightMC::Network
 
                     broadcastPacket(0x18, teleport, clientFd);
                 }
-              else if (packetId == 0x07) // Player Digging
+                else if (packetId == 0x07) // Player Digging
                 {
-                    int32_t status = Packet::readVarInt(data, offset);
+                    int32_t status = Packet::readVarIntBounded(data, offset, packetEnd, 1);
 
-                    uint64_t val = Packet::readUInt64(data, offset);
+                    uint64_t val = Packet::readUInt64Bounded(data, offset, packetEnd);
                     int32_t x = static_cast<int32_t>(val >> 38);
-                    int32_t y = static_cast<int32_t>((val >> 26) & 0xFFF);
+                    // 1.7.10 sends y as a plain signed value in the 12-bit field; 1.8+ packs it so
+                    // that values >= 2048 are negative (supports the full -64..319 world range).
+                    int32_t y = (session.clientProtocol >= 47)
+                                    ? Packet::decodeModernY(val)
+                                    : static_cast<int32_t>((val >> 26) & 0xFFF);
                     int32_t z = static_cast<int32_t>(val << 38 >> 38);
 
                     if (x >= (1 << 25))
                         x -= (1 << 26);
-                    if (y >= (1 << 11))
+                    if (session.clientProtocol < 47 && y >= (1 << 11))
                         y -= (1 << 12);
                     if (z >= (1 << 25))
                         z -= (1 << 26);
 
-                    uint8_t face = data[offset++];
+                    uint8_t face = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
                     (void)face;
 
                     if (status == 0 || status == 2)
@@ -671,35 +752,43 @@ namespace LightweightMC::Network
                 }
                 else if (packetId == 0x08) // Block Placement
                 {
-                    uint64_t val = Packet::readUInt64(data, offset);
+                    Core::Logger::info("Block Placement Packet");
+                    uint64_t val = Packet::readUInt64Bounded(data, offset, packetEnd);
                     int32_t x = static_cast<int32_t>(val >> 38);
-                    int32_t y = static_cast<int32_t>((val >> 26) & 0xFFF);
+                    // 1.7.10 sends y as a plain signed value in the 12-bit field; 1.8+ packs it so
+                    // that values >= 2048 are negative (supports the full -64..319 world range).
+                    int32_t y = (session.clientProtocol >= 47)
+                                    ? Packet::decodeModernY(val)
+                                    : static_cast<int32_t>((val >> 26) & 0xFFF);
                     int32_t z = static_cast<int32_t>(val << 38 >> 38);
 
                     if (x >= (1 << 25))
                         x -= (1 << 26);
-                    if (y >= (1 << 11))
+                    if (session.clientProtocol < 47 && y >= (1 << 11))
                         y -= (1 << 12);
                     if (z >= (1 << 25))
                         z -= (1 << 26);
 
-                    uint8_t face = data[offset++];
-                    int16_t itemSlot = Packet::readShort(data, offset);
+                    uint8_t face = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
+                    int16_t itemSlot = Packet::readShortBounded(data, offset, packetEnd);
 
                     if (itemSlot > 0 && itemSlot < 256)
                     {
-                        uint8_t itemCount = data[offset++];
+
+                        uint8_t itemCount = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
                         (void)itemCount;
-                        int16_t itemDamage = Packet::readShort(data, offset);
+                        int16_t itemDamage = Packet::readShortBounded(data, offset, packetEnd);
 
                         // Read cursor position on the clicked face (0-15 each byte)
                         uint8_t cursorX = 0, cursorY = 0, cursorZ = 0;
-                        if (offset + 2 < static_cast<size_t>(dataStart + packetLen))
+                        if (offset + 3 <= packetEnd)
                         {
                             cursorX = data[offset++];
                             cursorY = data[offset++];
                             cursorZ = data[offset++];
                         }
+                        (void)cursorX; // consumed to keep the read offset aligned
+                        (void)cursorZ; // consumed to keep the read offset aligned
 
                         // Adjust target position based on face clicked
                         if (face == 0)
@@ -724,8 +813,10 @@ namespace LightweightMC::Network
 
                         // Normalise yaw to [0, 360)
                         float yaw = session.yaw;
-                        while (yaw < 0.0f)   yaw += 360.0f;
-                        while (yaw >= 360.0f) yaw -= 360.0f;
+                        while (yaw < 0.0f)
+                            yaw += 360.0f;
+                        while (yaw >= 360.0f)
+                            yaw -= 360.0f;
 
                         // 4-way horizontal direction from yaw:
                         //  0 = south (yaw 315-360 or 0-44)  → meta 3 for stairs
@@ -747,18 +838,28 @@ namespace LightweightMC::Network
                         uint8_t facing5 = 3; // default south
                         switch (yawDir4)
                         {
-                        case 0: facing5 = 3; break; // south
-                        case 1: facing5 = 4; break; // west
-                        case 2: facing5 = 2; break; // north
-                        case 3: facing5 = 5; break; // east
+                        case 0:
+                            facing5 = 3;
+                            break; // south
+                        case 1:
+                            facing5 = 4;
+                            break; // west
+                        case 2:
+                            facing5 = 2;
+                            break; // north
+                        case 3:
+                            facing5 = 5;
+                            break; // east
                         }
                         // Override with face for vertical blocks (top/bottom)
-                        if (face == 0) facing5 = 0; // down
-                        if (face == 1) facing5 = 1; // up
+                        if (face == 0)
+                            facing5 = 0; // down
+                        if (face == 1)
+                            facing5 = 1; // up
 
                         // --- Determine block-specific orientation metadata ---
-                        bool isStairs = (blockId == 53  || // oak stairs
-                                         blockId == 67  || // cobblestone stairs
+                        bool isStairs = (blockId == 53 ||  // oak stairs
+                                         blockId == 67 ||  // cobblestone stairs
                                          blockId == 108 || // brick stairs
                                          blockId == 109 || // stone brick stairs
                                          blockId == 114 || // nether brick stairs
@@ -781,10 +882,18 @@ namespace LightweightMC::Network
                             // Updated mapping for standard orientation:
                             switch (yawDir4)
                             {
-                            case 0: orientMeta = 2; break; // South
-                            case 1: orientMeta = 1; break; // West
-                            case 2: orientMeta = 3; break; // North
-                            case 3: orientMeta = 0; break; // East
+                            case 0:
+                                orientMeta = 2;
+                                break; // South
+                            case 1:
+                                orientMeta = 1;
+                                break; // West
+                            case 2:
+                                orientMeta = 3;
+                                break; // North
+                            case 3:
+                                orientMeta = 0;
+                                break; // East
                             }
                             // Upside-down if clicked on top half of bottom face or placed on ceiling
                             bool upsideDown = (face == 0) || (face == 1 && cursorY > 8);
@@ -817,12 +926,24 @@ namespace LightweightMC::Network
                             // face 0=ceiling(5), 1=floor(0), 2=north(4), 3=south(3), 4=west(2), 5=east(1)
                             switch (face)
                             {
-                            case 0: orientMeta = 5; break;
-                            case 1: orientMeta = 0; break;
-                            case 2: orientMeta = 4; break;
-                            case 3: orientMeta = 3; break;
-                            case 4: orientMeta = 2; break;
-                            case 5: orientMeta = 1; break;
+                            case 0:
+                                orientMeta = 5;
+                                break;
+                            case 1:
+                                orientMeta = 0;
+                                break;
+                            case 2:
+                                orientMeta = 4;
+                                break;
+                            case 3:
+                                orientMeta = 3;
+                                break;
+                            case 4:
+                                orientMeta = 2;
+                                break;
+                            case 5:
+                                orientMeta = 1;
+                                break;
                             }
                         }
                         else if (isLog)
@@ -840,14 +961,14 @@ namespace LightweightMC::Network
                         {
                             // Default: use facing5 for directional blocks (furnace, dispenser, etc.)
                             // or fall back to raw itemDamage metadata for non-directional blocks
-                            bool isDirectional = (blockId == 23  || // dispenser
-                                                  blockId == 26  || // bed
-                                                  blockId == 29  || // sticky piston
-                                                  blockId == 33  || // piston
-                                                  blockId == 54  || // chest
-                                                  blockId == 58  || // crafting table (no facing)
-                                                  blockId == 61  || // furnace (off)
-                                                  blockId == 62  || // furnace (on)
+                            bool isDirectional = (blockId == 23 ||  // dispenser
+                                                  blockId == 26 ||  // bed
+                                                  blockId == 29 ||  // sticky piston
+                                                  blockId == 33 ||  // piston
+                                                  blockId == 54 ||  // chest
+                                                  blockId == 58 ||  // crafting table (no facing)
+                                                  blockId == 61 ||  // furnace (off)
+                                                  blockId == 62 ||  // furnace (on)
                                                   blockId == 130 || // ender chest
                                                   blockId == 146 || // trapped chest
                                                   blockId == 154 || // hopper
@@ -862,135 +983,158 @@ namespace LightweightMC::Network
                         int chunkZ = Packet::floorDiv(z, 16);
                         int relX = Packet::floorMod(x, 16);
                         int relZ = Packet::floorMod(z, 16);
+                        uint16_t existingBlockData = m_worldStorage.getBlockAt(chunkX, chunkZ, relX, y, relZ);
+                        uint16_t existingBlockId = existingBlockData >> 4;
 
-                        auto translatedBlock = Protocol::ProtocolTranslator::translateBlockFromClient(
-                            47, static_cast<uint16_t>(itemSlot), orientMeta);
-                        uint16_t blockData = translatedBlock.toCombinedData();
+                        // List of interactive block IDs opening a GUI window
+                        bool isInteractive = (existingBlockId == 54 ||  // Chest
+                                              existingBlockId == 61 ||  // Furnace (off)
+                                              existingBlockId == 62 ||  // Furnace (on)
+                                              existingBlockId == 58 ||  // Crafting Table
+                                              existingBlockId == 23 ||  // Dispenser
+                                              existingBlockId == 145 || // Anvil
+                                              existingBlockId == 146 || // Trapped Chest
+                                              existingBlockId == 154 || // Hopper
+                                              existingBlockId == 158 || // Dropper
+                                              existingBlockId == 130);  // Ender Chest
+                        Core::Logger::info("Existing Bloc " + std::to_string(existingBlockId));
+                        // Player interacted with an inventory block (without sneaking)
 
-                        m_worldStorage.saveBlockChange(chunkX, chunkZ, relX, y, relZ, blockData);
-
-                        // Broadcast Block Change (0x23) to all players
-                        std::vector<uint8_t> blockChange;
-                        uint64_t posEnc = ((static_cast<uint64_t>(x) & 0x3FFFFFF) << 38) |
-                                          ((static_cast<uint64_t>(y) & 0xFFF) << 26) |
-                                          (static_cast<uint64_t>(z) & 0x3FFFFFF);
-
-                        for (int i = 7; i >= 0; --i)
-                            blockChange.push_back((posEnc >> (i * 8)) & 0xFF);
-                        Packet::writeVarInt(blockChange, blockData);
-
-                        broadcastPacket(0x23, blockChange);
-
-                        // ------------------------------------
-                        // Open container GUI if block is a known container type
-                        // ------------------------------------
-                        uint8_t pureBlockId = static_cast<uint8_t>(blockId);
-                        struct ContainerDef
+                        if (!isInteractive /*&& face != 255*/)
                         {
-                            const char *type;
-                            const char *title;
-                            uint8_t slots;
-                        };
+                            Core::Logger::info("Placement Bloc");
+                            auto translatedBlock = Protocol::ProtocolTranslator::translateBlockFromClient(
+                                session.clientProtocol, static_cast<uint16_t>(itemSlot), orientMeta);
+                            uint16_t blockData = translatedBlock.toCombinedData();
 
-                        // Check if this block is a container and get its definition
-                        ContainerDef container{"", "", 0};
-                        bool isContainer = false;
+                            m_worldStorage.saveBlockChange(chunkX, chunkZ, relX, y, relZ, blockData);
 
-                        if (pureBlockId == 54 || pureBlockId == 146) // chest / trapped chest
-                        {
-                            container = {"minecraft:chest", "Chest", 27};
-                            isContainer = true;
+                            // Broadcast Block Change (0x23) to all players
+                            std::vector<uint8_t> blockChange;
+                            uint64_t posEnc = ((static_cast<uint64_t>(x) & 0x3FFFFFF) << 38) |
+                                              ((static_cast<uint64_t>(y) & 0xFFF) << 26) |
+                                              (static_cast<uint64_t>(z) & 0x3FFFFFF);
+
+                            for (int i = 7; i >= 0; --i)
+                                blockChange.push_back((posEnc >> (i * 8)) & 0xFF);
+                            Packet::writeVarInt(blockChange, blockData);
+
+                            broadcastPacket(0x23, blockChange);
                         }
-                        else if (pureBlockId == 61 || pureBlockId == 62) // furnace
+                        else
                         {
-                            container = {"minecraft:furnace", "Furnace", 3};
-                            isContainer = true;
-                        }
-                        else if (pureBlockId == 23) // dispenser
-                        {
-                            container = {"minecraft:dispenser", "Dispenser", 9};
-                            isContainer = true;
-                        }
-                        else if (pureBlockId == 158) // dropper
-                        {
-                            container = {"minecraft:dropper", "Dropper", 9};
-                            isContainer = true;
-                        }
-                        else if (pureBlockId == 154) // hopper
-                        {
-                            container = {"minecraft:hopper", "Hopper", 5};
-                            isContainer = true;
-                        }
-                        else if (pureBlockId == 117) // brewing stand
-                        {
-                            container = {"minecraft:brewing_stand", "Brewing Stand", 4};
-                            isContainer = true;
-                        }
-                        else if (pureBlockId == 116) // enchanting table
-                        {
-                            container = {"minecraft:enchanting_table", "Enchantment Table", 2};
-                            isContainer = true;
-                        }
-                        else if (pureBlockId == 145) // anvil
-                        {
-                            container = {"minecraft:anvil", "Repair & Name", 3};
-                            isContainer = true;
-                        }
+                            Core::Logger::info("Interraction Bloc");
+                            // ------------------------------------
+                            // Open container GUI if block is a known container type
+                            // ------------------------------------
+                            uint8_t pureBlockId = static_cast<uint8_t>(blockId);
+                            struct ContainerDef
+                            {
+                                const char *type;
+                                const char *title;
+                                uint8_t slots;
+                            };
 
-                        if (isContainer)
-                        {
-                            // Assign a window ID (1-100, wrap around)
-                            session.openWindowId = (session.openWindowId % 100) + 1;
-                            uint8_t winId = session.openWindowId;
+                            // Check if this block is a container and get its definition
+                            ContainerDef container{"", "", 0};
+                            bool isContainer = false;
 
-                            // Build title JSON
-                            std::string titleJson = "{\"text\":\"" + std::string(container.title) + "\"}";
+                            if (pureBlockId == 54 || pureBlockId == 146) // chest / trapped chest
+                            {
+                                container = {"minecraft:chest", "Chest", 27};
+                                isContainer = true;
+                            }
+                            else if (pureBlockId == 61 || pureBlockId == 62) // furnace
+                            {
+                                container = {"minecraft:furnace", "Furnace", 3};
+                                isContainer = true;
+                            }
+                            else if (pureBlockId == 23) // dispenser
+                            {
+                                container = {"minecraft:dispenser", "Dispenser", 9};
+                                isContainer = true;
+                            }
+                            else if (pureBlockId == 158) // dropper
+                            {
+                                container = {"minecraft:dropper", "Dropper", 9};
+                                isContainer = true;
+                            }
+                            else if (pureBlockId == 154) // hopper
+                            {
+                                container = {"minecraft:hopper", "Hopper", 5};
+                                isContainer = true;
+                            }
+                            else if (pureBlockId == 117) // brewing stand
+                            {
+                                container = {"minecraft:brewing_stand", "Brewing Stand", 4};
+                                isContainer = true;
+                            }
+                            else if (pureBlockId == 116) // enchanting table
+                            {
+                                container = {"minecraft:enchanting_table", "Enchantment Table", 2};
+                                isContainer = true;
+                            }
+                            else if (pureBlockId == 145) // anvil
+                            {
+                                container = {"minecraft:anvil", "Repair & Name", 3};
+                                isContainer = true;
+                            }
 
-                            // Send Open Window packet (0x2D)
-                            std::vector<uint8_t> openWin;
-                            openWin.push_back(winId);
-                            // Inventory type string (VarInt length-prefixed)
-                            std::string invType = container.type;
-                            Packet::writeVarInt(openWin, static_cast<int32_t>(invType.size()));
-                            openWin.insert(openWin.end(), invType.begin(), invType.end());
-                            // Title JSON (VarInt length-prefixed)
-                            Packet::writeVarInt(openWin, static_cast<int32_t>(titleJson.size()));
-                            openWin.insert(openWin.end(), titleJson.begin(), titleJson.end());
-                            // Number of slots
-                            openWin.push_back(container.slots);
-                            // Entity ID (only for horses; 0 otherwise)
-                            Packet::writeInt(openWin, 0);
-Core::Logger::info("[DEBUG] Sending 0x2D: WinID=" + std::to_string(winId) + ", Title=" + container.title);
-                            sendPacket(clientFd, 0x2D, openWin);
+                            if (isContainer)
+                            {
+                                // Assign a window ID (1-100, wrap around)
+                                session.openWindowId = (session.openWindowId % 100) + 1;
+                                uint8_t winId = session.openWindowId;
 
-                            // Send Window Items (0x30) with empty slots for the container
-                            // (container inventory not yet persistent; filled with empty stacks)
-                            std::vector<uint8_t> winItems;
-                            winItems.push_back(winId);
-                            Packet::writeShort(winItems, static_cast<int16_t>(container.slots));
-                            for (int s = 0; s < container.slots; ++s)
-                                Packet::writeShort(winItems, -1); // empty slot
-Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", Slots=" + std::to_string(container.slots));
-                            sendPacket(clientFd, 0x30, winItems);
+                                // Build title JSON
+                                std::string titleJson = "{\"text\":\"" + std::string(container.title) + "\"}";
 
-                            Core::Logger::info("[Container] Opened " + std::string(container.title) +
-                                               " for player " + session.username +
-                                               " (windowId=" + std::to_string(winId) + ")");
+                                // Send Open Window packet (0x2D)
+                                std::vector<uint8_t> openWin;
+                                openWin.push_back(winId);
+                                // Inventory type string (VarInt length-prefixed)
+                                std::string invType = container.type;
+                                Packet::writeVarInt(openWin, static_cast<int32_t>(invType.size()));
+                                openWin.insert(openWin.end(), invType.begin(), invType.end());
+                                // Title JSON (VarInt length-prefixed)
+                                Packet::writeVarInt(openWin, static_cast<int32_t>(titleJson.size()));
+                                openWin.insert(openWin.end(), titleJson.begin(), titleJson.end());
+                                // Number of slots
+                                openWin.push_back(container.slots);
+                                // Entity ID (only for horses; 0 otherwise)
+                                Packet::writeInt(openWin, 0);
+                                Core::Logger::info("[DEBUG] Sending 0x2D: WinID=" + std::to_string(winId) + ", Title=" + container.title);
+                                // sendPacket(clientFd, 0x2D, openWin);
+
+                                // Send Window Items (0x30) with empty slots for the container
+                                // (container inventory not yet persistent; filled with empty stacks)
+                                std::vector<uint8_t> winItems;
+                                winItems.push_back(winId);
+                                Packet::writeShort(winItems, static_cast<int16_t>(container.slots));
+                                for (int s = 0; s < container.slots; ++s)
+                                    Packet::writeShort(winItems, -1); // empty slot
+                                Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", Slots=" + std::to_string(container.slots));
+                                // sendPacket(clientFd, 0x30, winItems);
+
+                                Core::Logger::info("[Container] Opened " + std::string(container.title) +
+                                                   " for player " + session.username +
+                                                   " (windowId=" + std::to_string(winId) + ")");
+                            }
                         }
                     }
                 }
 
                 else if (packetId == 0x09) // Held Item Change
                 {
-                    int16_t slot = Packet::readShort(data, offset);
+                    int16_t slot = Packet::readShortBounded(data, offset, packetEnd);
                     session.selectedSlot = slot;
 
                     std::vector<uint8_t> equipPacket;
                     Packet::writeVarInt(equipPacket, clientFd);
                     Packet::writeShort(equipPacket, 0);
 
-                    int16_t itemId = session.inventory[36 + slot].id;
-                    auto translatedItem = Protocol::ProtocolTranslator::translateItemToClient(47, itemId);
+                    int16_t itemId = (slot >= 0 && slot < 36) ? session.inventory[36 + slot].id : -1;
+                    auto translatedItem = Protocol::ProtocolTranslator::translateItemToClient(session.clientProtocol, itemId);
 
                     Packet::writeShort(equipPacket, translatedItem.id);
                     if (translatedItem.id != -1)
@@ -1004,25 +1148,25 @@ Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", S
                 }
                 else if (packetId == 0x0E) // Click Window (Inventory Clicks)
                 {
-                    uint8_t windowId = data[offset++];
-                    int16_t slot = Packet::readShort(data, offset);
-                    uint8_t button = data[offset++];
+                    uint8_t windowId = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
+                    int16_t slot = Packet::readShortBounded(data, offset, packetEnd);
+                    uint8_t button = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
                     (void)button;
-                    int16_t actionNumber = Packet::readShort(data, offset);
-                    uint8_t mode = data[offset++];
+                    int16_t actionNumber = Packet::readShortBounded(data, offset, packetEnd);
+                    uint8_t mode = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
                     (void)mode;
-                    int16_t itemId = Packet::readShort(data, offset);
+                    int16_t itemId = Packet::readShortBounded(data, offset, packetEnd);
 
-                    if (itemId != -1 && (offset + 2) <= (dataStart + packetLen))
+                    if (itemId != -1 && offset + 3 <= packetEnd)
                     {
                         uint8_t count = data[offset++];
-                        int16_t damage = Packet::readShort(data, offset);
-                        if (offset < dataStart + packetLen && data[offset] == 0)
+                        int16_t damage = Packet::readShortBounded(data, offset, packetEnd);
+                        if (offset < packetEnd && data[offset] == 0)
                         {
                             offset++; // NBT tag = 0
                         }
 
-                        auto translatedItem = Protocol::ProtocolTranslator::translateItemFromClient(47, itemId, count, damage);
+                        auto translatedItem = Protocol::ProtocolTranslator::translateItemFromClient(session.clientProtocol, itemId, count, damage);
                         if (slot >= 0 && slot < 45)
                         {
                             session.inventory[slot] = {translatedItem.id, translatedItem.count, translatedItem.damage};
@@ -1045,20 +1189,26 @@ Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", S
                 }
                 else if (packetId == 0x10) // Creative Inventory Action / Slot Click
                 {
-                    int16_t slot = Packet::readShort(data, offset);
-                    int16_t itemId = Packet::readShort(data, offset);
+                    int16_t slot = Packet::readShortBounded(data, offset, packetEnd);
+                    int16_t itemId = Packet::readShortBounded(data, offset, packetEnd);
 
-                    if (itemId != -1)
+                    if (itemId != -1 && offset + 3 <= packetEnd)
                     {
                         uint8_t count = data[offset++];
-                        int16_t damage = Packet::readShort(data, offset);
+                        int16_t damage = Packet::readShortBounded(data, offset, packetEnd);
 
-                        auto translatedItem = Protocol::ProtocolTranslator::translateItemFromClient(47, itemId, count, damage);
-                        session.inventory[slot] = {translatedItem.id, translatedItem.count, translatedItem.damage};
+                        auto translatedItem = Protocol::ProtocolTranslator::translateItemFromClient(session.clientProtocol, itemId, count, damage);
+                        if (slot >= 0 && slot < 45)
+                        {
+                            session.inventory[slot] = {translatedItem.id, translatedItem.count, translatedItem.damage};
+                        }
                     }
                     else
                     {
-                        session.inventory[slot] = {-1, 0, 0};
+                        if (slot >= 0 && slot < 45)
+                        {
+                            session.inventory[slot] = {-1, 0, 0};
+                        }
                     }
 
                     if (slot == (36 + session.selectedSlot))
@@ -1068,7 +1218,7 @@ Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", S
                         Packet::writeShort(equipPacket, 0);
 
                         int16_t currentItem = session.inventory[slot].id;
-                        auto translatedItem = Protocol::ProtocolTranslator::translateItemToClient(47, currentItem);
+                        auto translatedItem = Protocol::ProtocolTranslator::translateItemToClient(session.clientProtocol, currentItem);
 
                         Packet::writeShort(equipPacket, translatedItem.id);
                         if (translatedItem.id != -1)
@@ -1104,7 +1254,8 @@ Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", S
     {
         int nfds = epoll_wait(m_epollFd, m_events, 64, timeoutMs);
 
-        auto packetSender = [this](int f, int32_t p, const std::vector<uint8_t> &b) {
+        auto packetSender = [this](int f, int32_t p, const std::vector<uint8_t> &b)
+        {
             sendPacket(f, p, b);
         };
 
@@ -1208,20 +1359,7 @@ Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", S
     void NetworkManager::handleDisconnect(int fd)
     {
         std::string username = "Unauthenticated Client";
-        std::string ipStr = "Unknown IP";
-        int port = 0;
-
-        sockaddr_in addr{};
-        socklen_t addrLen = sizeof(addr);
-        if (getpeername(fd, (struct sockaddr *)&addr, &addrLen) == 0)
-        {
-            char ipBuf[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, &addr.sin_addr, ipBuf, sizeof(ipBuf)))
-            {
-                ipStr = ipBuf;
-            }
-            port = ntohs(addr.sin_port);
-        }
+        std::string ipPort = Core::getIpAndPortFromFd(fd);
 
         {
             std::lock_guard<std::mutex> lock(m_clientsMutex);
@@ -1246,7 +1384,7 @@ Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", S
         close(fd);
 
         Core::Logger::info("Client " + std::to_string(fd) + " (" + username +
-                                          ") disconnected. [IP: " + ipStr + ":" + std::to_string(port) + "]");
+                           ") disconnected. [IP: " + ipPort + "]");
     }
 
     void NetworkManager::flushSendBuffer(LightweightMC::Player::PlayerSession &session)

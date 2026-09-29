@@ -3,3 +3,10 @@
 build/
 build1/
 build2/
+__pycache__
+server*.*
+world*.*
+bot*.py
+handshake*.py
+antiscan_ips.txt
+/tools/verify_chunk_packet.cpp

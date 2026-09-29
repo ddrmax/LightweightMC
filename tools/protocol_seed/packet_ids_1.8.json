@@ -1,0 +1,36 @@
+{
+    "_comment": "S2C/C2S packet IDs for protocol 47 (1.8). Ground truth seeded from LightweightMC's existing, verified-working literals in NetworkManager.cpp / PlayerManager.cpp / ScoreboardManager.cpp / WorldManager.cpp. PacketKind keys match include/network/protocol/PacketKind.hpp. Unknown IDs are simply ignored by the server, so unlisted kinds are safe to omit.",
+    "s2c": {
+        "DISCONNECT": 0,
+        "KEEP_ALIVE": 1,
+        "JOIN_GAME": 1,
+        "CHAT": 2,
+        "ENTITY_EQUIPMENT": 4,
+        "SPAWN_POSITION": 5,
+        "PLAYER_POS_LOOK": 8,
+        "ANIMATION": 11,
+        "ADD_PLAYER": 12,
+        "BLOCK_CHANGE": 35,
+        "OPEN_WINDOW": 45,
+        "WINDOW_ITEMS": 48,
+        "SET_SLOT": 49,
+        "CONFIRM_TRANSACTION": 50,
+        "UPDATE_PLAYER_INFO": 56,
+        "SCOREBOARD_OBJECTIVE": 59,
+        "UPDATE_SCORE": 60,
+        "DISPLAY_SCOREBOARD": 61,
+        "PLAYER_LIST_HEADER_FOOTER": 71
+    },
+    "c2s": {
+        "KEEP_ALIVE": 0,
+        "CHAT": 1,
+        "PLAYER_POS_LOOK": 4,
+        "PLAYER_DIGGING": 7,
+        "PLACE_BLOCK": 8,
+        "HELD_ITEM": 9,
+        "ANIMATION": 10,
+        "CLICK_WINDOW": 14,
+        "CREATIVE_SLOT_ACTION": 16
+    }
+}
+

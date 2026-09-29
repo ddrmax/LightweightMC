@@ -124,7 +124,7 @@ public:
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
         (void)args;
-        ctx.reply("LightweightMC Version 0.0.4 (Protocol v47 -Minecraft 1.8.9)");
+        ctx.reply("LightweightMC Version 0.0.5 (Protocol v47 -Minecraft 1.8.9)");
     }
 };
 
@@ -261,7 +261,7 @@ public:
         }
 
         std::string target = args[0];
-       // TODO: Remove the nickname from the ops list
+        // TODO: Remove the nickname from the ops list
         ctx.reply("The player " + target + " is no longer an operator.");
     }
 };
@@ -429,7 +429,7 @@ public:
         }
 
         std::string target = args[0];
-        //TODO: Remove nickname from banned-players.json
+        // TODO: Remove nickname from banned-players.json
         ctx.reply("The player " + target + " was unbanned.");
     }
 };

@@ -78,6 +78,11 @@ private:
 
         m_parser.set("security", "enable-antiscan", "true");
         m_parser.set("security", "blocklist-url", "https://raw.githubusercontent.com/pebblehost/hunter/master/ips.txt");
+
+        // World generation preset: overworld or superflat
+        m_parser.set("world", "gen-style", "overworld");
+        // Superflat layer preset, used when world/gen-style=superflat
+        m_parser.set("world", "superflat-preset", "minecraft:flat"); // minecraft:flat | minecraft:stone | minecraft:water
     }
 
     IniParser m_parser;

@@ -2,11 +2,14 @@
 #include "network/Packet.hpp"
 #include "network/protocol/ProtocolTranslator.hpp"
 #include "core/Logger.hpp"
+#include "storage/WorldStorage.hpp"
 #include <cstdio>
 
 namespace LightweightMC::Player
 {
-    std::string PlayerManager::getPlayerUuid(const std::string &username)
+    // Free function (declared in managers/PlayerManager.hpp) so the network login
+    // handler can generate UUIDs without instantiating the PlayerManager singleton.
+    std::string generatePlayerUuid(const std::string &username)
     {
         uint64_t hash1 = 0xcbf29ce484222325ULL;
         uint64_t hash2 = 0x100000001b3ULL;
@@ -23,6 +26,11 @@ namespace LightweightMC::Player
                       static_cast<uint16_t>(((hash2 >> 48) & 0x3FFF) | 0x8000),
                       static_cast<uint64_t>(hash2 & 0xFFFFFFFFFFFFULL));
         return std::string(uuidBuf);
+    }
+
+    std::string PlayerManager::getPlayerUuid(const std::string &username)
+    {
+        return generatePlayerUuid(username);
     }
 
     std::vector<uint8_t> PlayerManager::serializeInventory(const std::unordered_map<int, ItemStack> &inventory)
@@ -97,9 +105,9 @@ namespace LightweightMC::Player
     }
 
     void PlayerManager::sendPlayPackets(int clientFd, PlayerSession &currentSession, const std::string &username,
-                                       std::unordered_map<int, PlayerSession> &clients, World::WorldManager &worldManager,
-                                       Storage::Database &db,
-                                       const PacketSender &sendPacket, const BroadcastSender &broadcastPacket)
+                                        std::unordered_map<int, PlayerSession> &clients, World::WorldManager &worldManager,
+                                        Storage::Database &db,
+                                        const PacketSender &sendPacket, const BroadcastSender &broadcastPacket)
     {
         currentSession.username = username;
         currentSession.state = ClientState::PLAY;
@@ -118,13 +126,13 @@ namespace LightweightMC::Player
             currentSession.pitch = playerData.lastPitch;
             deserializeInventory(playerData.inventoryData, currentSession.inventory);
             Core::Logger::info("Restored player state for UUID [" + playerUuid + "] (" + username + ") at (" +
-                              std::to_string(currentSession.x) + ", " + std::to_string(currentSession.y) + ", " + std::to_string(currentSession.z) + ") with " +
-                              std::to_string(currentSession.inventory.size()) + " saved items.");
+                               std::to_string(currentSession.x) + ", " + std::to_string(currentSession.y) + ", " + std::to_string(currentSession.z) + ") with " +
+                               std::to_string(currentSession.inventory.size()) + " saved items.");
         }
         else
         {
             currentSession.x = 0.5;
-            currentSession.y = 7.0;
+            currentSession.y = 50.0;
             currentSession.z = 0.5;
             currentSession.yaw = 0.0f;
             currentSession.pitch = 0.0f;
@@ -137,20 +145,38 @@ namespace LightweightMC::Player
 
         // 1. Join Game (Packet 0x01)
         std::vector<uint8_t> joinGame;
-        Network::Packet::writeInt(joinGame, clientFd);  // Entity ID
+        Network::Packet::writeInt(joinGame, clientFd); // Entity ID
         joinGame.push_back(1);                         // Gamemode (1 = Creative)
         joinGame.push_back(0);                         // Dimension (0 = Overworld)
         joinGame.push_back(1);                         // Difficulty (1 = Easy)
-        joinGame.push_back(100);                       // Max Players
-        Network::Packet::writeString(joinGame, "flat"); // Level Type
-        joinGame.push_back(0);                         // Reduced Debug Info
+        if (currentSession.clientProtocol >= 47)
+        {
+            // Max Players, Level Type and Reduced Debug Info only exist in 1.8+ (protocol >= 47).
+            // Network::Packet::writeInt(joinGame, 100);         // Max Players
+            joinGame.push_back(100);
+            Network::Packet::writeString(joinGame, "flat"); // Level Type
+            joinGame.push_back(0);                          // Reduced Debug Info
+        }
         sendPacket(clientFd, 0x01, joinGame);
 
         // 2. Spawn Position (Packet 0x05)
         std::vector<uint8_t> spawnPos;
-        uint64_t location = ((0ULL & 0x3FFFFFF) << 38) | ((6ULL & 0xFFF) << 26) | (0ULL & 0x3FFFFFF);
-        for (int i = 7; i >= 0; --i)
-            spawnPos.push_back((location >> (i * 8)) & 0xFF);
+        if (currentSession.clientProtocol >= 47)
+        {
+            // 1.8+: packed long (angle:bit6 | yaw:bit6 | pos:bit32*3), then pitch/yaw floats.
+            uint64_t location = ((0ULL & 0x3FFFFFF) << 38) | ((6ULL & 0xFFF) << 26) | (0ULL & 0x3FFFFFF);
+            for (int i = 7; i >= 0; --i)
+                spawnPos.push_back((location >> (i * 8)) & 0xFF);
+        }
+        else
+        {
+            // 1.7.10: x:double, y:double, z:double, yaw:float, pitch:float (no packed long).
+            Network::Packet::writeDouble(spawnPos, currentSession.x);
+            Network::Packet::writeDouble(spawnPos, currentSession.y);
+            Network::Packet::writeDouble(spawnPos, currentSession.z);
+            Network::Packet::writeFloat(spawnPos, currentSession.yaw);
+            Network::Packet::writeFloat(spawnPos, currentSession.pitch);
+        }
         sendPacket(clientFd, 0x05, spawnPos);
 
         // 3. Load chunks around player before sending position
@@ -168,7 +194,7 @@ namespace LightweightMC::Player
 
         // 5. Synchronize inventory to client screen via Window Items (Packet 0x30)
         std::vector<uint8_t> windowItems;
-        windowItems.push_back(0); // Window ID 0 = Inventory
+        windowItems.push_back(0);                     // Window ID 0 = Inventory
         Network::Packet::writeShort(windowItems, 45); // 45 slots
 
         for (int16_t i = 0; i < 45; ++i)
@@ -176,15 +202,28 @@ namespace LightweightMC::Player
             auto it = currentSession.inventory.find(i);
             if (it != currentSession.inventory.end() && it->second.id != -1 && it->second.count > 0)
             {
-                auto translated = Network::Protocol::ProtocolTranslator::translateItemToClient(47, it->second.id, it->second.count, it->second.damage);
-                Network::Packet::writeShort(windowItems, translated.id);
-                windowItems.push_back(translated.count);
-                Network::Packet::writeShort(windowItems, translated.damage);
-                windowItems.push_back(0); // NBT tag = 0
+                auto translated = Network::Protocol::ProtocolTranslator::translateItemToClient(currentSession.clientProtocol, it->second.id, it->second.count, it->second.damage);
+                if (currentSession.clientProtocol >= 47)
+                {
+                    // 1.8+: short id, byte count, short damage, NBT tag byte.
+                    Network::Packet::writeShort(windowItems, translated.id);
+                    windowItems.push_back(translated.count);
+                    Network::Packet::writeShort(windowItems, translated.damage);
+                    windowItems.push_back(0); // NBT tag = 0
+                }
+                else
+                {
+                    // 1.7.10: short id, byte count, short damage (no NBT tag byte).
+                    Network::Packet::writeShort(windowItems, translated.id);
+                    windowItems.push_back(translated.count);
+                    Network::Packet::writeShort(windowItems, translated.damage);
+                }
             }
             else
             {
-                Network::Packet::writeShort(windowItems, -1);
+                if (currentSession.clientProtocol >= 47)
+                    Network::Packet::writeShort(windowItems, -1); // 1.8+ empty slot marker
+                // 1.7.10: an empty slot is simply no data at all.
             }
         }
         sendPacket(clientFd, 0x30, windowItems);
@@ -207,7 +246,7 @@ namespace LightweightMC::Player
         Network::Packet::writeVarInt(addTab, 0); // Properties
         Network::Packet::writeVarInt(addTab, 1); // Gamemode
         Network::Packet::writeVarInt(addTab, 0); // Ping
-        addTab.push_back(0);                    // Display name
+        addTab.push_back(0);                     // Display name
 
         broadcastPacket(0x38, addTab, -1);
 
@@ -301,6 +340,34 @@ namespace LightweightMC::Player
         broadcastPacket(0x04, packet, entityId);
     }
 
+    void PlayerManager::broadcastEquipmentForSession(PlayerSession &session, int16_t slot, const BroadcastSender &broadcastPacket)
+    {
+        // Entity Equipment (S2C 0x04): entity ID, equipment slot (short), then the item.
+        // Legacy (pre-1.8) items are short id + byte count + short damage; 1.8+ adds an
+        // NBT tag byte after the damage value.
+        std::vector<uint8_t> packet;
+        Network::Packet::writeVarInt(packet, session.fd);
+        Network::Packet::writeShort(packet, slot);
+
+        auto it = session.inventory.find(slot);
+        if (it != session.inventory.end() && it->second.id != -1 && it->second.count > 0)
+        {
+            auto translated = Network::Protocol::ProtocolTranslator::translateItemToClient(
+                session.clientProtocol, it->second.id, it->second.count, it->second.damage);
+            Network::Packet::writeShort(packet, translated.id);
+            packet.push_back(translated.count);
+            Network::Packet::writeShort(packet, translated.damage);
+            if (session.clientProtocol >= 47)
+                packet.push_back(0); // NBT tag = end of compound
+        }
+        else
+        {
+            Network::Packet::writeShort(packet, -1); // empty slot marker
+        }
+
+        broadcastPacket(0x04, packet, session.fd);
+    }
+
     void PlayerManager::savePlayerState(const PlayerSession &session, Storage::Database &db)
     {
         if (session.username.empty() || session.state != ClientState::PLAY)
@@ -310,7 +377,7 @@ namespace LightweightMC::Player
         data.uuid = getPlayerUuid(session.username);
         data.username = session.username;
         data.spawnX = 0.5;
-        data.spawnY = 7.0;
+        data.spawnY = 50.0;
         data.spawnZ = 0.5;
         data.spawnYaw = 0.0f;
         data.spawnPitch = 0.0f;
@@ -326,7 +393,7 @@ namespace LightweightMC::Player
         if (db.savePlayerData(data))
         {
             Core::Logger::info("Successfully saved player state to SQLite for UUID [" + data.uuid + "] (" + session.username + ") with " +
-                              std::to_string(data.inventoryData.size()) + " bytes of inventory payload.");
+                               std::to_string(data.inventoryData.size()) + " bytes of inventory payload.");
         }
     }
 }

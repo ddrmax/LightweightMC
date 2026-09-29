@@ -45,6 +45,9 @@ namespace LightweightMC::Core
         case LogLevel::DEBUG:
             std::cout << "[" << timestamp << "] \033[34m[DBG]\033[0m  " << msg << "\n";
             break;
+        case LogLevel::BENCH:
+            std::cout << "[" << timestamp << "] \033[35m[BENCH]\033[0m  " << msg << "\n";
+            break;
         }
     }
 

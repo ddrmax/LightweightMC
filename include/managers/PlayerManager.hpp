@@ -8,6 +8,10 @@
 #include <string>
 #include <functional>
 
+// Generates a deterministic offline-mode UUID string for a given username.
+// Free function so it can be shared by the login handler and the player manager.
+std::string generatePlayerUuid(const std::string &username);
+
 namespace LightweightMC::Player
 {
     using PacketSender = Managers::PacketSender;
@@ -27,6 +31,10 @@ namespace LightweightMC::Player
 
         // Generates a deterministic offline UUID string for a given username
         static std::string getPlayerUuid(const std::string &username);
+
+        // Builds and broadcasts an Entity Equipment packet (0x04) for the item currently
+        // in one of the player's slots, encoding the item with the client's own protocol.
+        void broadcastEquipmentForSession(PlayerSession &session, int16_t slot, const BroadcastSender &broadcastPacket);
 
         // Teleports a player to exact target coordinates
         void teleportPlayer(int fd, PlayerSession &session, double x, double y, double z, float yaw, float pitch, const PacketSender &sendPacket);

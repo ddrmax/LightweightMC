@@ -40,20 +40,20 @@ namespace LightweightMC::Network
         return value;
     }
 
-void Packet::writeVarInt(std::vector<uint8_t> &buffer, int32_t value)
-{
-    uint32_t uval = static_cast<uint32_t>(value);
-    while (true)
+    void Packet::writeVarInt(std::vector<uint8_t> &buffer, int32_t value)
     {
-        if ((uval & ~0x7F) == 0)
+        uint32_t uval = static_cast<uint32_t>(value);
+        while (true)
         {
-            buffer.push_back(static_cast<uint8_t>(uval));
-            return;
+            if ((uval & ~0x7F) == 0)
+            {
+                buffer.push_back(static_cast<uint8_t>(uval));
+                return;
+            }
+            buffer.push_back(static_cast<uint8_t>((uval & 0x7F) | 0x80));
+            uval >>= 7;
         }
-        buffer.push_back(static_cast<uint8_t>((uval & 0x7F) | 0x80));
-        uval >>= 7;
     }
-}
 
     std::string Packet::readString(const uint8_t *buffer, size_t &offset)
     {
@@ -65,11 +65,11 @@ void Packet::writeVarInt(std::vector<uint8_t> &buffer, int32_t value)
         return str;
     }
 
-void Packet::writeString(std::vector<uint8_t> &vec, const std::string &str)
-{
-    Packet::writeVarInt(vec, static_cast<int32_t>(str.size()));
-    vec.insert(vec.end(), str.begin(), str.end());
-}
+    void Packet::writeString(std::vector<uint8_t> &vec, const std::string &str)
+    {
+        Packet::writeVarInt(vec, static_cast<int32_t>(str.size()));
+        vec.insert(vec.end(), str.begin(), str.end());
+    }
 
     void Packet::writeDouble(std::vector<uint8_t> &vec, double val)
     {
@@ -126,6 +126,72 @@ void Packet::writeString(std::vector<uint8_t> &vec, const std::string &str)
         double val;
         std::memcpy(&val, &bits, sizeof(val));
         return val;
+    }
+
+    int32_t Packet::readVarIntBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd, size_t minBytes)
+    {
+        if (offset + minBytes > packetEnd)
+            return -1;
+        const size_t save = offset;
+        int32_t v = Packet::readVarInt(buffer, offset);
+        if (v < 0 || offset > packetEnd)
+        {
+            offset = save;
+            return -1;
+        }
+        return v;
+    }
+
+    int16_t Packet::readShortBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd)
+    {
+        if (offset + 2 > packetEnd)
+            return -1;
+        const size_t save = offset;
+        int16_t v = Packet::readShort(buffer, offset);
+        if (offset > packetEnd)
+            offset = save;
+        return v;
+    }
+
+    double Packet::readDoubleBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd)
+    {
+        if (offset + 8 > packetEnd)
+            return 0.0;
+        const size_t save = offset;
+        double v = Packet::readDouble(buffer, offset);
+        if (offset > packetEnd)
+            offset = save;
+        return v;
+    }
+
+    uint64_t Packet::readUInt64Bounded(const uint8_t *buffer, size_t &offset, size_t packetEnd)
+    {
+        if (offset + 8 > packetEnd)
+            return 0;
+        return Packet::readUInt64(buffer, offset);
+    }
+
+    int32_t Packet::readByteBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd)
+    {
+        if (offset + 1 > packetEnd)
+            return -1;
+        return buffer[offset++];
+    }
+
+    std::string Packet::readStringBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd)
+    {
+        if (offset + 1 > packetEnd)
+            return std::string();
+        const size_t save = offset;
+        int32_t len = Packet::readVarInt(buffer, offset);
+        if (len < 0 || len > 32767 || offset + static_cast<size_t>(len) > packetEnd)
+        {
+            offset = save;
+            return std::string();
+        }
+        std::string str(reinterpret_cast<const char *>(buffer + offset), static_cast<size_t>(len));
+        offset += static_cast<size_t>(len);
+        return str;
     }
 
 } // namespace LightweightMC::Network
