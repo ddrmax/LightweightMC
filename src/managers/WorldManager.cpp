@@ -9,7 +9,8 @@ namespace LightweightMC::World
     void WorldManager::sendFlatChunk(int clientFd, int chunkX, int chunkZ, LightweightMC::Player::PlayerSession &session, const Managers::PacketSender &sendPacket)
     {
         auto blocks = m_worldStorage.getChunkBlocks(chunkX, chunkZ);
-
+        (void)clientFd;
+        (void)sendPacket;
         // 1.7.10 (protocol < 47) and 1.8+ (protocol >= 47) use different Chunk packet layouts:
         //   * 1.7.10 S2C 0x21: chunkX:int, chunkZ:int, isGroundUp:byte, blocks[4096] (big-endian u16),
         //                       blockLight[2048], skyLight[2048]. No bitmask, no VarInt length.
@@ -128,7 +129,7 @@ namespace LightweightMC::World
         // EXPERIMENTAL TEST: the 0x21 (Chunk) send is disabled while we test sending chunks via
         // the 0x26 (Map Chunk Bulk) packet -- see sendMapChunkBulk() below. If the bulk format
         // does not work, restore this line and remove the 0x26 call in updateChunksAroundPlayer().
-        // sendPacket(clientFd, 0x21, payload);
+        sendPacket(clientFd, 0x21, payload);
         session.loadedChunks.insert({chunkX, chunkZ});
     }
 
@@ -139,7 +140,7 @@ namespace LightweightMC::World
 
         const int playerChunkX = static_cast<int>(std::floor(session.x / 16.0));
         const int playerChunkZ = static_cast<int>(std::floor(session.z / 16.0));
-
+        (void)sendPacket;
         const int NUM_SECTIONS = Storage::NUM_SECTIONS;
 
         auto translateBlock = [&](uint16_t rawBlock) -> uint16_t
@@ -271,140 +272,140 @@ namespace LightweightMC::World
         for (const auto &blob : chunks)
             session.loadedChunks.insert({blob.x, blob.z});
     }
-    /*    // EXPERIMENTAL TEST (1.8+ only): build a single Map Chunk Bulk packet (S2C 0x26) carrying every
-        // not-yet-loaded chunk within renderDistance of the player, and send it in one shot.
-        //
-        // 1.8 wire format:
-        //   x:int, z:int (anchor chunk), groundUp:byte, sectionCount:VarInt (total sections across all
-        //   chunks), then per chunk: chunkX:short, chunkZ:short, sectionBitmask:short, dataLen:VarInt,
-        //   followed by that chunk's non-empty section payloads. Each section payload is the same layout
-        //   used by sendFlatChunk: blocks[8192] (big-endian u16) + blockLight[2048] + skyLight[2048].
-        void WorldManager::sendMapChunkBulk(int clientFd, LightweightMC::Player::PlayerSession &session, int renderDistance, const Managers::PacketSender &sendPacket)
+    // EXPERIMENTAL TEST (1.8+ only): build a single Map Chunk Bulk packet (S2C 0x26) carrying every
+    // not-yet-loaded chunk within renderDistance of the player, and send it in one shot.
+    //
+    // 1.8 wire format:
+    //   x:int, z:int (anchor chunk), groundUp:byte, sectionCount:VarInt (total sections across all
+    //   chunks), then per chunk: chunkX:short, chunkZ:short, sectionBitmask:short, dataLen:VarInt,
+    //   followed by that chunk's non-empty section payloads. Each section payload is the same layout
+    //   used by sendFlatChunk: blocks[8192] (big-endian u16) + blockLight[2048] + skyLight[2048].
+    /*void WorldManager::sendMapChunkBulk(int clientFd, LightweightMC::Player::PlayerSession &session, int renderDistance, const Managers::PacketSender &sendPacket)
+    {
+        if (session.clientProtocol < 47)
+            return;
+
+        const int playerChunkX = static_cast<int>(std::floor(session.x / 16.0));
+        const int playerChunkZ = static_cast<int>(std::floor(session.z / 16.0));
+
+        const int NUM_SECTIONS = Storage::NUM_SECTIONS;
+        const size_t SECTION_PAYLOAD = 4096 * 2 + 2048 + 2048 + 256; // blocks + blockLight + skyLight + biomes
+
+        auto translateBlock = [&](uint16_t rawBlock) -> uint16_t
         {
-            if (session.clientProtocol < 47)
-                return;
+            if (rawBlock == 0)
+                return 0;
+            uint16_t blockId = rawBlock >> 4;
+            uint8_t meta = static_cast<uint8_t>(rawBlock & 0x0F);
+            auto translated = Network::Protocol::ProtocolTranslator::translateBlockToClient(session.clientProtocol, blockId, meta);
+            return translated.toCombinedData();
+        };
 
-            const int playerChunkX = static_cast<int>(std::floor(session.x / 16.0));
-            const int playerChunkZ = static_cast<int>(std::floor(session.z / 16.0));
+        static const bool kEndianOk = []
+        {
+            bool ok = Network::Packet::chunkU16RoundTripConsistent();
+            if (!ok)
+                fprintf(stderr, "[WorldManager] WARNING: chunk block-data byte order is inconsistent; "
+                                "blocks may render as air\n");
+            return ok;
+        }();
+        (void)kEndianOk;
 
-            const int NUM_SECTIONS = Storage::NUM_SECTIONS;
-            const size_t SECTION_PAYLOAD = 4096 * 2 + 2048 + 2048 + 256; // blocks + blockLight + skyLight + biomes
+        struct ChunkBlob
+        {
+            int x = 0;
+            int z = 0;
+            uint16_t bitmask = 0;
+            std::vector<uint8_t> data;
+        };
+        std::vector<ChunkBlob> chunks;
+        int totalSections = 0;
 
-            auto translateBlock = [&](uint16_t rawBlock) -> uint16_t
+        for (int cx = playerChunkX - renderDistance; cx <= playerChunkX + renderDistance; ++cx)
+        {
+            for (int cz = playerChunkZ - renderDistance; cz <= playerChunkZ + renderDistance; ++cz)
             {
-                if (rawBlock == 0)
-                    return 0;
-                uint16_t blockId = rawBlock >> 4;
-                uint8_t meta = static_cast<uint8_t>(rawBlock & 0x0F);
-                auto translated = Network::Protocol::ProtocolTranslator::translateBlockToClient(session.clientProtocol, blockId, meta);
-                return translated.toCombinedData();
-            };
+                ChunkPos pos{cx, cz};
+                if (session.loadedChunks.find(pos) != session.loadedChunks.end())
+                    continue;
 
-            static const bool kEndianOk = []
-            {
-                bool ok = Network::Packet::chunkU16RoundTripConsistent();
-                if (!ok)
-                    fprintf(stderr, "[WorldManager] WARNING: chunk block-data byte order is inconsistent; "
-                                    "blocks may render as air\n");
-                return ok;
-            }();
-            (void)kEndianOk;
+                auto blocks = m_worldStorage.getChunkBlocks(cx, cz);
 
-            struct ChunkBlob
-            {
-                int x = 0;
-                int z = 0;
-                uint16_t bitmask = 0;
-                std::vector<uint8_t> data;
-            };
-            std::vector<ChunkBlob> chunks;
-            int totalSections = 0;
+                ChunkBlob blob;
+                blob.x = cx;
+                blob.z = cz;
 
-            for (int cx = playerChunkX - renderDistance; cx <= playerChunkX + renderDistance; ++cx)
-            {
-                for (int cz = playerChunkZ - renderDistance; cz <= playerChunkZ + renderDistance; ++cz)
+                for (int s = 0; s < NUM_SECTIONS; ++s)
                 {
-                    ChunkPos pos{cx, cz};
-                    if (session.loadedChunks.find(pos) != session.loadedChunks.end())
-                        continue;
+                    const int sectionBaseY = Storage::MIN_WORLD_Y + s * 16; // absolute Y of the section's bottom block
 
-                    auto blocks = m_worldStorage.getChunkBlocks(cx, cz);
+                    std::vector<uint8_t> payload;
+                    payload.reserve(SECTION_PAYLOAD);
+                    bool nonEmpty = false;
 
-                    ChunkBlob blob;
-                    blob.x = cx;
-                    blob.z = cz;
+                    // Reconstruct this section (16x16x16). Minecraft indexing: Y -> Z -> X.
+                    for (int y = 0; y < 16; ++y)
+                        for (int z = 0; z < 16; ++z)
+                            for (int x = 0; x < 16; ++x)
+                            {
+                                Storage::BlockCoord coord{x, sectionBaseY + y, z};
+                                uint16_t blockCombined = 0;
+                                auto it = blocks.find(coord);
+                                if (it != blocks.end())
+                                    blockCombined = translateBlock(it->second);
 
-                    for (int s = 0; s < NUM_SECTIONS; ++s)
+                                if (blockCombined != 0)
+                                    nonEmpty = true;
+
+                                // Big-endian, fixed byte order regardless of host endianness.
+                                Network::Packet::writeU16BE(payload, blockCombined);
+                            }
+
+                    // Light & Biomes (biome data is only read by pre-1.8 clients, but keep the layout uniform).
+                    for (size_t i = 0; i < 2048; ++i)
+                        payload.push_back(0x00); // Block Light
+                    for (size_t i = 0; i < 2048; ++i)
+                        payload.push_back(0xFF); // Sky Light
+                    for (size_t i = 0; i < 256; ++i)
+                        payload.push_back(1); // Biome
+
+                    if (nonEmpty)
                     {
-                        const int sectionBaseY = Storage::MIN_WORLD_Y + s * 16; // absolute Y of the section's bottom block
-
-                        std::vector<uint8_t> payload;
-                        payload.reserve(SECTION_PAYLOAD);
-                        bool nonEmpty = false;
-
-                        // Reconstruct this section (16x16x16). Minecraft indexing: Y -> Z -> X.
-                        for (int y = 0; y < 16; ++y)
-                            for (int z = 0; z < 16; ++z)
-                                for (int x = 0; x < 16; ++x)
-                                {
-                                    Storage::BlockCoord coord{x, sectionBaseY + y, z};
-                                    uint16_t blockCombined = 0;
-                                    auto it = blocks.find(coord);
-                                    if (it != blocks.end())
-                                        blockCombined = translateBlock(it->second);
-
-                                    if (blockCombined != 0)
-                                        nonEmpty = true;
-
-                                    // Big-endian, fixed byte order regardless of host endianness.
-                                    Network::Packet::writeU16BE(payload, blockCombined);
-                                }
-
-                        // Light & Biomes (biome data is only read by pre-1.8 clients, but keep the layout uniform).
-                        for (size_t i = 0; i < 2048; ++i)
-                            payload.push_back(0x00); // Block Light
-                        for (size_t i = 0; i < 2048; ++i)
-                            payload.push_back(0xFF); // Sky Light
-                        for (size_t i = 0; i < 256; ++i)
-                            payload.push_back(1); // Biome
-
-                        if (nonEmpty)
-                        {
-                            blob.bitmask |= static_cast<uint16_t>(1u << s); // bit s selects payload slot s (ascending order)
-                            blob.data.insert(blob.data.end(), payload.begin(), payload.end());
-                            totalSections++;
-                        }
+                        blob.bitmask |= static_cast<uint16_t>(1u << s); // bit s selects payload slot s (ascending order)
+                        blob.data.insert(blob.data.end(), payload.begin(), payload.end());
+                        totalSections++;
                     }
-
-                    chunks.push_back(std::move(blob));
                 }
+
+                chunks.push_back(std::move(blob));
             }
-
-            if (chunks.empty())
-                return;
-
-            // Build the 0x26 packet.
-            std::vector<uint8_t> packet;
-            Network::Packet::writeInt(packet, playerChunkX);
-            Network::Packet::writeInt(packet, playerChunkZ);
-            packet.push_back(1); // groundUp: continuous
-            Network::Packet::writeVarInt(packet, totalSections);
-
-            for (const auto &blob : chunks)
-            {
-                Network::Packet::writeShort(packet, static_cast<int16_t>(blob.x));
-                Network::Packet::writeShort(packet, static_cast<int16_t>(blob.z));
-                Network::Packet::writeShort(packet, blob.bitmask);
-                Network::Packet::writeVarInt(packet, static_cast<int32_t>(blob.data.size()));
-                packet.insert(packet.end(), blob.data.begin(), blob.data.end());
-            }
-
-            sendPacket(clientFd, 0x26, packet);
-
-            // Mark all sent chunks as loaded so they are not re-sent.
-            for (const auto &blob : chunks)
-                session.loadedChunks.insert({blob.x, blob.z});
         }
+
+        if (chunks.empty())
+            return;
+
+        // Build the 0x26 packet.
+        std::vector<uint8_t> packet;
+        Network::Packet::writeInt(packet, playerChunkX);
+        Network::Packet::writeInt(packet, playerChunkZ);
+        packet.push_back(1); // groundUp: continuous
+        Network::Packet::writeVarInt(packet, totalSections);
+
+        for (const auto &blob : chunks)
+        {
+            Network::Packet::writeShort(packet, static_cast<int16_t>(blob.x));
+            Network::Packet::writeShort(packet, static_cast<int16_t>(blob.z));
+            Network::Packet::writeShort(packet, blob.bitmask);
+            Network::Packet::writeVarInt(packet, static_cast<int32_t>(blob.data.size()));
+            packet.insert(packet.end(), blob.data.begin(), blob.data.end());
+        }
+
+        sendPacket(clientFd, 0x26, packet);
+
+        // Mark all sent chunks as loaded so they are not re-sent.
+        for (const auto &blob : chunks)
+            session.loadedChunks.insert({blob.x, blob.z});
+    }
     */
     void WorldManager::updateChunksAroundPlayer(int clientFd, LightweightMC::Player::PlayerSession &session, int renderDistance, const Managers::PacketSender &sendPacket)
     {

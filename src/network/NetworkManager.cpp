@@ -7,9 +7,12 @@
 #include "network/Packet.hpp"
 #include "managers/ScoreboardManager.hpp"
 #include "managers/PlayerManager.hpp"
+#include "core/CommandManager.hpp"
 #include "network/protocol/ProtocolTranslator.hpp"
 #include "network/protocol/EraAdapter.hpp"
 #include "network/protocol/ProtocolVersion.hpp"
+#include "network/protocol/BaseProtocol.hpp"
+#include "commands/TestPacketsCommand.hpp"
 
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -26,7 +29,7 @@
 #include <mutex>
 
 #ifndef SERVER_VERSION
-#define SERVER_VERSION "0.0.4-alpha"
+#define SERVER_VERSION LWMC_VER
 #endif
 
 #ifndef MC_PROTOCOL_VERSION_NAME
@@ -99,6 +102,10 @@ namespace LightweightMC::Network
             return false;
         }
 
+        // Load world game rules (server_data.db gamerules table) into the
+        // GameRules singleton so /gamerule and other systems can query them.
+        World::GameRules::getInstance().init(&m_database);
+
         // Select the world generation preset from server.properties ([world] gen-style)
         const std::string genStyle = ConfigManager::getInstance().getString("world", "gen-style", "overworld");
         if (genStyle == "superflat")
@@ -110,6 +117,11 @@ namespace LightweightMC::Network
         {
             m_worldStorage.setGenerationStyle(Storage::GenStyle::OVERWORLD);
             Core::Logger::info("World generation style: overworld (1 bedrock / 59 stone / 3 dirt / 1 grass)");
+        }
+        else if (genStyle == "test-grid")
+        {
+            m_worldStorage.setGenerationStyle(Storage::GenStyle::TEST_GRID);
+            Core::Logger::info("World generation style: test-grid (deterministic block grid for protocol validation)");
         }
         else
         {
@@ -141,6 +153,17 @@ namespace LightweightMC::Network
         ev.events = EPOLLIN | EPOLLET;
         ev.data.fd = m_serverFd;
         epoll_ctl(m_epollFd, EPOLL_CTL_ADD, m_serverFd, &ev);
+
+        // Wire the /testpackets command to live sessions so it can resolve the
+        // issuing player's protocol and build version-correct test packets.
+        TestPacketsCommand::setSessionProvider([this](const std::string &name) -> std::optional<Player::PlayerSession>
+                                               {
+                                                    for (auto &kv : m_clients)
+                                                    {
+                                                        if (kv.second.username == name)
+                                                            return kv.second;
+                                                    }
+                                                    return std::nullopt; });
 
         return true;
     }
@@ -241,6 +264,8 @@ namespace LightweightMC::Network
                     if (protoVersion >= 0)
                         session.clientProtocol = protoVersion;
                     session.adapter = Protocol::EraAdapter::create(session.clientProtocol);
+                    // Bind the version-specific framing/ID protocol alongside the era adapter.
+                    session.protocol = Protocol::BaseProtocol::create(session.clientProtocol);
 
                     std::string ipPort = Core::getIpAndPortFromFd(clientFd);
                     Core::Logger::info("[NET] Handshake from " + ipPort + " protocol=" + std::to_string(session.clientProtocol) +
@@ -284,7 +309,7 @@ namespace LightweightMC::Network
 
                     std::string motd = SECTION "2" SECTION "n" SECTION "l" SECTION "o"
                                                "LightweightMC C++ Engine " SECTION "c" SECTION "n" SECTION "l" SECTION "o"
-                                               "V0.0.5" SECTION "r";
+                                               "V" LWMC_VER SECTION "r";
 
                     double currentTps = 20.0;
                     double currentRam = LightweightMC::Core::getProcessRAM();
@@ -381,6 +406,55 @@ namespace LightweightMC::Network
                         while (iss >> arg)
                         {
                             args.push_back(arg);
+                        }
+
+                        // -------------------------------------------------
+                        // Route registered commands through CommandManager so
+                        // that op-level permission checks apply to players.
+                        // The manager handles unknown-command replies and
+                        // permission denials via ctx.reply(), which sends a
+                        // chat packet back to the player.
+                        // -------------------------------------------------
+                        {
+                            auto &cmdManager = CommandManager::getInstance();
+
+                            // Check if this command (name or alias) is registered.
+                            bool isRegistered = cmdManager.getCommands().find(command) != cmdManager.getCommands().end() ||
+                                                std::any_of(cmdManager.getCommands().begin(), cmdManager.getCommands().end(),
+                                                            [&command](const auto &pair)
+                                                            {
+                                                                const auto &aliases = pair.second->getAliases();
+                                                                return std::find(aliases.begin(), aliases.end(), command) != aliases.end();
+                                                            });
+
+                            if (isRegistered)
+                            {
+                                CommandContext ctx;
+                                ctx.sender = session.username;
+                                ctx.isConsole = false;
+                                ctx.opLevel = static_cast<int>(session.opLevel);
+
+                                // Deliver command replies to the player as chat messages.
+                                ctx.replyCallback = [this, clientFd](const std::string &msg)
+                                {
+                                    std::vector<uint8_t> chatMsg;
+                                    Packet::writeString(chatMsg, R"({"text":")" + msg + R"("})");
+                                    chatMsg.push_back(1); // color: dark gray (0x8)
+                                    sendPacket(clientFd, 0x02, chatMsg);
+                                };
+
+                                // Give /op and /deop a way to change a target player's
+                                // operator status: update the live session (if online)
+                                // and persist the new level to the database.
+                                ctx.setOpLevel = [this](const std::string &name, int level) -> bool
+                                {
+                                    uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(4, level)));
+                                    return setPlayerOpLevel(name, clamped);
+                                };
+
+                                cmdManager.executeCommand(ctx, message);
+                                return; // Command ran (or was denied by op check); stop here.
+                            }
                         }
 
                         if (command == "/stats" || command == "/hud")
@@ -680,6 +754,15 @@ namespace LightweightMC::Network
                         LightweightMC::Core::Logger::info("[CHAT] " + formattedChat);
                     }
                 }
+                else if (packetId == 0x02) // Use Entity
+                {
+                }
+                else if (packetId == 0x03) // Player
+                {
+                }
+                else if (packetId == 0x05) // Player Look
+                {
+                }
                 else if (packetId == 0x04 || packetId == 0x06) // Player Position & Look
                 {
                     session.x = Packet::readDoubleBounded(data, offset, packetEnd);
@@ -772,9 +855,9 @@ namespace LightweightMC::Network
                     uint8_t face = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
                     int16_t itemSlot = Packet::readShortBounded(data, offset, packetEnd);
 
-                    if (itemSlot > 0 && itemSlot < 256)
+                    if (true) // if (itemSlot < 0 && itemSlot > 256)
                     {
-
+                        Core::Logger::info("Touched Slot " + std::to_string(itemSlot));
                         uint8_t itemCount = static_cast<uint8_t>(Packet::readByteBounded(data, offset, packetEnd));
                         (void)itemCount;
                         int16_t itemDamage = Packet::readShortBounded(data, offset, packetEnd);
@@ -983,7 +1066,7 @@ namespace LightweightMC::Network
                         int chunkZ = Packet::floorDiv(z, 16);
                         int relX = Packet::floorMod(x, 16);
                         int relZ = Packet::floorMod(z, 16);
-                        uint16_t existingBlockData = m_worldStorage.getBlockAt(chunkX, chunkZ, relX, y, relZ);
+                        uint16_t existingBlockData = m_worldStorage.getBlockAt(chunkX, chunkZ, relX, y - 1, relZ);
                         uint16_t existingBlockId = existingBlockData >> 4;
 
                         // List of interactive block IDs opening a GUI window
@@ -997,10 +1080,11 @@ namespace LightweightMC::Network
                                               existingBlockId == 154 || // Hopper
                                               existingBlockId == 158 || // Dropper
                                               existingBlockId == 130);  // Ender Chest
-                        Core::Logger::info("Existing Bloc " + std::to_string(existingBlockId));
+                        Core::Logger::info("Existing Interactive Bloc " + std::to_string(existingBlockId));
                         // Player interacted with an inventory block (without sneaking)
+                        Core::Logger::info("Interraction Bloc : " + std::string(isInteractive ? "true" : "false"));
 
-                        if (!isInteractive /*&& face != 255*/)
+                        if (!isInteractive && face != 255)
                         {
                             Core::Logger::info("Placement Bloc");
                             auto translatedBlock = Protocol::ProtocolTranslator::translateBlockFromClient(
@@ -1027,7 +1111,7 @@ namespace LightweightMC::Network
                             // ------------------------------------
                             // Open container GUI if block is a known container type
                             // ------------------------------------
-                            uint8_t pureBlockId = static_cast<uint8_t>(blockId);
+                            uint8_t pureBlockId = static_cast<uint8_t>(existingBlockId);
                             struct ContainerDef
                             {
                                 const char *type;
@@ -1079,9 +1163,10 @@ namespace LightweightMC::Network
                                 container = {"minecraft:anvil", "Repair & Name", 3};
                                 isContainer = true;
                             }
-
+                            Core::Logger::info("Bloc Is Container : " + std::string(isContainer ? "true" : "false"));
                             if (isContainer)
                             {
+
                                 // Assign a window ID (1-100, wrap around)
                                 session.openWindowId = (session.openWindowId % 100) + 1;
                                 uint8_t winId = session.openWindowId;
@@ -1100,19 +1185,33 @@ namespace LightweightMC::Network
                                 Packet::writeVarInt(openWin, static_cast<int32_t>(titleJson.size()));
                                 openWin.insert(openWin.end(), titleJson.begin(), titleJson.end());
                                 // Number of slots
-                                openWin.push_back(container.slots);
+                                if (invType == "minecraft:enchanting_table" || invType == "minecraft:anvil")
+                                {
+                                    openWin.push_back(0);
+                                }
+                                else
+                                {
+                                    openWin.push_back(container.slots);
+                                }
                                 // Entity ID (only for horses; 0 otherwise)
-                                Packet::writeInt(openWin, 0);
+                                if (invType == "EntityHorse")
+                                {
+                                    Packet::writeInt(openWin, 0);
+                                }
                                 Core::Logger::info("[DEBUG] Sending 0x2D: WinID=" + std::to_string(winId) + ", Title=" + container.title);
-                                // sendPacket(clientFd, 0x2D, openWin);
+                                sendPacket(clientFd, 0x2D, openWin);
 
                                 // Send Window Items (0x30) with empty slots for the container
                                 // (container inventory not yet persistent; filled with empty stacks)
                                 std::vector<uint8_t> winItems;
                                 winItems.push_back(winId);
-                                Packet::writeShort(winItems, static_cast<int16_t>(container.slots));
-                                for (int s = 0; s < container.slots; ++s)
-                                    Packet::writeShort(winItems, -1); // empty slot
+                                int totalSlots = container.slots + 36; // Bloc inventory + Player inventory
+                                Packet::writeShort(winItems, static_cast<int16_t>(totalSlots));
+
+                                for (int s = 0; s < totalSlots; ++s)
+                                {
+                                    Packet::writeShort(winItems, -1); // Empty slots
+                                }
                                 Core::Logger::info("[DEBUG] Sending 0x30: WinID=" + std::to_string(winId) + ", Slots=" + std::to_string(container.slots));
                                 // sendPacket(clientFd, 0x30, winItems);
 
@@ -1121,6 +1220,10 @@ namespace LightweightMC::Network
                                                    " (windowId=" + std::to_string(winId) + ")");
                             }
                         }
+                    }
+                    else
+                    {
+                        Core::Logger::info("Mismatched Slot " + std::to_string(itemSlot));
                     }
                 }
 
@@ -1239,6 +1342,11 @@ namespace LightweightMC::Network
 
                     broadcastPacket(0x0B, animPacket, clientFd);
                 }
+                /**/
+                else
+                {
+                    Core::Logger::info("Unknown Packet " + std::to_string(packetId));
+                }
             }
 
             offset = dataStart + packetLen;
@@ -1354,6 +1462,26 @@ namespace LightweightMC::Network
             close(m_serverFd);
         if (m_epollFd != -1)
             close(m_epollFd);
+    }
+
+    bool NetworkManager::setPlayerOpLevel(const std::string &playerName, uint8_t opLevel)
+    {
+        // Update the live session if the player is currently online.
+        for (auto &[fd, pSession] : m_clients)
+        {
+            if (pSession.state == ClientState::PLAY && pSession.username == playerName)
+            {
+                pSession.opLevel = opLevel;
+                break;
+            }
+        }
+
+        // Persist the op status so it survives a re-login.
+        Storage::PlayerData data;
+        data.uuid = Player::PlayerManager::getInstance().getPlayerUuid(playerName);
+        data.username = playerName;
+        data.opLevel = opLevel;
+        return m_database.savePlayerData(data);
     }
 
     void NetworkManager::handleDisconnect(int fd)

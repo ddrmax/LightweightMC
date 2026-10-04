@@ -5,6 +5,23 @@ All notable changes made to the project **LightweightMC** are documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project respects [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.0.6] - 2026-10-04
+
+### Added
+
+- **Player management**:Added player persistance
+- **Player management**:Completed Player data structure to latest minecraft "player.dat nbt strucuture"
+- **Biomes & presets generation**: added generation for test world generating each block
+
+### Changed
+
+- **Commands** Refactored command implementation to put them in dedicated headers, to limit further cluter and kep files readable 
+- **Minecraft Protocol** Mockup of handling different protocol, will surely be scrapped for a per protocol basis, or another style, maybe doing a c++ conversion of what Viaversion is doing in java
+- **Console** Better Behaviour and command history
+
+### Fixed
+- **Minecraft Protocol 1.8 (v47)**: Crash when dealing with interactive blocs operations (chest / anvil / etc.)
+
 
 ## [0.0.5] - 2026-09-30
 
@@ -69,6 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 ---
 
+[0.0.6]: https://github.com/ddrmax/LightweightMC/releases/tag/v0.0.6
 [0.0.5]: https://github.com/ddrmax/LightweightMC/releases/tag/v0.0.5
 [0.0.4]: https://github.com/ddrmax/LightweightMC/releases/tag/v0.0.4
 [0.0.3]: https://github.com/ddrmax/LightweightMC/releases/tag/v0.0.3

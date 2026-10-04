@@ -1,11 +1,23 @@
 #include "core/Server.hpp"
 #include "core/Logger.hpp"
 #include <iostream>
+#include <algorithm>
 #include "core/ConfigManager.hpp"
 #include "core/CommandManager.hpp"
 #include "commands/BasicCommands.hpp"
-#include "commands/ExtendedCommands.hpp"
-
+#include "commands/ServerCommands.hpp"
+#include "commands/SystemCommands.hpp"
+#include "commands/PlayerCommands.hpp"
+#include "commands/WorldCommands.hpp"
+#include "commands/EntityCommands.hpp"
+#include "commands/CommunicationCommands.hpp"
+#include "commands/DebugCommands.hpp"
+#include "commands/ScriptingCommands.hpp"
+#include "commands/TestPacketsCommand.hpp"
+#include <termios.h>
+#include <unistd.h>
+#include <vector>
+#include <csignal>
 namespace LightweightMC::Core
 {
 
@@ -55,6 +67,8 @@ namespace LightweightMC::Core
         // --- LightweightMC Extensions ---
         cmdMgr.registerCommand(std::make_shared<PluginsCommand>());
         cmdMgr.registerCommand(std::make_shared<LwmcCommand>());
+        // --- Protocol validation (Phase 0) ---
+        cmdMgr.registerCommand(std::make_shared<TestPacketsCommand>());
 
         // --- Administration & Config ---
         cmdMgr.registerCommand(std::make_shared<BanlistCommand>());
@@ -141,8 +155,60 @@ namespace LightweightMC::Core
             .opLevel = 4 // The console has full OP rights (level 4)
         };
 
+        // Allow the console to op/deop players: update the live session and persist.
+        consoleCtx.setOpLevel = [this](const std::string &name, int level) -> bool
+        {
+            uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(4, level)));
+            return m_network.setPlayerOpLevel(name, clamped);
+        };
+
         CommandManager::getInstance().executeCommand(consoleCtx, inputLine);
     }
+
+    // Global reference to store original termios for signal handler cleanup
+    static struct termios g_orig_termios;
+    static bool g_termios_saved = false;
+
+    static void restoreTerminalOnSignal(int sig)
+    {
+        if (g_termios_saved)
+        {
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig_termios);
+        }
+        // Re-raise or exit cleanly depending on signal
+        if (sig == SIGSEGV || sig == SIGABRT)
+        {
+            std::signal(sig, SIG_DFL);
+            std::raise(sig);
+        }
+        else
+        {
+            std::_Exit(128 + sig);
+        }
+    }
+
+    // RAII guard for thread execution safety
+    struct TerminalModeGuard
+    {
+        struct termios orig;
+        TerminalModeGuard()
+        {
+            tcgetattr(STDIN_FILENO, &orig);
+            g_orig_termios = orig;
+            g_termios_saved = true;
+
+            // Catch signals to prevent terminal corruption on crash
+            std::signal(SIGINT, restoreTerminalOnSignal);
+            std::signal(SIGTERM, restoreTerminalOnSignal);
+            std::signal(SIGSEGV, restoreTerminalOnSignal);
+            std::signal(SIGABRT, restoreTerminalOnSignal);
+        }
+
+        ~TerminalModeGuard()
+        {
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig);
+        }
+    };
 
     void Server::startConsoleThread(const std::atomic<bool> &running)
     {
@@ -150,40 +216,121 @@ namespace LightweightMC::Core
         struct ThreadArgs
         {
             const std::atomic<bool> &running;
+            Network::NetworkManager *network;
         };
 
-        auto *args = new ThreadArgs{running};
+        auto *args = new ThreadArgs{running, &m_network};
 
         // 2. C++ lambda convertible to a C function pointer
         auto threadRoutine = [](void *arg) -> void *
         {
             auto *threadArgs = static_cast<ThreadArgs *>(arg);
             const auto &isRunning = threadArgs->running;
-
-            // Disables stdio/C synchronization to reduce buffer overhead
-            std::ios_base::sync_with_stdio(false);
+            Network::NetworkManager *network = threadArgs->network;
 
             CommandContext consoleCtx{
                 .sender = "Console",
                 .isConsole = true,
                 .opLevel = 4};
 
-            std::string line;
-            while (isRunning && std::getline(std::cin, line))
+            consoleCtx.setOpLevel = [network](const std::string &name, int level) -> bool
             {
-                if (line.empty())
-                    continue;
-                CommandManager::getInstance().executeCommand(consoleCtx, line);
+                uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(4, level)));
+                return network->setPlayerOpLevel(name, clamped);
+            };
+
+            std::vector<std::string> history;
+
+            // RAII Guard guarantees tcsetattr restoration on thread exit or exception
+            TerminalModeGuard termGuard;
+
+            struct termios raw = termGuard.orig;
+            raw.c_lflag &= ~(ICANON | ECHO);
+
+            while (isRunning)
+            {
+                tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
+                std::string currentLine;
+                int historyIndex = static_cast<int>(history.size());
+                char c;
+
+                while (isRunning && read(STDIN_FILENO, &c, 1) == 1)
+                {
+                    if (c == '\n' || c == '\r')
+                    {
+                        std::cout << "\r\n";
+                        break;
+                    }
+                    else if (c == '\033')
+                    {
+                        char seq[2];
+                        if (read(STDIN_FILENO, &seq[0], 1) == 1 && read(STDIN_FILENO, &seq[1], 1) == 1)
+                        {
+                            if (seq[0] == '[')
+                            {
+                                if (seq[1] == 'A') // Up arrow
+                                {
+                                    if (!history.empty() && historyIndex > 0)
+                                    {
+                                        historyIndex--;
+                                        std::cout << "\r\033[K" << history[historyIndex] << std::flush;
+                                        currentLine = history[historyIndex];
+                                    }
+                                }
+                                else if (seq[1] == 'B') // Down arrow
+                                {
+                                    if (historyIndex < static_cast<int>(history.size()))
+                                    {
+                                        historyIndex++;
+                                        std::cout << "\r\033[K";
+                                        if (historyIndex < static_cast<int>(history.size()))
+                                        {
+                                            currentLine = history[historyIndex];
+                                            std::cout << currentLine;
+                                        }
+                                        else
+                                        {
+                                            currentLine = "";
+                                        }
+                                        std::cout << std::flush;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else if (c == 127 || c == 8) // Backspace
+                    {
+                        if (!currentLine.empty())
+                        {
+                            currentLine.pop_back();
+                            std::cout << "\b \b" << std::flush;
+                        }
+                    }
+                    else if (c >= 32 && c <= 126) // Printable characters
+                    {
+                        currentLine += c;
+                        std::cout << c << std::flush;
+                    }
+                }
+
+                // Restore canonical mode for standard logging output
+                tcsetattr(STDIN_FILENO, TCSAFLUSH, &termGuard.orig);
+
+                if (!currentLine.empty())
+                {
+                    history.push_back(currentLine);
+                    CommandManager::getInstance().executeCommand(consoleCtx, currentLine);
+                }
             }
 
             delete threadArgs;
             return nullptr;
         };
 
-        // 3. Stack size configuration (256 KB instead of 8 MB)
         pthread_attr_t attr;
         pthread_attr_init(&attr);
-        pthread_attr_setstacksize(&attr, 256 * 1024); // 256 KB
+        pthread_attr_setstacksize(&attr, 256 * 1024);
 
         pthread_t threadId;
         if (pthread_create(&threadId, &attr, threadRoutine, args) == 0)
@@ -192,7 +339,7 @@ namespace LightweightMC::Core
         }
         else
         {
-            delete args; // Fail-safe
+            delete args;
         }
 
         pthread_attr_destroy(&attr);

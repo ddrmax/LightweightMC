@@ -40,8 +40,9 @@ namespace LightweightMC::Storage
     // entry in server.properties (see NetworkManager::start).
     enum class GenStyle
     {
-        OVERWORLD, // Bedrock at Y=-64, stone up to surface-3, dirt/grass at surface
-        SUPERFLAT  // Superflat preset layers (modern Minecraft presets: flat / stone / water)
+        OVERWORLD,  // Bedrock at Y=-64, stone up to surface-3, dirt/grass at surface
+        SUPERFLAT,  // Superflat preset layers (modern Minecraft presets: flat / stone / water)
+        TEST_GRID   // Deterministic block grid for protocol validation (see /testpackets)
     };
 
     class WorldStorage

@@ -1,5 +1,6 @@
 .vscode/
 .backup_2026-09-16
+/.refactor_tmp/
 build/
 build1/
 build2/
@@ -10,3 +11,4 @@ bot*.py
 handshake*.py
 antiscan_ips.txt
 /tools/verify_chunk_packet.cpp
+build_verify/

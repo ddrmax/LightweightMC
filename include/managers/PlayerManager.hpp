@@ -51,6 +51,11 @@ namespace LightweightMC::Player
         // Saves current player state (coordinates, spawn, inventory) to SQLite database
         void savePlayerState(const PlayerSession &session, Storage::Database &db);
 
+        // Update a player's op level: update the live session (if online) and
+        // persist to the database. Returns true if the player is online or
+        // the data was persisted successfully.
+        bool setPlayerOpLevel(const std::string &playerName, uint8_t opLevel);
+
     private:
         PlayerManager() = default;
 

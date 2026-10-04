@@ -2,6 +2,7 @@
 #include "network/Packet.hpp"
 #include "network/protocol/ProtocolTranslator.hpp"
 #include "core/Logger.hpp"
+#include "core/utils.hpp"
 #include "storage/WorldStorage.hpp"
 #include <cstdio>
 
@@ -9,23 +10,31 @@ namespace LightweightMC::Player
 {
     // Free function (declared in managers/PlayerManager.hpp) so the network login
     // handler can generate UUIDs without instantiating the PlayerManager singleton.
-    std::string generatePlayerUuid(const std::string &username)
+    std::string generatePlayerUuid(std::string_view username)
     {
-        uint64_t hash1 = 0xcbf29ce484222325ULL;
-        uint64_t hash2 = 0x100000001b3ULL;
-        for (char c : username)
-        {
-            hash1 = (hash1 ^ static_cast<uint8_t>(c)) * 1099511628211ULL;
-            hash2 = (hash2 ^ static_cast<uint8_t>(c)) * 14695981039346656037ULL;
-        }
-        char uuidBuf[37];
-        std::snprintf(uuidBuf, sizeof(uuidBuf), "%08x-%04x-4%03x-%04x-%012lx",
-                      static_cast<uint32_t>(hash1 >> 32),
-                      static_cast<uint16_t>(hash1 & 0xFFFF),
-                      static_cast<uint16_t>((hash1 >> 16) & 0x0FFF),
-                      static_cast<uint16_t>(((hash2 >> 48) & 0x3FFF) | 0x8000),
-                      static_cast<uint64_t>(hash2 & 0xFFFFFFFFFFFFULL));
-        return std::string(uuidBuf);
+        // 1. Concaténation "OfflinePlayer:<username>"
+        std::string source = "OfflinePlayer:";
+        source.append(username);
+
+        // 2. MD5 de la chaîne
+        auto hash = Core::md5(source);
+
+        // 3. Spécification UUID v3 (RFC 4122)
+        hash[6] = (hash[6] & 0x0f) | 0x30; // Version 3
+        hash[8] = (hash[8] & 0x3f) | 0x80; // Variant RFC 4122
+
+        // 4. Formatage via std::snprintf (36 caractères + 1 pour '\0')
+        char buffer[37];
+        std::snprintf(
+            buffer, sizeof(buffer),
+            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+            hash[0], hash[1], hash[2], hash[3],
+            hash[4], hash[5],
+            hash[6], hash[7],
+            hash[8], hash[9],
+            hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]);
+
+        return std::string(buffer, 36);
     }
 
     std::string PlayerManager::getPlayerUuid(const std::string &username)
@@ -376,17 +385,10 @@ namespace LightweightMC::Player
         Storage::PlayerData data;
         data.uuid = getPlayerUuid(session.username);
         data.username = session.username;
-        data.spawnX = 0.5;
-        data.spawnY = 50.0;
-        data.spawnZ = 0.5;
-        data.spawnYaw = 0.0f;
-        data.spawnPitch = 0.0f;
 
-        data.lastX = session.x;
-        data.lastY = session.y;
-        data.lastZ = session.z;
-        data.lastYaw = session.yaw;
-        data.lastPitch = session.pitch;
+        // Copy all persistent state (position, health, food, gamemode, spawn
+        // points, XP, ...) from the session into the database row.
+        session.applyTo(data);
 
         data.inventoryData = serializeInventory(session.inventory);
 

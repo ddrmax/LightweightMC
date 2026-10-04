@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cstring>
 #include <cmath>
+#include <random>
 
 namespace LightweightMC::Storage
 {
@@ -46,7 +47,8 @@ namespace LightweightMC::Storage
         // Masquage 255
         int Xm = X & 255;
         int Zm = Z & 255;
-
+        (void)Xm;
+        (void)Zm;
         float u = smoothstep(xf);
         float v = smoothstep(zf);
 
@@ -106,6 +108,58 @@ namespace LightweightMC::Storage
                     for (int x = 0; x < 16; ++x)
                         blocksArray[idx(absY, z, x)] = blockType;
             }
+            return;
+        }
+        if (style == GenStyle::TEST_GRID) // deterministic block grid for protocol validation
+        {
+            auto fillLayer = [&](int absY, uint16_t block)
+            {
+                for (int z = 0; z < 16; ++z)
+                    for (int x = 0; x < 16; ++x)
+                        blocksArray[idx(absY, z, x)] = block;
+            };
+
+            // Layout (world coordinates, so the pattern is continuous across chunks):
+            //   Y=0        : bedrock
+            //   Y=1..4     : stone
+            //   Y=5        : dirt
+            //   Y=6        : surface — a colored block grid + air gaps.
+            // The grid uses easily distinguishable legacy blocks: the X axis alternates
+            // wool colors (white/red/green/blue), the Z axis alternates gold/iron, and
+            // every 4th cell in both axes is left as air so chunk borders and block
+            // placement can be verified visually. Player spawn (0,7,0) sits on the grid.
+            fillLayer(0, Blocks::combined(Blocks::BEDROCK));
+            for (int y = 1; y <= 4; ++y)
+                fillLayer(y, Blocks::combined(Blocks::STONE));
+            fillLayer(5, Blocks::combined(Blocks::DIRT));
+
+            // Legacy block IDs used by the grid (pre-1.13 numeric IDs).
+            const uint16_t WOOL = 35; // meta: 0=white, 1=orange, 2=magenta, 3=light blue, 4=yellow, 5=lime, 6=pink, 7=gray...
+            const uint16_t GOLD_BLOCK = 41;
+            const uint16_t IRON_BLOCK = 42;
+            auto random_id = []()
+            { static std::mt19937 gen(std::random_device{}()); return std::uniform_int_distribution<int>(0, 197)(gen); };
+            for (int z = 0; z < 16; ++z)
+            {
+                for (int x = 0; x < 16; ++x)
+                {
+                    int wx = chunkX * 16 + x;
+                    int wz = chunkZ * 16 + z;
+                    uint16_t block = Blocks::combined(Blocks::AIR);
+
+                    if (wx % 4 == 0 && wz % 4 == 0)
+                        block = Blocks::combined(Blocks::AIR); // air gap every 4x4 cells
+                    else if (wz % 2 == 1)
+                        block = Blocks::combined(GOLD_BLOCK); // Z axis: gold stripes
+                    else if (wx % 2 == 1)
+                        block = Blocks::combined(IRON_BLOCK); // X axis: iron stripes
+                    else
+                        block = Blocks::combined(/*WOOL*/ random_id() /*, static_cast<uint8_t>((wx / 2 + wz / 2) % 14)*/); // wool checker
+
+                    blocksArray[idx(6, z, x)] = block;
+                }
+            }
+            return;
         }
         else // GenStyle::SUPERFLAT — modern Minecraft superflat presets
         {
@@ -416,16 +470,11 @@ namespace LightweightMC::Storage
                     fillLayer(y, Blocks::combined(Blocks::STONE));
                 fillLayer(5, Blocks::combined(Blocks::DIRT));
                 fillLayer(6, Blocks::combined(Blocks::GRASS_BLOCK));
-            }
-            if (preset != "minecraft:flat" &&
-                preset != "minecraft:stone" &&
-                preset != "minecraft:water" &&
-                preset != "minecraft:natural_hills" &&
-                preset != "minecraft:mountains" &&
-                preset != "minecraft:desert" &&
-                preset != "minecraft:islands")
-            {
-                Core::Logger::warn("[WorldStorage] Unknown generator preset '" + preset + "', falling back to minecraft:flat");
+
+                if (preset != "minecraft:flat")
+                {
+                    Core::Logger::warn("[WorldStorage] Unknown generator preset '" + preset + "', falling back to minecraft:flat");
+                }
             }
         }
     }

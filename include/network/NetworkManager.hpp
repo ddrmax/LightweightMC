@@ -10,6 +10,7 @@
 #include "storage/Database.hpp"
 #include "player/PlayerSession.hpp"
 #include "managers/WorldManager.hpp"
+#include "world/GameRules.hpp"
 
 namespace LightweightMC::Network
 {
@@ -39,6 +40,11 @@ namespace LightweightMC::Network
         bool start(uint16_t port);
         void pollEvents(int timeoutMs);
         void stop();
+
+        // Update a player's op level: update the live session (if online) and
+        // persist to the database. Returns true if the player is online or
+        // the data was persisted successfully.
+        bool setPlayerOpLevel(const std::string &playerName, uint8_t opLevel);
     };
 
 } // namespace LightweightMC::Network

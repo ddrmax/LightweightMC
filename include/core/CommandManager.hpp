@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <memory>
 #include <sstream>
+#include <functional>
 
 struct CommandContext
 {
@@ -20,11 +21,26 @@ struct CommandContext
         {
             LightweightMC::Core::Logger::info(std::string("[Command] ") + message);
         }
-        else
+        else if (replyCallback)
         {
-            // Network transmission to the player
+            // Send a chat packet to the player who issued the command.
+            replyCallback(message);
         }
     }
+
+    // Optional callback used by /op and /deop to change a player's operator
+    // status. It must update the live session (if the player is online) and
+    // persist the new level to the database. Returns true on success.
+    // Defaults to a no-op so commands can be exercised from the console.
+    std::function<bool(const std::string &playerName, int opLevel)> setOpLevel = [](const std::string &, int) -> bool
+    {
+        return false;
+    };
+
+    // Optional callback used by reply() to deliver chat messages to the
+    // player who issued the command. Defaults to a no-op so commands can be
+    // exercised from the console (or logged only).
+    std::function<void(const std::string &)> replyCallback = [](const std::string &) {};
 };
 
 class Command
