@@ -46,7 +46,7 @@ namespace LightweightMC::Player
                              const PacketSender &sendPacket, const BroadcastSender &broadcastPacket);
 
         // Broadcasts entity equipment to other players
-        void broadcastEquipment(int entityId, int16_t itemSlot, int16_t itemId, const BroadcastSender &broadcastPacket);
+        void broadcastEquipment(int entityId, int16_t itemSlot, int16_t itemId, int32_t clientProtocol, const BroadcastSender &broadcastPacket);
 
         // Saves current player state (coordinates, spawn, inventory) to SQLite database
         void savePlayerState(const PlayerSession &session, Storage::Database &db);

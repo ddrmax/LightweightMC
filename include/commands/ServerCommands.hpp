@@ -5,6 +5,7 @@
 #include "network/AntiScan.hpp"
 #include "core/Logger.hpp"
 #include "core/utils.hpp"
+#include <limits>
 
 // --- Server & session commands (anti-scan, teleport, version, list,
 // --- msg, say, op/deop, whitelist, kick, ban/pardon, save-all) ---
@@ -67,45 +68,130 @@ class TeleportCommand : public Command
 public:
     std::string getName() const override { return "tp"; }
     std::string getDescription() const override { return "Teleports a player to another player or coordinates."; }
-    std::string getUsage() const override { return "/tp <player> <target> OR /tp [player] <x> <y> <z>"; }
+    std::string getUsage() const override
+    {
+        return "/tp <player> <target> OR /tp [player] <x> <y> <z> ('~' = keep current axis)";
+    }
     int getRequiredOpLevel() const override { return 2; }
+    // Teleports a player -> console replies broadcast to all PLAY clients.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
+        LightweightMC::Core::Logger::debug("[CMD /tp] enter args=" + std::to_string(args.size()) +
+                                           " sender=" + ctx.sender +
+                                           " console=" + std::string(ctx.isConsole ? "1" : "0"));
         if (args.empty())
         {
+            LightweightMC::Core::Logger::debug("[CMD /tp] branch=usage (no args) — no packet emitted");
             ctx.reply("Usage: " + getUsage());
             return;
         }
 
+        // Small helper: parse a coordinate string; on failure return false
+        // so we can print a friendly usage error without throwing.
+        // "~" is accepted as a wildcard meaning "keep current axis value";
+        // it is encoded as a NaN sentinel that NetworkPlayerMeta.cpp's
+        // teleportToCoords translates back into the session's coordinate.
+        const auto parseCoord = [](const std::string &s, double &out) -> bool
+        {
+            if (s == "~")
+            {
+                out = std::numeric_limits<double>::quiet_NaN();
+                return true;
+            }
+            try
+            {
+                size_t consumed = 0;
+                out = std::stod(s, &consumed);
+                // Reject trailing garbage like "12abc".
+                return consumed == s.size() && !s.empty();
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+        };
+
         if (args.size() == 1)
         {
-            // /tp <target> (teleports player to target)
+            // /tp <target>  -> move the caller to target's current position.
             if (ctx.isConsole)
             {
+                LightweightMC::Core::Logger::debug("[CMD /tp] branch=console-no-self — refuses (console has no world position)");
                 ctx.reply("The console cannot be teleported without specifying a target player.");
                 return;
             }
-            ctx.reply("Teleportation of " + ctx.sender + " Towards " + args[0] + "...");
-            // TODO: To call PlayerManager::teleport(ctx.sender, args[0])
+            LightweightMC::Core::Logger::debug("[CMD /tp] branch=self->target target=" + args[0]);
+            if (ctx.teleportPlayerToTarget(ctx.sender, args[0]))
+            {
+                ctx.reply("Teleportation of " + ctx.sender + " Towards " + args[0] + ".");
+            }
+            else
+            {
+                LightweightMC::Core::Logger::debug("[CMD /tp] self->target teleport FAILED (target offline?)");
+                ctx.reply("Cannot teleport " + ctx.sender + " to " + args[0] + " — target player is not online.");
+            }
         }
         else if (args.size() == 2)
         {
             // /tp <player> <target>
-            ctx.reply("Teleportation of " + args[0] + " Towards " + args[1] + "...");
-            // TODO: To call PlayerManager::teleport(args[0], args[1])
+            LightweightMC::Core::Logger::debug("[CMD /tp] branch=player->target player=" + args[0] +
+                                               " target=" + args[1]);
+            if (ctx.teleportPlayerToTarget(args[0], args[1]))
+            {
+                ctx.reply("Teleportation of " + args[0] + " Towards " + args[1] + ".");
+            }
+            else
+            {
+                LightweightMC::Core::Logger::debug("[CMD /tp] player->target teleport FAILED");
+                ctx.reply("Cannot teleport " + args[0] + " to " + args[1] + " — one of them is not online.");
+            }
         }
         else if (args.size() == 3)
         {
             // /tp <x> <y> <z>
-            ctx.reply("Teleportation of " + ctx.sender + " in X:" + args[0] + " Y:" + args[1] + " Z:" + args[2]);
-            // TODO: To call PlayerManager::teleportToCoords(ctx.sender, x, y, z)
+            double x = 0.0, y = 0.0, z = 0.0;
+            if (!parseCoord(args[0], x) || !parseCoord(args[1], y) || !parseCoord(args[2], z))
+            {
+                LightweightMC::Core::Logger::debug("[CMD /tp] branch=self->coords parse-error");
+                ctx.reply("Teleport coordinates must be numbers. Usage: " + getUsage());
+                return;
+            }
+            LightweightMC::Core::Logger::debug("[CMD /tp] branch=self->coords x=" + std::to_string(x) +
+                                               " y=" + std::to_string(y) + " z=" + std::to_string(z));
+            if (ctx.teleportPlayerToCoords(ctx.sender, x, y, z))
+            {
+                ctx.reply("Teleportation of " + ctx.sender + " in X:" + args[0] + " Y:" + args[1] + " Z:" + args[2]);
+            }
+            else
+            {
+                LightweightMC::Core::Logger::debug("[CMD /tp] self->coords teleport FAILED (self offline?)");
+                ctx.reply("Cannot teleport " + ctx.sender + " — sender is not online.");
+            }
         }
-        else if (args.size() >= 4)
+        else // args.size() >= 4
         {
             // /tp <player> <x> <y> <z>
-            ctx.reply("Teleportation of " + args[0] + " in X:" + args[1] + " Y:" + args[2] + " Z:" + args[3]);
-            // TODO: To call PlayerManager::teleportToCoords(args[0], x, y, z)
+            double x = 0.0, y = 0.0, z = 0.0;
+            if (!parseCoord(args[1], x) || !parseCoord(args[2], y) || !parseCoord(args[3], z))
+            {
+                LightweightMC::Core::Logger::debug("[CMD /tp] branch=player->coords parse-error");
+                ctx.reply("Teleport coordinates must be numbers. Usage: " + getUsage());
+                return;
+            }
+            LightweightMC::Core::Logger::debug("[CMD /tp] branch=player->coords player=" + args[0] +
+                                               " x=" + std::to_string(x) + " y=" + std::to_string(y) +
+                                               " z=" + std::to_string(z));
+            if (ctx.teleportPlayerToCoords(args[0], x, y, z))
+            {
+                ctx.reply("Teleportation of " + args[0] + " in X:" + args[1] + " Y:" + args[2] + " Z:" + args[3]);
+            }
+            else
+            {
+                LightweightMC::Core::Logger::debug("[CMD /tp] player->coords teleport FAILED");
+                ctx.reply("Cannot teleport " + args[0] + " — that player is not online.");
+            }
         }
     }
 };
@@ -179,7 +265,13 @@ public:
         }
 
         ctx.reply("[Me -> " + target + "] " + message);
-        LightweightMC::Core::Logger::info("[private message] " + ctx.sender + " > " + target + ": " + message);
+        // Chat-only command: no game-state change. Echo to the server
+        // console only when the request originated there so in-game chat
+        // traffic does not spam the log.
+        if (ctx.isConsole)
+        {
+            LightweightMC::Core::Logger::info("[private message] " + ctx.sender + " > " + target + ": " + message);
+        }
         // TODO: Send the packet to the `target` recipient
     }
 };
@@ -211,7 +303,13 @@ public:
         }
 
         std::string broadcastText = "[" + ctx.sender + "] " + message;
-        LightweightMC::Core::Logger::info("[Server Broadcast] " + broadcastText);
+        // Chat broadcast: no game-state change. Log on the server console
+        // only when the request came from the console, so in-game chat
+        // broadcasts stay inside the chat stream.
+        if (ctx.isConsole)
+        {
+            LightweightMC::Core::Logger::info("[Server Broadcast] " + broadcastText);
+        }
 
         // TODO: NetworkManager::broadcastChatMessage(broadcastText)
         ctx.reply("Broadcast sent : " + message);
@@ -227,6 +325,8 @@ public:
     std::string getUsage() const override { return "/op <player>"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 3; }
+    // Mutates a player's operator level -> console replies should broadcast.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -257,6 +357,8 @@ public:
     std::string getUsage() const override { return "/deop <player>"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 3; }
+    // Mutates a player's operator level -> console replies should broadcast.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -287,6 +389,8 @@ public:
     std::string getUsage() const override { return "/whitelist <add|remove|on|off> [player]"; }
     std::vector<std::string> getAliases() const override { return {"Wl"}; }
     int getRequiredOpLevel() const override { return 3; }
+    // Whitelist mutations touch player joinability -> broadcast on console.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -335,6 +439,8 @@ public:
     std::string getUsage() const override { return "/kick <player> [reason]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Disconnects a connected player -> broadcast on console.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -371,6 +477,8 @@ public:
     std::string getUsage() const override { return "/ban <player> [reason]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 3; }
+    // Bans a player (and disconnects if online) -> broadcast on console.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -407,6 +515,8 @@ public:
     std::string getUsage() const override { return "/ban-ip <player|IP> [reason]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 3; }
+    // IP ban can drop connected players sharing that IP -> broadcast.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -431,6 +541,8 @@ public:
     std::string getUsage() const override { return "/pardon <pseudo>"; }
     std::vector<std::string> getAliases() const override { return {"Humban"}; }
     int getRequiredOpLevel() const override { return 3; }
+    // Removes a ban for a player -> broadcast on console.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -455,6 +567,8 @@ public:
     std::string getUsage() const override { return "/pardon-ip <IP>"; }
     std::vector<std::string> getAliases() const override { return {"Unban ip"}; }
     int getRequiredOpLevel() const override { return 3; }
+    // Removes an IP ban so a player can rejoin -> broadcast on console.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -660,6 +774,7 @@ public:
                 return;
             }
             gr.setBool(ruleName, parsed);
+            LightweightMC::Core::Logger::info("[GameRule] " + ctx.sender + " set '" + ruleName + "' = " + (parsed ? "true" : "false"));
             ctx.reply("Set " + ruleName + " to " + (parsed ? "true" : "false"));
         }
         else
@@ -671,6 +786,7 @@ public:
                 return;
             }
             gr.setInt(ruleName, parsed);
+            LightweightMC::Core::Logger::info("[GameRule] " + ctx.sender + " set '" + ruleName + "' = " + std::to_string(parsed));
             ctx.reply("Set " + ruleName + " to " + std::to_string(parsed));
         }
     }

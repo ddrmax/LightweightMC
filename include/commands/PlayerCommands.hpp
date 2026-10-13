@@ -136,6 +136,9 @@ public:
     std::string getUsage() const override { return "/gamemode <survival|creative|adventure|spectator> [target]"; }
     std::vector<std::string> getAliases() const override { return {"gm"}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Mutates a player's game mode (survival/creative/adventure/spectator)
+    // -- console replies about this change should reach every PLAY client.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -144,7 +147,42 @@ public:
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Game mode changed.");
+
+        // Vanilla game-mode enumeration (matches PlayerSession::gamemode and
+        // the JoinGame packet's second byte).
+        int mode = -1;
+        std::string modeName = args[0];
+        if (modeName == "survival") mode = 0;
+        else if (modeName == "creative") mode = 1;
+        else if (modeName == "adventure") mode = 2;
+        else if (modeName == "spectator") mode = 3;
+        else
+        {
+            ctx.reply("Unknown game mode \"" + modeName + "\". Usage: " + getUsage());
+            return;
+        }
+
+        // Target selection: default is the caller (the player for in-game
+        // chat, or explicitly required for the console).
+        std::string target = args.size() >= 2 ? args[1] : std::string();
+        if (target.empty())
+        {
+            if (ctx.isConsole)
+            {
+                ctx.reply("Console /gamemode requires an explicit target. Usage: /gamemode <mode> <player>");
+                return;
+            }
+            target = ctx.sender;
+        }
+
+        if (ctx.setGameMode(target, mode))
+        {
+            ctx.reply("Game mode of " + target + " set to " + modeName + ".");
+        }
+        else
+        {
+            ctx.reply("Game mode update failed for " + target + " (unknown player or persistence error).");
+        }
     }
 };
 
@@ -157,6 +195,8 @@ public:
     std::string getUsage() const override { return "/give <target> <item> [count]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Puts an item in a player's inventory -> console reply broadcasts.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {

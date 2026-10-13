@@ -57,6 +57,13 @@ public:
             if (sv.front() == '[' && sv.back() == ']')
             {
                 currentSection = std::string(trim(sv.substr(1, sv.size() - 2)));
+                // Register the section in the lookup even when it has no
+                // keys yet, so a later set(section, key, value) finds the
+                // header and appends the key in place rather than emitting
+                // a duplicate [section] line at the tail of the file. This
+                // keeps schema-migration writes (backfilling keys into a
+                // header-only section) idempotent.
+                m_lookup.try_emplace(currentSection);
                 m_entries.push_back({Entry::Type::Section, line, currentSection, "", ""});
                 continue;
             }
@@ -128,6 +135,18 @@ public:
 
         m_entries.push_back({Entry::Type::KeyValue, key + " = " + value, section, key, value});
         m_lookup[section][key] = m_entries.size() - 1;
+    }
+
+    // True iff (section, key) has already been parsed or set. Used by
+    // ConfigManager's schema-reconciliation path to decide whether a key
+    // needs to be backfilled from the current defaults; deliberately does
+    // not overwrite existing user-set values.
+    bool hasKey(const std::string &section, const std::string &key) const
+    {
+        auto secIt = m_lookup.find(section);
+        if (secIt == m_lookup.end())
+            return false;
+        return secIt->second.find(key) != secIt->second.end();
     }
 
     std::string getString(const std::string &section, const std::string &key, const std::string &defaultValue = "") const

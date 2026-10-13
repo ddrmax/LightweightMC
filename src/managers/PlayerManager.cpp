@@ -5,6 +5,7 @@
 #include "core/utils.hpp"
 #include "storage/WorldStorage.hpp"
 #include <cstdio>
+#include <cmath>
 
 namespace LightweightMC::Player
 {
@@ -96,6 +97,9 @@ namespace LightweightMC::Player
 
     void PlayerManager::teleportPlayer(int fd, PlayerSession &session, double x, double y, double z, float yaw, float pitch, const PacketSender &sendPacket)
     {
+        Core::Logger::debug("[PLAYER tp] teleportPlayer fd=" + std::to_string(fd) +
+                            " target=(" + std::to_string(x) + ", " + std::to_string(y) + ", " +
+                            std::to_string(z) + ") yaw=" + std::to_string(yaw) + " pitch=" + std::to_string(pitch));
         session.x = x;
         session.y = y;
         session.z = z;
@@ -110,6 +114,8 @@ namespace LightweightMC::Player
         Network::Packet::writeFloat(packet, pitch);
         packet.push_back(0x00); // Flags: 0x00 = Absolute coordinates
 
+        Core::Logger::debug("[PLAYER tp] sending S2C Position packet (1.8 id 0x08) to fd=" + std::to_string(fd) +
+                            " payloadBytes=" + std::to_string(packet.size()));
         sendPacket(fd, 0x08, packet);
     }
 
@@ -131,8 +137,24 @@ namespace LightweightMC::Player
             currentSession.x = playerData.lastX;
             currentSession.y = playerData.lastY;
             currentSession.z = playerData.lastZ;
-            currentSession.yaw = playerData.lastYaw;
+            currentSession.yaw = std::fmod(playerData.lastYaw, 360.0f);
+            if (currentSession.yaw < 0.0f)
+            {
+                currentSession.yaw += 360.0f;
+            }
             currentSession.pitch = playerData.lastPitch;
+            // Persisted game mode must be restored so a client that was set
+            // to survival/adventure/etc. reconnects in the same mode
+            // (JoinGame's 2nd byte reads currentSession.gamemode).
+            currentSession.gamemode = playerData.gamemode;
+            // Persisted operator level must also be restored so that a
+            // player who was made an operator via the console (/op or /deop)
+            // keeps their privileges after a re-login -- and across a server
+            // restart (both paths come from the DB row, not from the previous
+            // live session). Without this line every fresh login silently
+            // drops the player back to opLevel=0 and CommandManager's
+            // per-command gate rejects /gamemode, /gamerule, /op, etc.
+            currentSession.opLevel = playerData.opLevel;
             deserializeInventory(playerData.inventoryData, currentSession.inventory);
             Core::Logger::info("Restored player state for UUID [" + playerUuid + "] (" + username + ") at (" +
                                std::to_string(currentSession.x) + ", " + std::to_string(currentSession.y) + ", " + std::to_string(currentSession.z) + ") with " +
@@ -141,11 +163,35 @@ namespace LightweightMC::Player
         else
         {
             currentSession.x = 0.5;
-            currentSession.y = 50.0;
             currentSession.z = 0.5;
+            // Terrain-aware first-login spawn. The vanilla Java Edition
+            // spawn rule for a 2-tall standing entity is: solid block
+            // directly below the feet AND air at both the feet block AND
+            // the head block (i.e. "at least 2 air blocks"). We apply the
+            // exact same predicate WorldStorage::findStandingFeetY uses
+            // for mob spawns so a new player never appears inside generated
+            // terrain or a player-built wall. The hint (50) matches the
+            // historical default so that if no legal feet-Y exists (rare:
+            // entire column blocked), we still fall back to y=50 and the
+            // client sees the classic behaviour.
+            const int feetY = worldManager.getWorldStorageFor(currentSession.worldId).findStandingFeetY(0, 0, 50);
+            currentSession.y = (feetY >= 0) ? static_cast<double>(feetY) : 50.0;
             currentSession.yaw = 0.0f;
             currentSession.pitch = 0.0f;
-            Core::Logger::info("Created new player session for UUID [" + playerUuid + "] (" + username + ")");
+            if (feetY >= 0)
+            {
+                Core::Logger::info("Created new player session for UUID [" + playerUuid +
+                                   "] (" + username + ") grounded at (0.5, " +
+                                   std::to_string(feetY) + ", 0.5) -- "
+                                   "column passed the 2-air-above rule");
+            }
+            else
+            {
+                Core::Logger::warn("New player spawn column (0,0) has no legal feet-Y; "
+                                   "falling back to y=50 default");
+                Core::Logger::info("Created new player session for UUID [" + playerUuid +
+                                   "] (" + username + ") at fallback (0.5, 50.0, 0.5)");
+            }
         }
 
         // -------------------------------------------------------------
@@ -155,7 +201,7 @@ namespace LightweightMC::Player
         // 1. Join Game (Packet 0x01)
         std::vector<uint8_t> joinGame;
         Network::Packet::writeInt(joinGame, clientFd); // Entity ID
-        joinGame.push_back(1);                         // Gamemode (1 = Creative)
+        joinGame.push_back(currentSession.gamemode);   // Gamemode (persisted in DB / PlayerSession)
         joinGame.push_back(0);                         // Dimension (0 = Overworld)
         joinGame.push_back(1);                         // Difficulty (1 = Easy)
         if (currentSession.clientProtocol >= 47)
@@ -253,7 +299,7 @@ namespace LightweightMC::Player
 
         Network::Packet::writeString(addTab, username);
         Network::Packet::writeVarInt(addTab, 0); // Properties
-        Network::Packet::writeVarInt(addTab, 1); // Gamemode
+        Network::Packet::writeVarInt(addTab, currentSession.gamemode); // Gamemode (mirrors JoinGame)
         Network::Packet::writeVarInt(addTab, 0); // Ping
         addTab.push_back(0);                     // Display name
 
@@ -330,20 +376,21 @@ namespace LightweightMC::Player
         Core::Logger::info("Player " + username + " connected and spawned in the world!");
     }
 
-    void PlayerManager::broadcastEquipment(int entityId, int16_t itemSlot, int16_t itemId, const BroadcastSender &broadcastPacket)
+    void PlayerManager::broadcastEquipment(int entityId, int16_t itemSlot, int16_t itemId, int32_t clientProtocol, const BroadcastSender &broadcastPacket)
     {
         std::vector<uint8_t> packet;
         Network::Packet::writeVarInt(packet, entityId);
         Network::Packet::writeShort(packet, itemSlot);
 
-        auto translatedItem = Network::Protocol::ProtocolTranslator::translateItemToClient(47, itemId);
+        auto translatedItem = Network::Protocol::ProtocolTranslator::translateItemToClient(clientProtocol, itemId);
 
         Network::Packet::writeShort(packet, translatedItem.id);
         if (translatedItem.id != -1)
         {
             packet.push_back(translatedItem.count);
             Network::Packet::writeShort(packet, translatedItem.damage);
-            packet.push_back(0);
+            if (clientProtocol >= 47)
+                packet.push_back(0); // NBT tag = end of compound (1.8+ only)
         }
 
         broadcastPacket(0x04, packet, entityId);

@@ -1,3 +1,4 @@
+#pragma once
 #include <fstream>
 #include <sys/sysinfo.h>
 #include <unistd.h>
@@ -9,7 +10,7 @@
 #include <cstdint>
 #include <string_view>
 #define SECTION "\xC2\xA7"
-#define LWMC_VER "0.0.6-alpha"
+#define LWMC_VER "0.0.13-alpha"
 
 namespace LightweightMC::Core
 {

@@ -9,6 +9,16 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-z,stack-size=1048576"
 # Aggressive optimization flags for ARM / C++
 add_compile_options(-O3 -flto -Wall -Wextra)
 
+# Optional sanitizer build: turn ON with -DWITH_SANITIZERS=ON to get
+# ASAN + UBSAN instrumentation instead of -O3/-flto. Useful for
+# reproducing protocol/memory bugs under a real client. Note that ASAN
+# and -flto interact poorly, so when the flag is on we drop -O3 and -flto.
+option(WITH_SANITIZERS "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(WITH_SANITIZERS)
+    add_compile_options(-g -O1 -fno-inline -fsanitize=address,undefined)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # System dependencies
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LZ4 REQUIRED liblz4)

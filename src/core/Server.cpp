@@ -14,10 +14,12 @@
 #include "commands/DebugCommands.hpp"
 #include "commands/ScriptingCommands.hpp"
 #include "commands/TestPacketsCommand.hpp"
+#include "network/Packet.hpp"
 #include <termios.h>
 #include <unistd.h>
 #include <vector>
 #include <csignal>
+#include <chrono>
 namespace LightweightMC::Core
 {
 
@@ -46,6 +48,8 @@ namespace LightweightMC::Core
         cmdMgr.registerCommand(std::make_shared<HelpCommand>());
         cmdMgr.registerCommand(std::make_shared<StopCommand>(m_running));
         cmdMgr.registerCommand(std::make_shared<ReloadCommand>());
+        cmdMgr.registerCommand(std::make_shared<PingCommand>());
+        cmdMgr.registerCommand(std::make_shared<HudCommand>());
 
         cmdMgr.registerCommand(std::make_shared<AntiScanCommand>());
         cmdMgr.registerCommand(std::make_shared<TeleportCommand>());
@@ -107,6 +111,10 @@ namespace LightweightMC::Core
         cmdMgr.registerCommand(std::make_shared<TimeCommand>());
         cmdMgr.registerCommand(std::make_shared<WeatherCommand>());
         cmdMgr.registerCommand(std::make_shared<WorldBorderCommand>());
+        // Multiworld dimension-plane commands (see
+        // src/network/NetworkWorlds.cpp for the API backing these).
+        cmdMgr.registerCommand(std::make_shared<GotorCommand>());
+        cmdMgr.registerCommand(std::make_shared<WorldCommand>());
 
         // --- Entities & Combat ---
         cmdMgr.registerCommand(std::make_shared<BossbarCommand>());
@@ -160,6 +168,73 @@ namespace LightweightMC::Core
         {
             uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(4, level)));
             return m_network.setPlayerOpLevel(name, clamped);
+        };
+
+        // Allow the console to change a player's game mode. The hook updates
+        // the live session, persists the change to the database, and (when
+        // the player is online) pushes a Tab List (0x38) update to the
+        // client so survival/creative/adventure/spectator is observable
+        // immediately without requiring a reconnect.
+        consoleCtx.setGameMode = [this](const std::string &name, int level) -> bool
+        {
+            uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(3, level)));
+            return m_network.setPlayerGameMode(name, clamped);
+        };
+
+        // Broadcast console replies to every PLAY client only when the
+        // command actually touched player state (see Command::affectsPlayerState
+        // which CommandManager::executeCommand pushes into ctx.broadcastThisReply).
+        consoleCtx.broadcastCallback = [this](const std::string &msg)
+        {
+            std::vector<uint8_t> chatPayload;
+            LightweightMC::Network::Packet::writeString(chatPayload,
+                                                        R"({"text":")" + msg + R"("})");
+            chatPayload.push_back(1); // chat-visible flag
+            m_network.broadcastPacket(0x02, chatPayload, -1);
+        };
+
+        // Chat/console /tp: teleport an online player to absolute coords or
+        // to another player's current world position. Delegates to
+        // NetworkManager's teleport helpers which look up the live session,
+        // mutate x/y/z, and push the S2C Position packet (1.8 id 0x08).
+        consoleCtx.teleportPlayerToCoords = [this](const std::string &name, double x, double y, double z) -> bool
+        {
+            return m_network.teleportToCoords(name, x, y, z);
+        };
+        consoleCtx.teleportPlayerToTarget = [this](const std::string &mover, const std::string &target) -> bool
+        {
+            return m_network.teleportToPlayer(mover, target);
+        };
+
+        // Multiworld: /gotor <worldName> moves a live session to the named
+        // plane. The NetworkManager implementation resolves the name via the
+        // world_registry SQLite table, snaps to the target plane's surface,
+        // clears loadedChunks (so the client re-streams terrain from the new
+        // plane) and pushes an S2C Position packet (0x08) so the client
+        // animates the jump.
+        consoleCtx.switchPlayerWorld = [this](const std::string &playerName, const std::string &worldName) -> bool
+        {
+            const int32_t id = m_network.lookupWorldId(worldName);
+            // lookupWorldId returns the -2147483648 sentinel when the plane is
+            // missing; negative ids are legal (Nether is -1 pre-1.12), so test
+            // the sentinel rather than "id < 0".
+            if (id == -2147483648)
+                return false;
+            return m_network.setPlayerWorldId(playerName, id);
+        };
+        // /world create <name> <style>: allocate a fresh >=100 id in the
+        // world_registry SQLite table and open a per-plane SQLite file.
+        consoleCtx.createWorld = [this](const std::string &worldName, const std::string &style) -> int32_t
+        {
+            return m_network.createWorld(worldName, style);
+        };
+        consoleCtx.listWorlds = [this]() -> std::vector<std::string>
+        {
+            return m_network.listWorldNames();
+        };
+        consoleCtx.describeWorld = [this](const std::string &worldName, int32_t &outId, std::string &outStyle, std::string &outDbPath) -> bool
+        {
+            return m_network.describeWorld(worldName, outId, outStyle, outDbPath);
         };
 
         CommandManager::getInstance().executeCommand(consoleCtx, inputLine);
@@ -237,6 +312,63 @@ namespace LightweightMC::Core
             {
                 uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(4, level)));
                 return network->setPlayerOpLevel(name, clamped);
+            };
+
+            // Mirror the wiring done in processConsoleInput so the
+            // /gamemode command issued from the actual console thread
+            // changes the live session and persists to SQLite.
+            consoleCtx.setGameMode = [network](const std::string &name, int level) -> bool
+            {
+                uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(3, level)));
+                return network->setPlayerGameMode(name, clamped);
+            };
+
+            // Multiworld: /gotor <worldName> and /world create <name> <style>.
+            consoleCtx.switchPlayerWorld = [network](const std::string &playerName, const std::string &worldName) -> bool
+            {
+                const int32_t id = network->lookupWorldId(worldName);
+                // Sentinel check, not "id < 0": Nether's id is legitimately -1.
+                if (id == -2147483648)
+                    return false;
+                return network->setPlayerWorldId(playerName, id);
+            };
+            consoleCtx.createWorld = [network](const std::string &worldName, const std::string &style) -> int32_t
+            {
+                return network->createWorld(worldName, style);
+            };
+            consoleCtx.listWorlds = [network]() -> std::vector<std::string>
+            {
+                return network->listWorldNames();
+            };
+            consoleCtx.describeWorld = [network](const std::string &worldName, int32_t &outId, std::string &outStyle, std::string &outDbPath) -> bool
+            {
+                return network->describeWorld(worldName, outId, outStyle, outDbPath);
+            };
+
+            // Broadcast console replies to every PLAY client only when the
+            // command mutated player state (Command::affectsPlayerState ->
+            // CommandManager::executeCommand writes it into ctx.broadcastThisReply).
+            consoleCtx.broadcastCallback = [network](const std::string &msg)
+            {
+                std::vector<uint8_t> chatPayload;
+                LightweightMC::Network::Packet::writeString(chatPayload,
+                                                            R"({"text":")" + msg + R"("})");
+                chatPayload.push_back(1); // chat-visible flag
+                network->broadcastPacket(0x02, chatPayload, -1);
+            };
+
+            // Chat/console /tp: teleport an online player to absolute coords
+            // or to another player's current world position. Delegates to
+            // NetworkManager's teleport helpers which look up the live
+            // session, mutate x/y/z, and push the S2C Position packet
+            // (1.8 id 0x08).
+            consoleCtx.teleportPlayerToCoords = [network](const std::string &name, double x, double y, double z) -> bool
+            {
+                return network->teleportToCoords(name, x, y, z);
+            };
+            consoleCtx.teleportPlayerToTarget = [network](const std::string &mover, const std::string &target) -> bool
+            {
+                return network->teleportToPlayer(mover, target);
             };
 
             std::vector<std::string> history;
@@ -371,11 +503,47 @@ namespace LightweightMC::Core
         startConsoleThread(m_running);
         Logger::info("Server is ready and listening. Type /help for available commands. ");
 
-        // Boucle maître
+        // Boucle maître — fixed-accumulator 20 TPS tick loop.
+        // Previously pollEvents(50) alone was treated as "1 tick = 50 ms",
+        // but epoll_wait returns as soon as any socket event fires, which
+        // means the loop iterates far more often than 20/s on a busy server
+        // and tickActiveChunks() re-runs hundreds of times per second. Use
+        // an explicit accumulator so the world tick stays fixed at 20 Hz
+        // regardless of network activity. pollEvents uses a smaller timeout
+        // (10 ms) so we do not introduce up-to-50 ms input latency.
+        using namespace std::chrono_literals;
+        auto lastTick = std::chrono::steady_clock::now();
+        constexpr auto tickInterval = 50ms; // 20 TPS
         while (m_running)
         {
-            m_network.pollEvents(50); // 50ms = 1 tick (20 TPS)
-            m_chunkManager.tickActiveChunks();
+            m_network.pollEvents(10); // small slice => input stays responsive
+
+            auto now = std::chrono::steady_clock::now();
+            while (now - lastTick >= tickInterval)
+            {
+                if (!m_running)
+                    break;
+                m_chunkManager.tickActiveChunks();
+                // Periodic 1.8+ chunk-stream flush. Fires at 5 Hz (throttle
+                // by running every 4th 50ms tick) so the async WorldStorage
+                // generation worker's outputs reach idle or slow-moving
+                // players who stopped moving before their last crossing's
+                // prefetch queue drained. Moving players already get their
+                // chunks via updateChunksAroundPlayer at each crossing; this
+                // pass only handles the "stopped moving" tail and lets the
+                // 2ms inter-packet sleep in sendMapChunkBulk pace wire
+                // delivery to whatever the client is currently ready to
+                // receive.
+                static int chunkStreamThrottle = 0;
+                if ((++chunkStreamThrottle & 0x3) == 0)
+                    m_network.tickChunkStreaming(5);
+                lastTick += tickInterval;
+
+                // If we are more than 5 ticks behind (server stalled), snap
+                // the accumulator to now so we do not run a catch-up burst.
+                if (std::chrono::steady_clock::now() - lastTick > 5 * tickInterval)
+                    lastTick = std::chrono::steady_clock::now();
+            }
         }
     }
 

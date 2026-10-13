@@ -80,6 +80,11 @@ bool CommandManager::executeCommand(const CommandContext &ctx, const std::string
 
     try
     {
+        // Publish the per-command "does this mutate a player?" flag so
+        // reply() can broadcast for console commands that touched player
+        // state (op/deop, kick/ban, gamemode, ...) without broadcasting
+        // for server-only commands like /reload or /stop.
+        ctx.broadcastThisReply = cmd->affectsPlayerState();
         cmd->execute(ctx, args);
     }
     catch (const std::exception &e)

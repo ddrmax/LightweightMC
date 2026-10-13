@@ -44,7 +44,8 @@ namespace LightweightMC::Storage
             spawn_x DOUBLE, spawn_y DOUBLE, spawn_z DOUBLE, spawn_yaw FLOAT, spawn_pitch FLOAT,
             last_x DOUBLE, last_y DOUBLE, last_z DOUBLE, last_yaw FLOAT, last_pitch FLOAT,
             inventory_blob BLOB,
-            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            world_id INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS gamerules (
             name TEXT PRIMARY KEY,
@@ -91,7 +92,8 @@ namespace LightweightMC::Storage
             "xp_progress FLOAT DEFAULT 0.0",
             "xp_total INTEGER DEFAULT 0",
             "death_count INTEGER DEFAULT 0",
-            "op_level INTEGER DEFAULT 0"
+            "op_level INTEGER DEFAULT 0",
+            "world_id INTEGER DEFAULT 0"
         };
 
         for (const char *col : newColumns)
@@ -352,6 +354,335 @@ namespace LightweightMC::Storage
 
         sqlite3_finalize(stmt);
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Container persistence (block_entities table, keyed by block coord).
+    // ------------------------------------------------------------------
+    bool Database::loadContainer(int cx, int cz, int rx, int y, int rz,
+                                 uint16_t &typeOut, std::vector<uint8_t> &blobOut)
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql = R"(
+            SELECT type, data_blob FROM block_entities
+            WHERE chunk_x = ? AND chunk_z = ? AND rel_x = ? AND y = ? AND rel_z = ?;
+        )";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare loadContainer SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, cx);
+        sqlite3_bind_int(stmt, 2, cz);
+        sqlite3_bind_int(stmt, 3, rx);
+        sqlite3_bind_int(stmt, 4, y);
+        sqlite3_bind_int(stmt, 5, rz);
+
+        bool found = false;
+        typeOut = 0;
+        blobOut.clear();
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            typeOut = static_cast<uint16_t>(sqlite3_column_int(stmt, 0));
+            const void *raw = sqlite3_column_blob(stmt, 1);
+            if (raw)
+            {
+                const size_t len = sqlite3_column_bytes(stmt, 1);
+                const uint8_t *bytes = reinterpret_cast<const uint8_t *>(raw);
+                blobOut.assign(bytes, bytes + len);
+            }
+            found = true;
+        }
+
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
+    bool Database::saveContainer(int cx, int cz, int rx, int y, int rz,
+                                 uint16_t type, const std::vector<uint8_t> &blob)
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql = R"(
+            INSERT OR REPLACE INTO block_entities
+            (chunk_x, chunk_z, rel_x, y, rel_z, type, data_blob)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+        )";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare saveContainer SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, cx);
+        sqlite3_bind_int(stmt, 2, cz);
+        sqlite3_bind_int(stmt, 3, rx);
+        sqlite3_bind_int(stmt, 4, y);
+        sqlite3_bind_int(stmt, 5, rz);
+        sqlite3_bind_int(stmt, 6, static_cast<int>(type));
+        sqlite3_bind_blob(stmt, 7, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE)
+        {
+            Core::Logger::error("Failed to save container at (" + std::to_string(cx) + ", " +
+                                std::to_string(cz) + ", " + std::to_string(rx) + ", " +
+                                std::to_string(y) + ", " + std::to_string(rz) + ")");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool Database::deleteContainer(int cx, int cz, int rx, int y, int rz)
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql = R"(
+            DELETE FROM block_entities
+            WHERE chunk_x = ? AND chunk_z = ? AND rel_x = ? AND y = ? AND rel_z = ?;
+        )";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare deleteContainer SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, cx);
+        sqlite3_bind_int(stmt, 2, cz);
+        sqlite3_bind_int(stmt, 3, rx);
+        sqlite3_bind_int(stmt, 4, y);
+        sqlite3_bind_int(stmt, 5, rz);
+
+        bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    // ---------------------------------------------------------------------
+    // World registry (multiworld / dimension planes).
+    //
+    // Table layout:
+    //   id INTEGER UNIQUE  -- 0=Overworld, 1=Nether, 2=End are hard-coded by
+    //                        NetworkManager::start; 3..99 reserved for
+    //                        future vanilla-style planes ("The Sif", "The
+    //                        Shift"); 100+ auto-allocated here for custom
+    //                        worlds created via /world create.
+    //   name TEXT UNIQUE COLLATE NOCASE
+    //   style TEXT          -- GenStyle string (overworld/superflat/etc.)
+    //
+    // Uniqueness is guaranteed by the UNIQUE column constraint plus the
+    // monotonic allocator (max id >= 100) + 1.
+    // ---------------------------------------------------------------------
+    bool Database::initWorldRegistry()
+    {
+        if (!m_db)
+            return false;
+        const char *sql = R"(
+            CREATE TABLE IF NOT EXISTS world_registry (
+                id INTEGER UNIQUE,
+                name TEXT UNIQUE COLLATE NOCASE,
+                style TEXT
+            );
+        )";
+        char *errMsg = nullptr;
+        if (sqlite3_exec(m_db, sql, nullptr, nullptr, &errMsg) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to initialise world_registry: " +
+                                std::string(errMsg ? errMsg : "unknown"));
+            if (errMsg) sqlite3_free(errMsg);
+            return false;
+        }
+        return true;
+    }
+
+    bool Database::lookupWorld(const std::string &name,
+                               int32_t &outId, std::string &outStyle) const
+    {
+        if (!m_db)
+            return false;
+        const char *sql = R"(
+            SELECT id, style FROM world_registry WHERE name = ? COLLATE NOCASE;
+        )";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare lookupWorld: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            outId = sqlite3_column_int(stmt, 0);
+            const unsigned char *s = sqlite3_column_text(stmt, 1);
+            outStyle = s ? std::string(reinterpret_cast<const char *>(s)) : std::string();
+            found = true;
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
+    bool Database::lookupWorldById(int32_t id, std::string &outName,
+                                   std::string &outStyle) const
+    {
+        if (!m_db)
+            return false;
+        const char *sql = R"(
+            SELECT name, style FROM world_registry WHERE id = ?;
+        )";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare lookupWorldById: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int(stmt, 1, id);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            const unsigned char *n = sqlite3_column_text(stmt, 0);
+            const unsigned char *s = sqlite3_column_text(stmt, 1);
+            outName = n ? std::string(reinterpret_cast<const char *>(n)) : std::string();
+            outStyle = s ? std::string(reinterpret_cast<const char *>(s)) : std::string();
+            found = true;
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
+    // ---------------------------------------------------------------------
+    // Allocate a new custom world ID starting at 101. Never returns an ID in
+    // the pre-1.12 vanilla range (0, -1, 1) nor on the reserved 100 "Aether"
+    // special-dimension row, so a Minecraft Legends-style plane (Aether, or a
+    // future "The Sif"/"The Shift" plane that later claims another 100-series
+    // id) cannot collide with a server-created custom plane.
+    // ---------------------------------------------------------------------
+    bool Database::registerWorld(const std::string &name, const std::string &style,
+                                 int32_t &outId)
+    {
+        if (!m_db || name.empty())
+            return false;
+
+        // Idempotent: if the world is already registered, return its ID.
+        int32_t existingId = 0;
+        std::string existingStyle;
+        if (lookupWorld(name, existingId, existingStyle))
+        {
+            outId = existingId;
+            return true;
+        }
+
+        constexpr int32_t kFirstCustomWorldId = 101;
+
+        // Find the largest custom ID we've already allocated (or fall back).
+        const char *maxSql =
+            "SELECT MAX(id) FROM world_registry;";
+        sqlite3_stmt *stmt = nullptr;
+        int32_t nextId = kFirstCustomWorldId;
+        if (sqlite3_prepare_v2(m_db, maxSql, -1, &stmt, nullptr) == SQLITE_OK)
+        {
+            if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            {
+                const int32_t maxExisting = sqlite3_column_int(stmt, 0);
+                if (maxExisting >= kFirstCustomWorldId)
+                    nextId = maxExisting + 1;
+            }
+            sqlite3_finalize(stmt);
+        }
+        else
+        {
+            Core::Logger::error("Failed to prepare registerWorld-max: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        const char *sqlIns =
+            "INSERT INTO world_registry (id, name, style) VALUES (?, ?, ?);";
+        if (sqlite3_prepare_v2(m_db, sqlIns, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare registerWorld-insert: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int(stmt, 1, nextId);
+        sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, style.c_str(), -1, SQLITE_TRANSIENT);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        if (!ok)
+        {
+            Core::Logger::error("Failed to register world \"" + name + "\": " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        outId = nextId;
+        return true;
+    }
+
+    // Explicit-ID registration used by NetworkManager::start to seed the four
+    // standard Minecraft dimension planes at their pre-1.12 vanilla IDs
+    // (Overworld=0 / Nether=-1 / End=1) plus the reserved id 100 "Aether"
+    // special-dimension row. Idempotent.
+    bool Database::setWorldById(int32_t id, const std::string &name,
+                                const std::string &style)
+    {
+        if (!m_db || name.empty())
+            return false;
+
+        // Idempotent: if a row for (id, name) already exists, we're done.
+        int32_t existingId = -1;
+        std::string existingStyle;
+        if (lookupWorld(name, existingId, existingStyle))
+            return existingId == id;
+
+        const char *sql =
+            "INSERT INTO world_registry (id, name, style) VALUES (?, ?, ?);";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setWorldById: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int(stmt, 1, id);
+        sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, style.c_str(), -1, SQLITE_TRANSIENT);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    // Update the world_id column on the player row matching the given username.
+    // Kept as a name-based lookup (rather than uuid-based) because NetworkManager
+    // only tracks live sessions by username on the console side and we do not
+    // want to thread PlayerData / UUID resolution through that call.
+    bool Database::setPlayerWorldIdByName(const std::string &username, int32_t worldId)
+    {
+        if (!m_db || username.empty())
+            return false;
+
+        const char *updateSql =
+            "UPDATE players SET world_id = ? WHERE username = ? COLLATE NOCASE;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, updateSql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setPlayerWorldIdByName: " +
+                                std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int(stmt, 1, worldId);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
     }
 
 } // namespace LightweightMC::Storage

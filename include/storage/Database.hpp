@@ -83,10 +83,51 @@ namespace LightweightMC::Storage
 
         bool savePlayerData(const PlayerData &data);
         bool loadPlayerData(const std::string &uuid, PlayerData &outData);
+        // Patch the world_id column on a player row selected by username. Used
+        // by NetworkManager::setPlayerWorldId so a live-plane switch persists
+        // across relogins. Returns false when the username has no row.
+        bool setPlayerWorldIdByName(const std::string &username, int32_t worldId);
 
         // --- Game rules persistence (server_data.db) ---
         bool saveGameRule(const GameRuleData &rule);
         bool loadAllGameRules(std::unordered_map<std::string, GameRuleData> &outRules);
+
+        // --- Container (chest / furnace / brewing-stand etc.) persistence ---
+        // Keyed by the container's block location (chunk_x, chunk_z, rel_x, y, rel_z).
+        // The data_blob uses the compact container-item format defined in
+        // PlayerSession.cpp (varint count + count × (slot:short, id:short,
+        // count:byte, damage:short)). Empty containers may be either absent
+        // (never written) or present with count=0.
+        bool loadContainer(int cx, int cz, int rx, int y, int rz,
+                           uint16_t &typeOut, std::vector<uint8_t> &blobOut);
+        bool saveContainer(int cx, int cz, int rx, int y, int rz,
+                           uint16_t type, const std::vector<uint8_t> &blob);
+        bool deleteContainer(int cx, int cz, int rx, int y, int rz);
+
+        // ---- Multiworld registry (server_data.db) ---------------------------
+        // Maps custom dimension names to unique auto-allocated IDs. Standard
+        // Minecraft dimension IDs use the pre-1.12 vanilla layout: 0 =
+        // Overworld, -1 = Nether, 1 = End. NetworkManager::start hard-codes
+        // those plus a reserved id 100 for the Minecraft Legends "Aether"
+        // special dimension; the custom allocator used by registerWorld
+        // starts at 101 so future Legends-adjacent planes ("The Sif", "The
+        // Shift") can claim another 100-series id without colliding with
+        // server-created custom planes or the fixed vanilla 0/-1/1 slots.
+        bool initWorldRegistry();
+        bool registerWorld(const std::string &name, const std::string &style,
+                           int32_t &outId);
+        bool lookupWorld(const std::string &name, int32_t &outId,
+                         std::string &outStyle) const;
+        bool lookupWorldById(int32_t id, std::string &outName,
+                             std::string &outStyle) const;
+        // Explicit-ID registration for the fixed standard planes (Overworld=0
+        // / Nether=-1 / End=1) and the reserved 100 "Aether" special-dimension
+        // row. Idempotent: re-registration of an already-present row is a no-
+        // op success. Bypasses the >=101 custom allocator used by registerWorld
+        // so NetworkManager::start can seed the standard planes without
+        // touching the custom ID range.
+        bool setWorldById(int32_t id, const std::string &name,
+                          const std::string &style);
     };
 
 } // namespace LightweightMC::Storage

@@ -1,5 +1,22 @@
 # 📋 LightweightMC — Roadmap & TODO List
 
+## MC 1.8 (protocol 47) C2S handlers — RESOLVED
+All 15 previously-unhandled client-to-server packet IDs from
+`protocol_1_8.hpp::ServerboundId` are now dispatched in
+`PlayHandler.cpp` and consume their full wire body:
+- 0x02 UseEntity, 0x03 Flying           → `EntityHandler.cpp` / `PlayerHandler.cpp`
+- 0x0B EntityAction, 0x0C SteerVehicle  → `EntityHandler.cpp`
+- 0x0D CloseWindow, 0x0F TransactionAck → `InventoryHandler.cpp`
+- 0x11 EnchantItem, 0x12 UpdateSign     → `InventoryHandler.cpp` / `WorldHandler.cpp`
+- 0x13 ClientAbilities, 0x14 TabComplete, 0x15 ClientSettings,
+  0x16 ClientCommand, 0x17 CustomPayload, 0x18 Spectate,
+  0x19 ResourcePackReceive              → `PlayerHandler.cpp`
+
+Pending subsystem models (consume + log only, no crash/desync):
+- entity model (0x02 / 0x0B), vehicles (0x0C), enchanting (0x11),
+  sign-text persistence (0x12), creative-mode abilities (0x13).
+
+
 High-performance, event-driven C++20 Minecraft server optimized for low end or Linux SBC's production environments .
 
 ---
@@ -41,6 +58,7 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [x] Teleportation commands: `/tp <x y z>`, `/tp <player>`, `/tp <p1 p2>`, `/tpall`.
 - [ ] **Administration Commands**
   - [x] Commands `/antiscan <block|add|reload>` & `/hunter <block|add|reload>` (AntiScan Feature).
+  - [x] Multiworld `/world list | create <name> <style> | info <name>` (dimension-plane registry backed by the `world_registry` SQLite table; `/world info` reports id + style + per-plane db path).
 - [ ] **PaperMC / Bukkit Style Commands (Refer to PaperMC Commands Reference)**
   - [x] Commands `/version`, `/ver`, `/about` (displays the version information about the server).
 
@@ -74,11 +92,11 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
 ## 🟡 In Progress & Debugging
 
 - [ ] **Thread Safety & Concurrent Iteration**
-  - [ ] Fix `Segmentation Fault` occurrences during high-frequency bot connection/disconnection stress tests.
-  - [ ] Secure `m_clients` map access using `std::shared_mutex` or safe iterator copying during network broadcasts.
-  - [ ] Add guard clauses in packet dispatch handlers to prevent processing dangling socket descriptors.
-- [ ] **MTU & Network Buffer Optimization**
-  - [ ] Enforce packet chunking rules for `0x33 Chunk Data` to fit within standard VPS MTU limits (~1414–1500 bytes) without triggering socket write blocks.
+  - [x] Fix `Segmentation Fault` occurrences during high-frequency bot connection/disconnection stress tests.
+  - [x] Secure `m_clients` map access using `std::shared_mutex` or safe iterator copying during network broadcasts.
+  - [x] Add guard clauses in packet dispatch handlers to prevent processing dangling socket descriptors.
+- [x] **MTU & Network Buffer Optimization**
+  - [x] Enforce packet chunking rules for `0x33 Chunk Data` to fit within standard VPS MTU limits (~1414–1500 bytes) without triggering socket write blocks.
 
 ---
 
@@ -86,8 +104,8 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
 
 ### 1. 🌍 World Generation & Chunk Management
 - [ ] **Chunk Manager Engine**
-  - [ ] Implement dynamic view-distance chunk loading/unloading centered on player coordinates.
-  - [ ] Build a basic world generator (Superflat / 3D Perlin Noise terrain).
+  - [x] Implement dynamic view-distance chunk loading/unloading centered on player coordinates. (loading only / Chunk data is not kept on ram)
+  - [x] Build a basic world generator (Superflat / 3D Perlin Noise terrain).
   - [ ] Integrate Anvil region file format (`.mca`) parser for loading pre-built maps.
 
 ### 2. 👥 Player Tracking & Visibility
@@ -101,8 +119,8 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
 
 ### 3. 📦 Inventories & Tile Entity Storage
 - [ ] **Container State Persistence**
-  - [ ] Server-side storage for Chests, Furnaces, and Brewing Stand inventories.
-  - [ ] Container opening animations and window tracking (`0x2D Open Window`).
+  - [x] Server-side storage for Chests, Furnaces, and Brewing Stand inventories.
+  - [x] Container opening animations and window tracking (`0x2D Open Window`).
 - [ ] **Dropped Items**
   - [ ] Item entity spawning (`0x0E Spawn Object`) and pickup logic (`0x0D Collect Item`).
 
@@ -115,14 +133,14 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [ ] PvP and PvE hit detection and knockback calculation.
   - [ ] Player respawn flow (`0x07 Respawn`).
 - [ ] **Administration Commands**
-  - [ ] `/gamemode <0|1|2|3>` (`0x2B Change Game State`).
+  - [x] `/gamemode <0|1|2|3>` (`0x2B Change Game State`).
   - [ ] `/time set <day|night|ticks>` (`0x03 Time Update`).
   - [ ] `/weather <clear|rain|thunder>`.
   - [ ] `/give <player> <item> [amount]`.
 - [ ] **Player Commands**
 
 - [ ] **PaperMC / Bukkit Style Commands (Refer to PaperMC Commands Reference)**
-  - [ ] `/reload ` (reloads server config without restarting the server).
+  - [x] `/reload ` (reloads server config without restarting the server).
   - [ ] `/lwmc`(equivalent of paper commands).
     - [ ] `/lwmc chunkinfo [<world>]`.
     - [ ] `/lwmc dumpitem [all]`.
@@ -141,8 +159,8 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [ ] Inbound packet frequency throttling to prevent packet-flooding DoS attacks.
   - [ ] Chat input sanitization and NBT bounds validation.
 - [ ] **Performance Metrics**
-  - [ ] Server tick loop implementation locked to 20 TPS.
-  - [ ] Real-time CPU, RAM, and bandwidth usage statistics tracking.
+  - [x] Server tick loop implementation locked to 20 TPS.
+  - [-] Real-time CPU, RAM, and bandwidth usage statistics tracking.(bandwith in the works)
 
 ### 7. 🔒 Extras Features
 - [ ] **🛡️ Land Protection & World Control features**
@@ -150,4 +168,4 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [ ] WorldGuard : An advanced region management tool for server admins.
 - [ ] **🔑 Core Management & Security**
   - [ ] LuckPerms : Fine tuned permissions management.
-  - [ ] Hunter : adding unblock/remove feature to allow a server (only for custom adresses) 
+  - [x] Hunter : adding unblock/remove feature to allow a server (only for custom adresses) 

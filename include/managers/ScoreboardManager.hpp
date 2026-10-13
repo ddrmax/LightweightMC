@@ -28,6 +28,13 @@ namespace LightweightMC::Managers
         // Sends the player list header and footer (Tablist Header/Footer)
         void sendTablistHeaderFooter(int clientFd, size_t onlinePlayerCount, const PacketSender &sendPacket);
 
+        // Refreshes the scoreboard / tablist for every PLAY client. Previously
+        // this loop was inlined in NetworkManager::pollEvents and re-computed
+        // RAM/CPU/loaded-chunk aggregates inside a nested per-client loop (O(N^2)
+        // in clients). tick() hoists the shared work out of the loop, so
+        // NetworkManager now just calls this once per refresh window.
+        void tick(const std::unordered_map<int, LightweightMC::Player::PlayerSession> &clients, const PacketSender &sendPacket);
+
         // Clears the scoreboard cache when a client disconnects.
         void removeClientCache(int clientFd);
 

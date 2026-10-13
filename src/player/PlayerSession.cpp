@@ -151,6 +151,12 @@ namespace LightweightMC::Player
         flying = false;
         sprinting = false;
 
+        // Clear transient per-session container windows: on reconnect a fresh
+        // window is opened that re-populates its contents from the SQLite
+        // block_entities row for the container's coord.
+        openWindows.clear();
+        openWindowId = 0;
+
         // Spawn at the configured spawn point (bed first, then world spawn).
         if (hasBedSpawn)
         {
@@ -172,6 +178,87 @@ namespace LightweightMC::Player
         }
         yaw = 0.0f;
         pitch = 0.0f;
+    }
+
+    // ------------------------------------------------------------
+    // Compact blob encoding for container (chest/furnace/etc.) contents:
+    //   varint(count-of-non-empty) followed by
+    //   count × (slot:short, id:short, count:byte, damage:short)
+    // Big-endian shorts, Minecraft-varint count. Empty containers
+    // serialize as a single 0x00 byte (varint count = 0).
+    // ------------------------------------------------------------
+    void serializeContainerItems(const std::vector<ItemStack> &items,
+                                 std::vector<uint8_t> &out)
+    {
+        uint32_t nonEmpty = 0;
+        for (const auto &it : items)
+            if (it.id != -1 && it.count > 0) ++nonEmpty;
+
+        uint32_t v = nonEmpty;
+        do
+        {
+            uint8_t b = static_cast<uint8_t>(v & 0x7FU);
+            v >>= 7;
+            if (v) b |= 0x80;
+            out.push_back(b);
+        } while (v);
+
+        for (int i = 0; i < static_cast<int>(items.size()); ++i)
+        {
+            const ItemStack &it = items[i];
+            if (it.id == -1 || it.count == 0) continue;
+            const int16_t slotId = static_cast<int16_t>(i);
+            out.push_back(static_cast<uint8_t>((slotId >> 8) & 0xFF));
+            out.push_back(static_cast<uint8_t>(slotId & 0xFF));
+            out.push_back(static_cast<uint8_t>((it.id >> 8) & 0xFF));
+            out.push_back(static_cast<uint8_t>(it.id & 0xFF));
+            out.push_back(it.count);
+            out.push_back(static_cast<uint8_t>((it.damage >> 8) & 0xFF));
+            out.push_back(static_cast<uint8_t>(it.damage & 0xFF));
+        }
+    }
+
+    void deserializeContainerItems(const std::vector<uint8_t> &blob,
+                                   int expectedSlotCount,
+                                   std::vector<ItemStack> &out)
+    {
+        out.assign(expectedSlotCount > 0 ? expectedSlotCount : 0,
+                   ItemStack{-1, 0, 0});
+        if (blob.empty()) return;
+
+        size_t pos = 0;
+        uint32_t count = 0;
+        int shift = 0;
+        while (pos < blob.size())
+        {
+            uint8_t b = blob[pos++];
+            count |= static_cast<uint32_t>(b & 0x7FU) << shift;
+            if ((b & 0x80) == 0) break;
+            shift += 7;
+            if (shift > 28) break;
+        }
+
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            if (pos + 7 > blob.size()) break;
+            uint16_t slot = static_cast<uint16_t>((static_cast<uint16_t>(blob[pos]) << 8) | blob[pos + 1]);
+            pos += 2;
+            ItemStack it;
+            it.id = static_cast<int16_t>((static_cast<int16_t>(static_cast<uint16_t>(blob[pos]) << 8)) |
+                                          static_cast<uint16_t>(blob[pos + 1]));
+            pos += 2;
+            it.count = blob[pos++];
+            it.damage = static_cast<int16_t>((static_cast<int16_t>(static_cast<uint16_t>(blob[pos]) << 8)) |
+                                              static_cast<uint16_t>(blob[pos + 1]));
+            pos += 2;
+            // `slot` comes off the wire as a uint16_t, so a `slot >= 0` test
+            // is always true (-Wtype-limits). out was sized to
+            // expectedSlotCount above, so comparing against out.size() is the
+            // real bounds check and keeps the write in-bounds for malformed
+            // container blobs (corrupt save data, hand-edited SQLite rows).
+            if (static_cast<std::size_t>(slot) < out.size())
+                out[slot] = it;
+        }
     }
 
 } // namespace LightweightMC::Player

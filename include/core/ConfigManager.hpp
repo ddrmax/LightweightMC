@@ -32,6 +32,23 @@ public:
             return false;
         }
 
+        // Older builds shipped a smaller server.properties schema (fewer
+        // [world] keys, no multiworld activation flags, etc.). Backfill any
+        // canonical keys that are missing on disk so subsequent readers see
+        // a fully-formed file rather than silently relying on the per-call-
+        // site fallback default passed to getBool / getString / get<T>.
+        // Existing user-set values are never overwritten -- reconciliation
+        // only writes a default when the key is not already present.
+        const unsigned migrated = reconcileDefaultsUnlocked();
+        if (migrated > 0)
+        {
+            LightweightMC::Core::Logger::info(
+                std::string("[ConfigManager] Upgraded ") + filePath +
+                " from an older schema to the current one (" +
+                std::to_string(migrated) + " key(s) added).");
+            m_parser.save(filePath);
+        }
+
         LightweightMC::Core::Logger::info(std::string("[ConfigManager] Configuration loaded from ") + filePath);
         return true;
     }
@@ -70,19 +87,88 @@ public:
 private:
     ConfigManager() = default;
 
+    // Canonical (current-schema) defaults. Both the "generate a fresh file"
+    // path (setDefaultsUnlocked) and the "backfill missing keys from an older
+    // file" path (reconcileDefaultsUnlocked) share this list so there is
+    // exactly one source of truth for what a current server.properties is
+    // expected to contain.
+    template <typename Fn>
+    void forEachCanonicalDefault(Fn &&fn) const
+    {
+        auto emit = [&](const char *sec, const char *key, const char *val)
+        {
+            fn(sec, key, val);
+        };
+
+        // [server]
+        emit("server", "port", "25565");
+        emit("server", "max-players", "100");
+        emit("server", "motd", "LightweightMC C++ Engine");
+
+        // [security]
+        emit("security", "enable-antiscan", "true");
+        emit("security", "blocklist-url", "https://raw.githubusercontent.com/pebblehost/hunter/master/ips.txt");
+
+        // [world]
+        // Generation preset selector: overworld / nether / aether / superflat / test-grid.
+        emit("world", "gen-style", "overworld");
+        // Superflat layer preset, only consulted when gen-style=superflat
+        // (minecraft:flat | minecraft:stone | minecraft:water).
+        emit("world", "superflat-preset", "minecraft:flat");
+        // 64-bit world seed: every generation preset mixes this value into
+        // its LCG/Perlin stream so the same seed reproduces the same world
+        // across runs; 0 mirrors Java Minecraft's "no seed given" default.
+        emit("world", "world-seed", "0");
+
+        // Multiworld: standard dimension-plane activation flags. Each flag
+        // gates whether NetworkManager::start() allocates a WorldStorage
+        // instance (and pre-generates the surrounding chunks) for that plane.
+        // Defaults are all true so a fresh server boots with every vanilla
+        // dimension live; flipping a flag to false stops the server serving
+        // chunks for that plane while leaving the SQLite world_registry row
+        // intact so a later reactivation resumes without re-allocating ids.
+        // Overworld (id 0) is the fallback plane every other accessor falls
+        // back to, so the server refuses to boot when it is disabled.
+        emit("world", "overworld-active", "true");
+        emit("world", "nether-active", "true");
+        emit("world", "end-active", "true");
+
+        // Aether ("Sky world", id 100) is a Minecraft-Legends-style special
+        // dimension rather than a standard plane: it lives in the same SQLite
+        // world_registry (so /gotor aether can still find it by name) but is
+        // only loaded into memory when the aether-active flag is true. Special-
+        // dimension planes may be added by future Minecraft Legends / Minecraft
+        // Adventure crossovers without colliding with the pre-1.12 vanilla range
+        // (0 / -1 / 1) because they get ids >= 100 from the custom allocator.
+        emit("world", "aether-active", "true");
+        emit("world", "aether-special-dimension", "true");
+    }
+
+    // Overwrite every canonical key with its default. Used when the config
+    // file could not be opened and we need to emit a fresh skeleton.
     void setDefaultsUnlocked()
     {
-        m_parser.set("server", "port", "25565");
-        m_parser.set("server", "max-players", "100");
-        m_parser.set("server", "motd", "LightweightMC C++ Engine");
+        forEachCanonicalDefault([this](const char *sec, const char *key, const char *val)
+        {
+            m_parser.set(sec, key, val);
+        });
+    }
 
-        m_parser.set("security", "enable-antiscan", "true");
-        m_parser.set("security", "blocklist-url", "https://raw.githubusercontent.com/pebblehost/hunter/master/ips.txt");
-
-        // World generation preset: overworld or superflat
-        m_parser.set("world", "gen-style", "overworld");
-        // Superflat layer preset, used when world/gen-style=superflat
-        m_parser.set("world", "superflat-preset", "minecraft:flat"); // minecraft:flat | minecraft:stone | minecraft:water
+    // Add only the canonical keys that are absent from the loaded file, so a
+    // server.properties produced by an older build is migrated in place to
+    // the current schema. Returns how many keys were added (0 means the file
+    // was already on the current schema, in which case no rewrite is needed).
+    unsigned reconcileDefaultsUnlocked()
+    {
+        unsigned added = 0;
+        forEachCanonicalDefault([this, &added](const char *sec, const char *key, const char *val)
+        {
+            if (m_parser.hasKey(sec, key))
+                return;
+            m_parser.set(sec, key, val);
+            ++added;
+        });
+        return added;
     }
 
     IniParser m_parser;

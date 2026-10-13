@@ -100,3 +100,44 @@ public:
         ctx.reply("Reloading completed.");
     }
 };
+
+// --- Command /ping ---
+class PingCommand : public Command
+{
+public:
+    std::string getName() const override { return "ping"; }
+    std::string getDescription() const override { return "Latency check -- replies with a short acknowledgement."; }
+    std::string getUsage() const override { return "/ping"; }
+    std::vector<std::string> getAliases() const override { return {"pong"}; }
+    int getRequiredOpLevel() const override { return 0; }
+
+    void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
+    {
+        (void)args;
+        // Chat path sends the ack to the caller's client; console path just
+        // logs. Not a player-state change, so no broadcast on console.
+        ctx.reply("Pong !");
+    }
+};
+
+// --- Command /hud (aka /stats) ---
+class HudCommand : public Command
+{
+public:
+    std::string getName() const override { return "hud"; }
+    std::string getDescription() const override { return "Pushes the scoreboard / tablist HUD to the caller."; }
+    std::string getUsage() const override { return "/hud"; }
+    std::vector<std::string> getAliases() const override { return {"stats"}; }
+    int getRequiredOpLevel() const override { return 0; }
+
+    void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
+    {
+        (void)args;
+        // The wire-level ScoreboardManager hook is provided by the caller
+        // (chat context in PlayerHandler wires it to send Scoreboard
+        // + TablistHeaderFooter packets to this specific client; console
+        // can wire it to a broadcast variant if desired).
+        ctx.sendHud();
+        ctx.reply("[Server] HUD and Scoreboard Activated !");
+    }
+};

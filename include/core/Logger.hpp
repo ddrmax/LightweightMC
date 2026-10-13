@@ -21,7 +21,11 @@ namespace LightweightMC::Core
         static void info(std::string_view msg) { log(LogLevel::INFO, msg); }
         static void warn(std::string_view msg) { log(LogLevel::WARNING, msg); }
         static void error(std::string_view msg) { log(LogLevel::ERROR, msg); }
-        static void bench(std::string_view msg) { log(LogLevel::BENCH, msg); }
+        static void bench(std::string_view msg) { (void)msg; /* log(LogLevel::BENCH, msg);*/ }
+        static void debug(std::string_view msg)
+        {
+            (void)msg; /*log(LogLevel::DEBUG, msg);*/
+        }
     };
 
 } // namespace LightweightMC::Core

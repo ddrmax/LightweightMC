@@ -26,8 +26,8 @@
 //        0x24 Heart Particle, 0x25 Block Change (multi), 0x26 Map Chunk Bulk,
 //        0x27 Game Info, 0x28 Set Cool Down, 0x29 Succeeding Burst,
 //        0x2A Set Center Chunk, 0x2B Sign Edit, 0x2C Set Title, 0x2D Open Window,
-//        0x2E Close Window, 0x30 Window Items, 0x31 Set Slot,
-//        0x32 Confirm Transaction, 0x33 Player Abilities, 0x34 Tab List Remove,
+//        0x2E Close Window, 0x2F Set Slot, 0x30 Window Items,
+//        0x31 Craft Progress Bar, 0x32 Confirm Transaction, 0x33 Player Abilities,
 //        0x35 Set Default Spawn, 0x36 Carried Minecart, 0x37 Player Time,
 //        0x38 Update Player Info, 0x39 Update Block Entity, 0x3A Set Particle,
 //        0x3B Scoreboard Objective, 0x3C Update Score, 0x3D Display Scoreboard,
@@ -209,13 +209,13 @@ namespace LightweightMC::Network::Protocol
     // Added: 1.0 (proto 22). Still current.
     std::vector<uint8_t> encodeCloseWindow(uint8_t windowId);
 
+    // 0x2F Set Slot — Play state.
+    // Added: 1.4 (proto 13). Still current.
+    std::vector<uint8_t> encodeSetSlot(uint8_t slotId, int16_t itemId, uint8_t count, int16_t damage);
+
     // 0x30 Window Items — Play state.
     // Added: 1.4 (proto 13). Still current.
     std::vector<uint8_t> encodeWindowItems(int16_t stateId);
-
-    // 0x31 Set Slot — Play state.
-    // Added: 1.4 (proto 13). Still current.
-    std::vector<uint8_t> encodeSetSlot(uint8_t slotId, int16_t itemId, uint8_t count, int16_t damage);
 
     // 0x32 Confirm Transaction — Play state.
     // Added: 1.4 (proto 13). Still current.

@@ -1,6 +1,8 @@
 #include "storage/WorldStorage.hpp"
 #include "core/Logger.hpp"
 #include "core/ConfigManager.hpp"
+#include "storage/WorldGen.hpp"
+#include "world/MC17BlockIds.hpp"
 #include <lz4.h>
 #include <chrono>
 #include <iostream>
@@ -78,8 +80,43 @@ namespace LightweightMC::Storage
     // Fills a full-chunk buffer (UNCOMPRESSED_CHUNK_SIZE bytes, 24 sections,
     // absY = MIN_WORLD_Y .. MAX_WORLD_Y) with the terrain layers for the given style.
     // The buffer must already be zeroed and sized UNCOMPRESSED_CHUNK_SIZE.
-    void WorldStorage::generateFlatChunk(GenStyle style, std::vector<uint8_t> &rawBuffer, int chunkX, int chunkZ)
+    //
+    // worldSeed is the 64-bit world seed. MC-style presets (OVERWORLD, NETHER,
+    // AETHER) drive their Perlin/LCG streams entirely from it, so two servers
+    // started with the same world-seed produce identical worlds. The
+    // SUPERFLAT presets keep their existing noise2D-based layout but fold
+    // worldSeed into their hardcoded seed values so /reload is stable.
+    void WorldStorage::generateFlatChunk(GenStyle style, std::vector<uint8_t> &rawBuffer, int chunkX, int chunkZ,
+                                         std::uint64_t worldSeed)
     {
+        // Fully procedural presets delegate to the WorldGen namespace (see
+        // storage/WorldGen.hpp + src/storage/WorldGen.cpp). Those routines
+        // use 1.7 IDs only and mix worldSeed into every LCG/Perlin stream.
+        if (style == GenStyle::OVERWORLD)
+        {
+            Gen::overworldChunk(chunkX, chunkZ, worldSeed,
+                                reinterpret_cast<uint16_t *>(rawBuffer.data()));
+            return;
+        }
+        if (style == GenStyle::NETHER)
+        {
+            Gen::netherChunk(chunkX, chunkZ, worldSeed,
+                             reinterpret_cast<uint16_t *>(rawBuffer.data()));
+            return;
+        }
+        if (style == GenStyle::AETHER)
+        {
+            Gen::aetherChunk(chunkX, chunkZ, worldSeed,
+                             reinterpret_cast<uint16_t *>(rawBuffer.data()));
+            return;
+        }
+        if (style == GenStyle::END)
+        {
+            Gen::endChunk(chunkX, chunkZ, worldSeed,
+                          reinterpret_cast<uint16_t *>(rawBuffer.data()));
+            return;
+        }
+
         uint16_t *blocksArray = reinterpret_cast<uint16_t *>(rawBuffer.data());
         // Maps an absolute world Y to the flat index inside the full-chunk buffer.
         auto idx = [](int absY, int z, int x) -> int
@@ -87,29 +124,6 @@ namespace LightweightMC::Storage
             return ((absY - MIN_WORLD_Y) * 256) + (z * 16) + x;
         };
 
-        if (style == GenStyle::OVERWORLD)
-        {
-            // Overworld column for a 0-based world (MIN_WORLD_Y = 0): bedrock at Y=0,
-            // stone up to Y=5, dirt Y=6..7, grass surface at Y=8. Everything sits in the
-            // client-visible section range (Y 0..255).
-            for (int absY = MIN_WORLD_Y; absY <= MAX_WORLD_Y; ++absY)
-            {
-                uint16_t blockType = Blocks::AIR;
-                if (absY == 0)
-                    blockType = Blocks::combined(Blocks::BEDROCK); // Y=0 : bedrock
-                else if (absY <= 5)
-                    blockType = Blocks::combined(Blocks::STONE); // Y=1..5 : stone
-                else if (absY <= 7)
-                    blockType = Blocks::combined(Blocks::DIRT); // Y=6..7 : dirt
-                else if (absY == 8)
-                    blockType = Blocks::combined(Blocks::GRASS_BLOCK); // Y=8 : grass surface
-
-                for (int z = 0; z < 16; ++z)
-                    for (int x = 0; x < 16; ++x)
-                        blocksArray[idx(absY, z, x)] = blockType;
-            }
-            return;
-        }
         if (style == GenStyle::TEST_GRID) // deterministic block grid for protocol validation
         {
             auto fillLayer = [&](int absY, uint16_t block)
@@ -134,7 +148,11 @@ namespace LightweightMC::Storage
             fillLayer(5, Blocks::combined(Blocks::DIRT));
 
             // Legacy block IDs used by the grid (pre-1.13 numeric IDs).
-            const uint16_t WOOL = 35; // meta: 0=white, 1=orange, 2=magenta, 3=light blue, 4=yellow, 5=lime, 6=pink, 7=gray...
+            // WOOL is kept as documentation of the reference palette: the
+            // checker cell below deliberately emits a *random* legacy id
+            // instead, which is what makes this style useful for validating
+            // that a client decoder tolerates ids outside the palette.
+            [[maybe_unused]] const uint16_t WOOL = 35; // meta: 0=white, 1=orange, 2=magenta, 3=light blue, ...
             const uint16_t GOLD_BLOCK = 41;
             const uint16_t IRON_BLOCK = 42;
             auto random_id = []()
@@ -210,7 +228,9 @@ namespace LightweightMC::Storage
             }
             else if (preset == "minecraft:natural_hills")
             {
-                uint32_t seed = 1337; // Ta graine de monde
+                // Fold the 64-bit world seed into the preset's own key so
+                // natural_hills is reproducible via [world] world-seed.
+                uint32_t seed = static_cast<uint32_t>(worldSeed ^ (worldSeed >> 32) ^ 0x1337ULL);
 
                 for (int z = 0; z < 16; ++z)
                 {
@@ -286,7 +306,9 @@ namespace LightweightMC::Storage
             }
             else if (preset == "minecraft:desert")
             {
-                uint32_t seed = 4242;
+                // Fold the 64-bit world seed into this preset's key so
+                // desert is reproducible via [world] world-seed.
+                uint32_t seed = static_cast<uint32_t>(worldSeed ^ (worldSeed >> 32) ^ 0x4242ULL);
 
                 for (int z = 0; z < 16; ++z)
                 {
@@ -340,7 +362,7 @@ namespace LightweightMC::Storage
             }
             else if (preset == "minecraft:mountains")
             {
-                uint32_t seed = 1337;
+                uint32_t seed = static_cast<uint32_t>(worldSeed ^ (worldSeed >> 32) ^ 0x0515ULL);
 
                 for (int z = 0; z < 16; ++z)
                 {
@@ -358,7 +380,7 @@ namespace LightweightMC::Storage
 
                         // Hauteur allant jusqu'à Y=110 (traverse les sections 0 à 6)
                         int height = 15 + static_cast<int>(combinedNoise * 95.0f);
-                        height = std::clamp(height, 5, 250); // Sécurité anti-débordement Y < 256
+                        height = std::clamp(height, 5, 100); // Sécurité anti-débordement Y < 256
 
                         blocksArray[idx(0, z, x)] = Blocks::combined(Blocks::BEDROCK);
 
@@ -405,7 +427,7 @@ namespace LightweightMC::Storage
             }
             else if (preset == "minecraft:islands")
             {
-                uint32_t seed = 9999;
+                uint32_t seed = static_cast<uint32_t>(worldSeed ^ (worldSeed >> 32) ^ 0x9999ULL);
                 const int seaLevel = 14;
 
                 for (int z = 0; z < 16; ++z)
@@ -524,6 +546,16 @@ namespace LightweightMC::Storage
 
     WorldStorage::~WorldStorage()
     {
+        // Ask the generation worker to exit and join it so ~WorldStorage returns
+        // only when no thread is still touching m_db / m_saveChunkStmt. If the
+        // worker was never started (m_genWorkerStarted false / default-
+        // constructed std::thread), join() would throw, so we gate on the flag
+        // and a joinable() check.
+        m_genStopFlag.store(true);
+        m_genCv.notify_all();
+        if (m_genWorker.joinable())
+            m_genWorker.join();
+
         if (m_getChunkStmt)
             sqlite3_finalize(m_getChunkStmt);
         if (m_saveChunkStmt)
@@ -608,6 +640,13 @@ namespace LightweightMC::Storage
     {
         outFull.assign(UNCOMPRESSED_CHUNK_SIZE, 0);
 
+        // m_getChunkStmt is a per-instance prepared statement, so exactly one
+        // thread can drive it at a time. The network send loop reads chunks
+        // through this path; keep it mutually exclusive against any other
+        // readChunkBlob call (e.g. EntityManager probing standing surfaces, or
+        // legacy sendFlatChunk hitting getChunkBlocks' sync fallback).
+        std::lock_guard<std::mutex> lock(m_getStmtMutex);
+
         sqlite3_reset(m_getChunkStmt);
         sqlite3_clear_bindings(m_getChunkStmt);
         sqlite3_bind_int(m_getChunkStmt, 1, chunkX);
@@ -647,12 +686,19 @@ namespace LightweightMC::Storage
 
     void WorldStorage::generateChunk(int chunkX, int chunkZ)
     {
+        // m_saveChunkStmt is a per-instance prepared statement; only one thread
+        // can drive it at a time. The generation worker owns this method, but
+        // saveBlockChange and getChunkBlocks (via their sync fallback) can also
+        // reach it, so both callers hold m_saveStmtMutex. Recursive to allow
+        // saveBlockChange -> generateChunk nesting without deadlock.
+        std::lock_guard<std::recursive_mutex> saveLock(m_saveStmtMutex);
+
         if (isChunkGenerated(chunkX, chunkZ))
             return;
 
         // Construct the full 24-section chunk using the selected generation style.
         std::vector<uint8_t> rawBuffer(UNCOMPRESSED_CHUNK_SIZE, 0);
-        generateFlatChunk(m_genStyle, rawBuffer, chunkX, chunkZ);
+        generateFlatChunk(m_genStyle, rawBuffer, chunkX, chunkZ, m_worldSeed);
 
         // Compress chunk data using LZ4
         std::vector<uint8_t> compressed = compressBuffer(rawBuffer);
@@ -678,7 +724,7 @@ namespace LightweightMC::Storage
 
         sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
 
-        Core::Logger::info("Generated and saved LZ4 compressed chunk [" + std::to_string(chunkX) + ", " + std::to_string(chunkZ) + "]");
+        Core::Logger::debug("Generated and saved LZ4 compressed chunk [" + std::to_string(chunkX) + ", " + std::to_string(chunkZ) + "]");
     }
 
     void WorldStorage::pregenerateWorld(int radius)
@@ -708,8 +754,115 @@ namespace LightweightMC::Storage
         Core::Logger::info("LZ4 Pre-generation complete: " + std::to_string(count) + " new compressed chunks created.");
     }
 
+    // -----------------------------------------------------------------------
+    // Off-thread chunk generation worker (1 thread per WorldStorage).
+    //
+    // Rationale for this granularity:
+    //   * A thread PER CLIENT (as the user hinted at) does not scale -- 50
+    //     concurrent players on a modest server would spawn 50 terrain threads,
+    //     thrash caches, and each thread would fight for the same
+    //     sqlite3_stmt* handle anyway (there is exactly one per WorldStorage),
+    //     forcing them to serialize on the DB write.
+    //   * A SINGLE global generation thread (one for every world) works but
+    //     serializes cross-plane generation; if 4 players are on Nether and
+    //     4 players on Overworld, chunks for one plane wait behind chunks for
+    //     the other. Splitting per-plane (i.e. per WorldStorage) gives
+    //     independent progress and only costs ~3-4 threads total across
+    //     Overworld/Nether/End/Aether.
+    //
+    // The worker pulls (cx, cz) requests from m_genQueue (which is filled by
+    // requestChunk from the network send loop when it walks the render box
+    // extended by a prefetch margin -- see WorldManager::updateChunksAroundPlayer).
+    // Because generateChunk locks m_saveStmtMutex while writing, and the
+    // network read path locks m_getStmtMutex while reading, a chunk that
+    // finishes generation mid-tick becomes visible to the next tick's read
+    // (isChunkReady) with no risk of tearing.
+    //
+    // Prefetch policy itself (which chunks to submit for generation vs which
+    // chunks to actually put on the wire this tick) is a per-client decision
+    // living in updateChunksAroundPlayer: it sees the player's velocity and
+    // biases the "generate-ahead" box in the direction of motion so
+    // high-speed travel (boat / flight / spectate) doesn't outrun generation.
+    // -----------------------------------------------------------------------
+    void WorldStorage::generationWorkerLoop()
+    {
+        while (true)
+        {
+            std::pair<int, int> job;
+            {
+                std::unique_lock<std::mutex> q(m_genQueueMutex);
+                m_genCv.wait(q, [&]
+                             { return !m_genQueue.empty() || m_genStopFlag.load(); });
+                if (m_genStopFlag.load() && m_genQueue.empty())
+                    return;
+                job = m_genQueue.front();
+                m_genQueue.pop_front();
+            }
+
+            // Generate the chunk on the DB side (this locks m_saveStmtMutex
+            // internally so a concurrent readChunkBlob on the network thread
+            // never sees a half-written blob).
+            generateChunk(job.first, job.second);
+
+            // Once the DB write landed, drop the key from m_genQueued so a
+            // later requestChunk for the same chunk hits the fast
+            // isChunkGenerated() reject instead of the queue dedup set.
+            const std::uint64_t key =
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(job.first)) << 32) |
+                static_cast<std::uint64_t>(static_cast<std::uint32_t>(job.second));
+            {
+                std::lock_guard<std::mutex> q(m_genQueueMutex);
+                m_genQueued.erase(key);
+            }
+        }
+    }
+
+    void WorldStorage::requestChunk(int chunkX, int chunkZ)
+    {
+        // Fast reject: chunk's already on disk. isChunkGenerated opens its own
+        // local sqlite3_stmt and doesn't touch m_getChunkStmt / m_saveChunkStmt,
+        // so this is safe to call concurrently from the network thread while the
+        // worker is mid-write on m_saveChunkStmt.
+        if (isChunkGenerated(chunkX, chunkZ))
+            return;
+
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkX)) << 32) |
+            static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkZ));
+
+        bool spawnWorker = false;
+        {
+            std::lock_guard<std::mutex> q(m_genQueueMutex);
+            if (m_genQueued.find(key) != m_genQueued.end())
+                return;
+            m_genQueued.insert(key);
+            m_genQueue.emplace_back(chunkX, chunkZ);
+            if (!m_genWorkerStarted.load())
+                spawnWorker = true;
+        }
+
+        if (spawnWorker)
+        {
+            m_genWorkerStarted.store(true);
+            m_genWorker = std::thread([this]
+                                      { generationWorkerLoop(); });
+        }
+        m_genCv.notify_all();
+    }
+
+    bool WorldStorage::isChunkReady(int chunkX, int chunkZ)
+    {
+        return isChunkGenerated(chunkX, chunkZ);
+    }
+
     void WorldStorage::saveBlockChange(int chunkX, int chunkZ, int relX, int absY, int relZ, uint16_t blockId)
     {
+        // Guard the shared m_saveChunkStmt. Also protects against a race where
+        // the generation worker concurrently inserts a fresh blob for the same
+        // chunk; whoever holds the lock wins, and this call re-reads under it
+        // via readChunkBlob (getStmtMutex) after any sync generateChunk.
+        std::lock_guard<std::recursive_mutex> saveLock(m_saveStmtMutex);
+
         if (!isChunkGenerated(chunkX, chunkZ))
         {
             auto start = std::chrono::high_resolution_clock::now();
@@ -785,6 +938,45 @@ namespace LightweightMC::Storage
         return blocks;
     }
 
+    // Read-only twin of getChunkBlocks() for the streaming 1.8+ send path.
+    // Never calls generateChunk(); if the chunk's blob isn't on disk yet,
+    // returns an empty map so the caller can decide whether to skip this
+    // chunk (paired with requestChunk()) or block on a sync generation.
+    // Login path still uses the sync getChunkBlocks() so the initial burst
+    // of ~rd^2 chunks feels identical to the pre-refactor server; only
+    // movement crossings use this variant, which lets the async worker
+    // prefetch boxes so the read is a straight LZ4-decompress + hash-map
+    // build with zero terrain cost on the socket thread.
+    std::unordered_map<BlockCoord, uint16_t, BlockCoordHash> WorldStorage::getChunkBlocksIfReady(int chunkX, int chunkZ)
+    {
+        std::unordered_map<BlockCoord, uint16_t, BlockCoordHash> blocks;
+        if (!isChunkGenerated(chunkX, chunkZ))
+            return blocks;
+        blocks.reserve(4096);
+
+        std::vector<uint8_t> rawBuffer;
+        if (!readChunkBlob(chunkX, chunkZ, rawBuffer))
+            return blocks;
+
+        const uint16_t *blocksArray = reinterpret_cast<const uint16_t *>(rawBuffer.data());
+        for (int absY = MIN_WORLD_Y; absY <= MAX_WORLD_Y; ++absY)
+        {
+            for (int z = 0; z < 16; ++z)
+            {
+                for (int x = 0; x < 16; ++x)
+                {
+                    int index = ((absY - MIN_WORLD_Y) * 256) + (z * 16) + x;
+                    uint16_t bId = blocksArray[index];
+                    if (bId != 0)
+                    {
+                        blocks[{x, absY, z}] = bId;
+                    }
+                }
+            }
+        }
+        return blocks;
+    }
+
     uint16_t WorldStorage::getBlockAt(int chunkX, int chunkZ, int relX, int absY, int relZ)
     {
         if (absY < MIN_WORLD_Y || absY > MAX_WORLD_Y || relX < 0 || relX >= 16 || relZ < 0 || relZ >= 16)
@@ -800,6 +992,65 @@ namespace LightweightMC::Storage
         const uint16_t *blocksArray = reinterpret_cast<const uint16_t *>(rawBuffer.data());
         int index = ((absY - MIN_WORLD_Y) * 256) + (relZ * 16) + relX;
         return blocksArray[index];
+    }
+
+    // World-coordinate block lookup. Handles negative world X/Z (arithmetic
+    // shift for chunkX/chunkZ, two's-complement mask for relX/relZ) so the
+    // caller can pass any (wx, wy, wz) and get a valid chunk-cell lookup.
+    // Returns 0 for out-of-range Y (matches getBlockAt's "air/unknown"
+    // contract) so callers can compare against MIN/MAX_WORLD_Y uniformly.
+    uint16_t WorldStorage::blockAtWorld(int wx, int wy, int wz)
+    {
+        if (wy < MIN_WORLD_Y || wy > MAX_WORLD_Y)
+            return 0;
+        // Arithmetic-shift / two's-complement chunk indexing. For wx = -1:
+        // wx >> 4 == -1 (arith shift) and wx & 0xF == 15, i.e. the last
+        // cell of chunk -1. Matches the (chunkX * 16 + relX == wx)
+        // invariant WorldStorage::getBlockAt expects.
+        const int chunkX = (wx >> 4);
+        const int chunkZ = (wz >> 4);
+        const int relX = wx & 0xF;
+        const int relZ = wz & 0xF;
+        return getBlockAt(chunkX, chunkZ, relX, wy, relZ);
+    }
+
+    bool WorldStorage::canStandAtWorld(int wx, int wy, int wz)
+    {
+        // Need feetY-1 inside the world range so we can check the ground
+        // block; and headBlock = wy+1 must also be inside so the 2-air
+        // check is meaningful. Both are required by vanilla's spawn rule.
+        if (wy < MIN_WORLD_Y + 1)
+            return false;
+        if (wy + 1 > MAX_WORLD_Y)
+            return false;
+        const uint16_t below = blockAtWorld(wx, wy - 1, wz);
+        const uint16_t here = blockAtWorld(wx, wy, wz);
+        const uint16_t above = blockAtWorld(wx, wy + 1, wz);
+        // combined = blockId << 4 | meta, so a non-zero high nibble means
+        // a real block occupies the cell and would block a mob's standing
+        // space. Ground must be a real block; feet AND head must be air.
+        return ((below >> 4) != 0) && ((here >> 4) == 0) && ((above >> 4) == 0);
+    }
+
+    // Expand outward from hintY (clamped into the legal range) until the
+    // whole column has been scanned. Nearest-legal wins so the spawn ends
+    // up close to the caller's current altitude when the terrain surface
+    // sits well below (or above) them.
+    int WorldStorage::findStandingFeetY(int wx, int wz, int hintY)
+    {
+        constexpr int lo = MIN_WORLD_Y + 1;
+        constexpr int hi = MAX_WORLD_Y - 1;
+        int start = (hintY < lo) ? lo : (hintY > hi ? hi : hintY);
+        for (int d = 0; d <= hi - lo; ++d)
+        {
+            int cand = start - d;
+            if (cand >= lo && canStandAtWorld(wx, cand, wz))
+                return cand;
+            cand = start + d;
+            if (d > 0 && cand <= hi && canStandAtWorld(wx, cand, wz))
+                return cand;
+        }
+        return -1;
     }
 
 } // namespace LightweightMC::Storage
