@@ -100,18 +100,29 @@ namespace LightweightMC::Player
         std::unordered_set<ChunkPos, ChunkPosHash> loadedChunks{};
 
         // -------------------------------------------------------------
-        // Multiworld / dimension-plane selector (vanilla Minecraft Legends
-        // lore layout): worldId = 0 -> Overworld, 1 -> Nether (underworld),
-        // 2 -> End (deepest plane / Abyss); IDs 3..99 are reserved for future
-        // vanilla-style dimensions (e.g. Aether, and the not-yet-shipped
-        // "The Sif" / "The Shift" planes in Minecraft 2.7.x+); IDs 100+ are
-        // auto-allocated at runtime by the world_registry SQLite table in
-        // server_data.db on `/world create <name> <style>` -- guaranteed
-        // unique, never collides with the standard-dimension range.
+        // Multiworld / dimension-plane selector (matches the pre-1.12 vanilla
+        // Java Edition dimension ids used by NetworkManager::start in
+        // NetworkSocket.cpp and the world_registry SQLite table):
+        //   worldId =  0  -> Overworld (the fallback plane every accessor
+        //                     falls back to when worldId is unknown)
+        //   worldId = -1  -> Nether (the underworld plane, id is signed)
+        //   worldId =  1  -> End (the deepest plane)
+        //   worldId = 100 -> Aether (reserved Minecraft-Legends-style special
+        //                     dimension; see [world] aether-plane-id in
+        //                     server.properties, default 100)
+        //   worldId >= 101 -> custom planes auto-allocated at runtime by
+        //                     Database::registerWorld via
+        //                     kFirstCustomWorldId = 101 (so the reserved 100
+        //                     slot never collides with a `/world create` id
+        //                     and future Legends-style planes can claim
+        //                     another 100-series id without touching the
+        //                     vanilla 0 / -1 / 1 slots or custom planes).
         //
-        // Session state (position, loadedChunks, rx/send buffers) is
-        // per-world: when worldId changes we clear loadedChunks so the
-        // new plane's chunks stream to the client fresh.
+        // Session state (position, loadedChunks, rx/send buffers) is per-world:
+        // when worldId changes we clear loadedChunks so the new plane's chunks
+        // stream to the client fresh. Database::setPlayerWorldIdByName persists
+        // the change on the row for the given username, and Database::loadPlayerData
+        // reads it back on login so a reconnect lands on the same plane.
         // -------------------------------------------------------------
         int32_t worldId{0};
 

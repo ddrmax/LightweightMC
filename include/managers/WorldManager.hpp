@@ -110,7 +110,44 @@ namespace LightweightMC::World
             return fallback;
         }
 
+        // Client-facing sky-dimension hint. Vanilla 1.8 clients only know
+        // three sky renders -- dimension 0 (Overworld / blue sky), 1 (End /
+        // Star Keep purple), and -1 (Nether / dark grey). Custom planes (Aether
+        // id 100, /world create >=101, future 0.0.15 planes) have no sky of
+        // their own; the client picks whatever the S2C JoinGame 0x01 / Respawn
+        // 0x07 packet's `dimension` field says, so every non-standard plane
+        // must be paired with one of the three vanilla ids to look correct.
+        // skyDimensionFor(worldId) resolves that: vanilla plane ids (0, 1, -1)
+        // return themselves, custom / future planes return whatever
+        // setSkyDimension registered (defaulting to 0 = Overworld sky), so
+        // Aether currently reports the blue Overworld sky and reconnect
+        // defaults to the same. /world create and the future dimension
+        // command can override per plane.
+        void setSkyDimension(int32_t planeId, int32_t skyHint)
+        {
+            // Only the three vanilla sky ids are meaningful for the client's
+            // renderer; anything else would show up as an unrecognised sky,
+            // so we snap to the caller's intent and silently ignore bad hints
+            // rather than pulling a Logger dependency into the header.
+            if (skyHint == 0 || skyHint == 1 || skyHint == -1)
+                m_skyDimension[planeId] = skyHint;
+        }
+
+        int32_t skyDimensionFor(int32_t planeId) const
+        {
+            auto it = m_skyDimension.find(planeId);
+            if (it != m_skyDimension.end())
+                return it->second;
+            // Vanilla planes are their own sky; custom planes fall back to
+            // Overworld unless setSkyDimension opted them into Nether or End.
+            if (planeId == 0 || planeId == 1 || planeId == -1)
+                return planeId;
+            return 0;
+        }
+
     private:
         std::unordered_map<int32_t, std::unique_ptr<Storage::WorldStorage>> &m_worlds;
+        std::unordered_map<int32_t, int32_t> m_skyDimension;
     };
 }
+

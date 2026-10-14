@@ -139,7 +139,34 @@ namespace LightweightMC::Network
         // keeps them in the same dimension. Returns true on success. Accepts
         // the pre-1.12 negative Nether id (-1) since m_worlds is now a map
         // rather than a vector indexed by worldId.
+        //
+        // Standard Minecraft keeps one coordinate space per plane, so a plain
+        // /gotor switch does NOT inherit the source plane's (x, z) -- that is
+        // the bug the user reported (walking far in Overworld and ending up in
+        // End's void at the Overworld's (x, z)). The public wrapper delegates
+        // to setPlayerWorldAt with hasExplicitPosition=false, which saves the
+        // departing plane's coordinates into the SQLite `player_positions`
+        // table and either (a) restores the arrival-plane coordinates if the
+        // player was previously on that plane, or (b) drops them at the
+        // destination plane's default spawn. Portal / jump-point code should
+        // call setPlayerWorldAt directly with hasExplicitPosition=true so the
+        // portal author can pin the arrival point (that's the hook the user
+        // asked for to support a future portal implementation).
         bool setPlayerWorldId(const std::string &playerName, int32_t newWorldId);
+
+        // Portal-friendly plane switch. When `hasExplicitPosition` is true,
+        // `x, y, z` is used verbatim as the arrival point on `newWorldId`
+        // (typical portal semantics: the exit point on the destination plane
+        // is authored by the portal itself). When `hasExplicitPosition` is
+        // false, standard Minecraft per-plane semantics apply: the arriving
+        // player is placed at their saved coordinates on `newWorldId` if the
+        // SQLite `player_positions` table has an entry for that plane, or
+        // dropped at the plane's default spawn (0, findStandingFeetY(0, 0,
+        // 50), 0) on first visit. In either case the leaving plane's
+        // coordinates are saved so future returns land where the player
+        // actually stood.
+        bool setPlayerWorldAt(const std::string &playerName, int32_t newWorldId,
+                              double x, double y, double z, bool hasExplicitPosition);
 
         // Enumerate registered world names by walking the in-memory world
         // map (registered-but-inactive planes are omitted because they hold

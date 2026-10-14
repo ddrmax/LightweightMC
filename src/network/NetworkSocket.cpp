@@ -92,10 +92,23 @@ namespace LightweightMC::Network
             return false;
         }
 
+        // Aether special-dimension plane id (default 100). Read before the
+        // standard-plane registration loop so the same value drives both the
+        // `setWorldById` row and the `m_worlds` map key; a fork can reserve
+        // a different 100-series slot for a future Legends-style crossover
+        // without editing code.
+        const int32_t aetherPlaneId = ConfigManager::getInstance().get<int32_t>("world", "aether-plane-id", 100);
+        if (aetherPlaneId == 0 || aetherPlaneId == -1 || aetherPlaneId == 1)
+        {
+            Core::Logger::error("world.aether-plane-id must not collide with the vanilla pre-1.12 slots "
+                                "(0 Overworld / -1 Nether / 1 End); refusing to start.");
+            return false;
+        }
+
         // Register the standard planes and the Aether special dimension as
-        // fixed IDs 0 / -1 / 1 / 100 bypassing the >=101 custom allocator
-        // path. setWorldById is idempotent so a restart with different
-        // active flags keeps the registry rows stable.
+        // fixed IDs 0 / -1 / 1 / <aether-plane-id> bypassing the >=101 custom
+        // allocator path. setWorldById is idempotent so a restart with
+        // different active flags keeps the registry rows stable.
         struct StdPlane
         {
             int32_t id;
@@ -106,7 +119,7 @@ namespace LightweightMC::Network
             {0, "overworld", "overworld"},
             {-1, "nether", "nether"},
             {1, "end", "end"},
-            {100, "aether", "aether"},
+            {aetherPlaneId, "aether", "aether"},
         };
         for (const auto &plane : kStandardPlanes)
         {
@@ -165,7 +178,7 @@ namespace LightweightMC::Network
             {0, "world.db", overworldStyle, overworldActive},
             {-1, "world-nether.db", Storage::GenStyle::NETHER, netherActive},
             {1, "world-end.db", Storage::GenStyle::END, endActive},
-            {100, "world-aether.db", Storage::GenStyle::AETHER, aetherActive},
+            {aetherPlaneId, "world-aether.db", Storage::GenStyle::AETHER, aetherActive},
         };
 
         for (const auto &spec : planeSpecs)
@@ -195,8 +208,8 @@ namespace LightweightMC::Network
                  kv.second->pregenerateWorld(20);*/
 
         Core::Logger::info("Multiworld ready: pre-1.12 dimension IDs "
-                           "(Overworld #0 / Nether #-1 / End #1 / Aether #100 special); "
-                           "custom worlds via /world create allocate IDs 101+");
+                           "(Overworld #0 / Nether #-1 / End #1 / Aether #" + std::to_string(aetherPlaneId) +
+                           " special per [world] aether-plane-id); custom worlds via /world create allocate IDs 101+");
 
         m_serverFd = socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;

@@ -163,7 +163,7 @@ namespace LightweightMC::Network
                                 " wireLen=" + std::to_string(packetLen) +
                                 " id=" + hexId(packetId) +
                                 " state=" + std::to_string(static_cast<int>(session.state)) +
-                                " hex=" + hexPreview(body, bodyOff + packetEnd));
+                                " hex=" + hexPreview(body, packetEnd));
 
             switch (session.state)
             {
@@ -302,20 +302,16 @@ namespace LightweightMC::Network
         const auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate).count() >= 1000)
         {
-            int refreshCount = 0;
-            for (const auto &[fd, ses] : m_clients)
-            {
-                if (ses.state != ClientState::PLAY)
-                    continue;
-                ++refreshCount;
-                Managers::ScoreboardManager::getInstance().sendScoreboard(
-                    fd, m_clients, packetSender);
-                Managers::ScoreboardManager::getInstance().sendTablistHeaderFooter(
-                    fd, m_clients.size(), packetSender);
-            }
-            Core::Logger::debug("[NET TICK] scoreboard refresh: served PLAY clients=" +
-                                std::to_string(refreshCount) + " of m_clients=" +
-                                std::to_string(m_clients.size()));
+            // Delegate to ScoreboardManager::tick so we snapshot (fd -> PLAY)
+            // into a local vector before dispatching. The per-client sendScoreboard
+            // / sendTablistHeaderFooter calls go through NetworkManager::sendPacket
+            // which can cascade flushSendBuffer -> handleDisconnect -> m_clients.erase(fd)
+            // when the socket is already dead; erasing mid-iteration invalidates
+            // the range-for iterator and any reference we captured, so the old
+            // inline loop over m_clients was UB once a client disconnected during
+            // the refresh window. tick() copies the fd list first and re-checks
+            // liveness each pass, which fixes the use-after-free.
+            Managers::ScoreboardManager::getInstance().tick(m_clients, packetSender);
             lastUpdate = now;
         }
     }

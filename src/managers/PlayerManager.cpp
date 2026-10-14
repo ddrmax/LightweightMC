@@ -143,6 +143,12 @@ namespace LightweightMC::Player
                 currentSession.yaw += 360.0f;
             }
             currentSession.pitch = playerData.lastPitch;
+            // Restore the plane the previous session was on so a player who
+            // /gotor'd to Nether / End / Aether / a custom world reconnects on
+            // the same plane instead of silently walking back to Overworld.
+            // loadedChunks is empty on login, so the client re-streams the
+            // target plane's terrain on the first updateChunksAroundPlayer.
+            currentSession.worldId = playerData.worldId;
             // Persisted game mode must be restored so a client that was set
             // to survival/adventure/etc. reconnects in the same mode
             // (JoinGame's 2nd byte reads currentSession.gamemode).
@@ -158,7 +164,8 @@ namespace LightweightMC::Player
             deserializeInventory(playerData.inventoryData, currentSession.inventory);
             Core::Logger::info("Restored player state for UUID [" + playerUuid + "] (" + username + ") at (" +
                                std::to_string(currentSession.x) + ", " + std::to_string(currentSession.y) + ", " + std::to_string(currentSession.z) + ") with " +
-                               std::to_string(currentSession.inventory.size()) + " saved items.");
+                               std::to_string(currentSession.inventory.size()) + " saved items on plane worldId=" +
+                               std::to_string(currentSession.worldId) + ".");
         }
         else
         {
@@ -202,7 +209,17 @@ namespace LightweightMC::Player
         std::vector<uint8_t> joinGame;
         Network::Packet::writeInt(joinGame, clientFd); // Entity ID
         joinGame.push_back(currentSession.gamemode);   // Gamemode (persisted in DB / PlayerSession)
-        joinGame.push_back(0);                         // Dimension (0 = Overworld)
+        // Dimension byte for sky render. Vanilla 1.8 clients only know three
+        // sky colours keyed by this byte -- 0 (Overworld blue), 1 (End /
+        // Star Keep purple) and -1 (Nether / dark grey). Hard-coding 0 here
+        // forced every relogin through an Overworld sky even when
+        // currentSession.worldId pointed at Nether, End, Aether, or a
+        // custom plane -- the reported "reconnecting defaults to Overworld
+        // sky" bug. Resolve the client-facing hint via WorldManager::skyDimensionFor
+        // (vanilla plane ids return themselves; custom planes report their
+        // registered sky hint or 0 by default) and cast to a signed byte on
+        // the wire so Nether's -1 becomes 0xFF, which vanilla expects.
+        joinGame.push_back(static_cast<uint8_t>(static_cast<int8_t>(worldManager.skyDimensionFor(currentSession.worldId))));
         joinGame.push_back(1);                         // Difficulty (1 = Easy)
         if (currentSession.clientProtocol >= 47)
         {

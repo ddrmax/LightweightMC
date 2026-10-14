@@ -133,15 +133,21 @@ private:
         emit("world", "nether-active", "true");
         emit("world", "end-active", "true");
 
-        // Aether ("Sky world", id 100) is a Minecraft-Legends-style special
-        // dimension rather than a standard plane: it lives in the same SQLite
-        // world_registry (so /gotor aether can still find it by name) but is
-        // only loaded into memory when the aether-active flag is true. Special-
-        // dimension planes may be added by future Minecraft Legends / Minecraft
-        // Adventure crossovers without colliding with the pre-1.12 vanilla range
-        // (0 / -1 / 1) because they get ids >= 100 from the custom allocator.
+        // Aether ("Sky world") is a Minecraft-Legends-style special dimension
+        // rather than a standard plane: it lives in the same SQLite world_registry
+        // (so /gotor aether can still find it by name) but is only loaded into
+        // memory when the aether-active flag is true. The plane's id is
+        // configurable via the aether-plane-id key (default 100); NetworkManager::start
+        // reads this on boot and allocates the WorldStorage under that id. Pick an
+        // id >= 100 (never 0 / -1 / 1 which are the vanilla pre-1.12 slots).
+        // Setting a value >= 101 pushes kFirstCustomWorldId higher via
+        // `Database::registerWorld` -- which allocates as `max(world_registry.id) + 1`
+        // and thus reserves the configured slot automatically for Aether without
+        // colliding with `/world create`. Special-dimension planes may be added by
+        // future Minecraft Legends / Minecraft Adventure crossovers using
+        // another id in the reserved 100-series.
         emit("world", "aether-active", "true");
-        emit("world", "aether-special-dimension", "true");
+        emit("world", "aether-plane-id", "100");
     }
 
     // Overwrite every canonical key with its default. Used when the config

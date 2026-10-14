@@ -8,7 +8,12 @@
 //     0   = Overworld   (world.db)          -- vanilla default plane
 //    -1   = Nether      (world-nether.db)   -- underworld
 //     1   = End         (world-end.db)      -- deepest plane
-//   100   = Aether      (world-aether.db)   -- special dimension
+//   <aether-plane-id> (default 100) = Aether (world-aether.db) -- Minecraft-Legends-style
+//                                special dimension; the id is read from
+//                                server.properties so a fork can reserve a
+//                                different 100-series slot for a future
+//                                Legends / Adventure crossover without editing
+//                                this file.
 //
 // IDs 101+ are allocated by the world_registry SQLite table in server_data.db
 // (see src/storage/Database.cpp::registerWorld) for custom worlds created at
@@ -40,6 +45,7 @@
 #include "storage/Database.hpp"
 #include "storage/WorldStorage.hpp"
 #include "world/EntityManager.hpp"
+#include "managers/PlayerManager.hpp"
 #include "core/Logger.hpp"
 #include "core/utils.hpp"
 #include "network/Packet.hpp"
@@ -49,6 +55,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
@@ -120,13 +127,15 @@ namespace LightweightMC::Network
         // through createWorld() use "world-<safeName>.db" where safeName lower-cases
         // the name and replaces anything outside [A-Za-z0-9_-] with '_' so a rogue
         // name cannot smuggle a path traversal into the working directory.
-        switch (outId)
-        {
-        case 0:   outDbPath = "world.db"; break;
-        case -1:  outDbPath = "world-nether.db"; break;
-        case 1:   outDbPath = "world-end.db"; break;
-        case 100: outDbPath = "world-aether.db"; break;
-        default:
+        //
+        // Match the standard planes by NAME rather than by id so the mapping
+        // stays correct even when the [world] aether-plane-id key re-homes the
+        // Aether special dimension to a different 100-series id.
+        if (worldName == "overworld")      outDbPath = "world.db";
+        else if (worldName == "nether")    outDbPath = "world-nether.db";
+        else if (worldName == "end")       outDbPath = "world-end.db";
+        else if (worldName == "aether")    outDbPath = "world-aether.db";
+        else
         {
             std::string safeName;
             safeName.reserve(worldName.size());
@@ -138,8 +147,6 @@ namespace LightweightMC::Network
                     safeName.push_back('_');
             }
             outDbPath = "world-" + safeName + ".db";
-            break;
-        }
         }
         return true;
     }
@@ -236,18 +243,33 @@ namespace LightweightMC::Network
         return out;
     }
 
-    // ---- setPlayerWorldId ---------------------------------------------------
+    // ---- setPlayerWorldId / setPlayerWorldAt --------------------------------
     // Live in-place plane switch for a currently-online player. The wire path:
     //   - Look up the online session by username.
-    //   - Push the player to the surface of the new plane (uses the new plane's
-    //     WorldStorage::findStandingFeetY so they land on real terrain).
+    //   - Save the departing plane's coordinates into the SQLite player_posi-
+    //     tions table (keyed by uuid, old worldId) so the player returns to
+    //     where they actually stood the next time they visit that plane.
+    //   - Resolve the destination plane's arrival point:
+    //       * hasExplicitPosition=true -> use (x, y, z) verbatim (portal hook
+    //         for future portal / jump-point code).
+    //       * hasExplicitPosition=false -> look up the player's saved
+    //         coordinates for the new plane; if present, drop them there; if
+    //         not, drop them at that plane's default spawn.
+    //   - Persist the worldId change on the player row so a relogin stays on
+    //     the new plane.
     //   - Clear loadedChunks so the next updateChunksAroundPlayer streams
-    //     fresh chunks from the new plane instead of stale chunk state from the
-    //     previous one.
+    //     fresh chunks from the new plane instead of stale chunk state from
+    //     the previous one.
     //   - Send an S2C Position packet (0x08) so the client animates the jump
     //     and never walks through the walls it built on the old plane.
-    //   - Persist the worldId change on the player's row so a relogin stays on
-    //     the new plane.
+    //
+    // Standard Minecraft keeps one coordinate space per dimension plane, so a
+    // plain /gotor switch never inherits the source plane's (x, z). The
+    // previous implementation reused wx=floor(session.x) which put a player
+    // who had walked far in Overworld at the same (x, z) in the End plane's
+    // void -- the bug the user reported. Portal code (which will land as a
+    // future jump-point primitive) should call setPlayerWorldAt with
+    // hasExplicitPosition=true so the portal author chooses the arrival point.
     //
     // Returns false when the player isn't currently online (PLAY state) or the
     // target worldId isn't registered. Note: we require PLAY because a player
@@ -255,12 +277,13 @@ namespace LightweightMC::Network
     // map key is signed so the pre-1.12 Nether id (-1) is a legal target --
     // the previous vector-based guard (newWorldId < 0) silently refused Nether
     // transitions and made /gotor nether a no-op.
-    bool NetworkManager::setPlayerWorldId(const std::string &playerName, int32_t newWorldId)
+    bool NetworkManager::setPlayerWorldAt(const std::string &playerName, int32_t newWorldId,
+                                           double x, double y, double z, bool hasExplicitPosition)
     {
         auto targetIt = m_worlds.find(newWorldId);
         if (targetIt == m_worlds.end() || !targetIt->second)
         {
-            Core::Logger::warn("setPlayerWorldId: target worldId=" + std::to_string(newWorldId) +
+            Core::Logger::warn("setPlayerWorldAt: target worldId=" + std::to_string(newWorldId) +
                                " is not a registered / active plane");
             return false;
         }
@@ -273,6 +296,8 @@ namespace LightweightMC::Network
             if (session.state != ClientState::PLAY)
                 continue;
 
+            const int32_t oldWorldId = session.worldId;
+
             // Persist in the database row so a relogin stays on the new plane.
             // (The players table's world_id column is populated by
             // Database::setPlayerWorldIdByName; when the column is absent on
@@ -282,19 +307,87 @@ namespace LightweightMC::Network
                 Core::Logger::warn("setPlayerWorldId: could not persist worldId for " + playerName);
             }
 
-            // Snap to the surface of the new plane so the client never gets
-            // buried in generated terrain. Hint Y at sea level keeps the
-            // search bounded -- findStandingFeetY scans up/down from this.
-            Storage::WorldStorage &targetWorld = *targetIt->second;
-            const int wx = static_cast<int>(std::floor(session.x));
-            const int wz = static_cast<int>(std::floor(session.z));
-            const int feetY = targetWorld.findStandingFeetY(wx, wz, 62);
-            const double newY = (feetY >= 0) ? static_cast<double>(feetY) : session.y;
+            // session.uuid is populated on login but stays empty for players
+            // mid-login; resolve the UUID deterministically so both save
+            // paths (player_positions and periodic savePlayerData) key on the
+            // same identifier.
+            const std::string playerUuid = session.uuid.empty()
+                ? Player::PlayerManager::getInstance().getPlayerUuid(playerName)
+                : session.uuid;
+
+            // Standard Minecraft plane hop: remember the source-plane coordi-
+            // nates so a future return to this plane finds the player where
+            // they actually stood. Skip when the switch is a same-plane no-op.
+            if (oldWorldId != newWorldId)
+            {
+                if (!m_database.savePlayerPosition(playerUuid, oldWorldId,
+                                                   session.x, session.y, session.z,
+                                                   session.yaw, session.pitch))
+                {
+                    Core::Logger::warn("setPlayerWorldId: could not persist departure-plane coords "
+                                       "for " + playerName + " on worldId=" + std::to_string(oldWorldId));
+                }
+            }
+
+            // Resolve the arrival point (portal hook vs standard plane-hop).
+            // hasExplicitPosition=true -> (x, y, z) verbatim, matching the
+            // standard Minecraft portal pattern where the portal author
+            // chooses the exit on the destination plane. hasExplicitPosition=
+            // false -> look up the player's saved coordinates for the new
+            // plane; if present, land them there; if not, drop them at that
+            // plane's default spawn (findStandingFeetY(0, 0, 50)) on first
+            // visit. Never reuse the source plane's (x, z) -- the previous
+            // implementation did exactly that (wx = floor(session.x)), which
+            // put a player who walked far in Overworld at the same (x, z)
+            // in the End plane's void -- the reported bug.
+            double destX = x;
+            double destY = y;
+            double destZ = z;
+            float destYaw = session.yaw;
+            float destPitch = session.pitch;
+            if (!hasExplicitPosition)
+            {
+                double savedX = 0.0, savedY = 0.0, savedZ = 0.0;
+                float savedYaw = 0.0f, savedPitch = 0.0f;
+                if (m_database.loadPlayerPosition(playerUuid, newWorldId,
+                                                  savedX, savedY, savedZ,
+                                                  savedYaw, savedPitch))
+                {
+                    destX = savedX;
+                    destY = savedY;
+                    destZ = savedZ;
+                    destYaw = savedYaw;
+                    destPitch = savedPitch;
+                }
+                else
+                {
+                    const int feetY = targetIt->second->findStandingFeetY(0, 0, 50);
+                    destX = 0.5;
+                    destY = (feetY >= 0) ? static_cast<double>(feetY) : 50.0;
+                    destZ = 0.5;
+                    destYaw = 0.0f;
+                    destPitch = 0.0f;
+                }
+            }
+
+            // Mirror the arrival position for this plane too. Keeps the SQLite
+            // table authoritative for the plane even if the periodic savePlayer-
+            // Data path lags behind (e.g. the player disconnects right after
+            // switching without a save flush).
+            if (!m_database.savePlayerPosition(playerUuid, newWorldId,
+                                               destX, destY, destZ,
+                                               destYaw, destPitch))
+            {
+                Core::Logger::warn("setPlayerWorldId: could not persist arrival-plane coords "
+                                   "for " + playerName + " on worldId=" + std::to_string(newWorldId));
+            }
 
             session.worldId = newWorldId;
-            session.x = wx + 0.5;
-            session.y = newY;
-            session.z = wz + 0.5;
+            session.x = destX;
+            session.y = destY;
+            session.z = destZ;
+            session.yaw = destYaw;
+            session.pitch = destPitch;
 
             // Clear loadedChunks -- the client must be told about the new
             // plane's terrain, so every chunk within renderDistance has to
@@ -302,18 +395,105 @@ namespace LightweightMC::Network
             // set, so we clear it unconditionally on plane switch.
             session.loadedChunks.clear();
 
-            // S2C Position (0x08): double x, double y, double z (see
-            // NetworkEvents.cpp::broadcastPacket for era-aware encoding).
-            std::vector<uint8_t> pos;
-            const double coords[3] = {session.x, session.y, session.z};
-            for (int axis = 0; axis < 3; ++axis)
+            // Vanilla 1.8 clients require a specific 4-packet ordering on
+            // plane switch to close the "loading world" screen:
+            //   1. 0x07 Respawn / Init Spawn Point (dimension, difficulty,
+            //      gamemode, levelType) -- clears the client's cached
+            //      chunks from the previous plane and switches the loading
+            //      screen to the destination plane.
+            //   2. Chunk Data (MapChunkBulk 0x26 for 1.8+, Chunk 0x21 for
+            //      1.7 clients) for the drop-point chunk ONLY -- client
+            //      decides which blocks to stand the player on.
+            //   3. 0x08 Position and Look (x, y, z doubles + yaw, pitch
+            //      floats + flags byte 0x00 for "absolute") -- closes the
+            //      loading screen and re-appears the avatar. Note: 1.8 does
+            //      NOT emit a trailing teleport-ID VarInt (that's a 1.9+
+            //      field); adding one shifts every subsequent packet body.
+            //   4. Chunk Data for the rest of the render-distance box.
+            //
+            // Sending only 0x08 (the pre-fix behaviour) left the client's
+            // loading screen open -- it never saw the 0x07 that names the
+            // new plane and never saw the drop-point chunk that grounds the
+            // player, so /gotor looked like a no-op on-screen while the
+            // server-side session was already updated.
+
+            // Reset the prefetch sentinel so updateChunksAroundPlayer below
+            // treats this crossing as a fresh login burst: pad the request
+            // box symmetrically around the player rather than 2x ahead in a
+            // stale movement direction from the previous plane.
+            session.prevChunkX = std::numeric_limits<std::int32_t>::min();
+            session.prevChunkZ = std::numeric_limits<std::int32_t>::min();
+
+            auto packetSender = [this](int fd, int32_t p, const std::vector<uint8_t> &b)
+            { sendPacket(fd, p, b); };
+
+            // 1. Respawn (0x07): dimension, difficulty, gamemode, levelType.
+            // Dimension is signed int32 so vanilla's Nether (-1) and any
+            // custom plane id (>=101) both fit; difficulty 2 = Normal,
+            // gamemode 0 = Survival, and levelType "default" mirror what
+            // vanilla's /gotor-style world swap emits over the wire.
+            //
+            // Sky trick: vanilla 1.8 clients only know three sky renders
+            // keyed by the 0x07 dimension field -- 0 (Overworld blue), 1
+            // (End / Star Keep purple) and -1 (Nether / dark grey). Custom
+            // planes (Aether id 100, /world create ids >=101, and the
+            // planes landing in 0.0.15) have no sky of their own, so we
+            // send WorldManager::skyDimensionFor(newWorldId) as the wire
+            // value instead of raw newWorldId -- vanilla planes report
+            // themselves, and Aether + custom planes report whatever
+            // setSkyDimension registered (defaulting to 0 / Overworld sky
+            // until a caller opts them into Nether or End). session.worldId
+            // and the server-side m_worlds key keep the true plane id, so
+            // storage lookups and player_positions rows stay correct; only
+            // the wire value visible to the client is remapped.
+            std::vector<uint8_t> respawn;
+            Network::Packet::writeInt(respawn, m_worldManager.skyDimensionFor(newWorldId));
+            respawn.push_back(2); // difficulty (byte, 2 = Normal)
+            respawn.push_back(static_cast<uint8_t>(session.gamemode)); // gamemode (byte)
+            Network::Packet::writeString(respawn, "default"); // levelType (string)
+            sendPacket(kv.first, 0x07, respawn);
+
+            // 2. Drop-point chunk: emit the single chunk the player will land
+            //    in so the client's renderer has ground under the avatar
+            //    before the 0x08 arrives. sendMapChunkBulk with renderDistance
+            //    = 0 walks only the chunk under (session.x, session.z) and, on
+            //    first plane visit (empty loadedChunks), uses the login-burst
+            //    synchronous generation path so the chunk is definitely ready
+            //    by the time the packet is written. Pre-1.8 clients get the
+            //    equivalent single 0x21 Chunk packet via sendFlatChunk.
+            if (session.clientProtocol >= 47)
             {
-                std::uint64_t u;
-                std::memcpy(&u, &coords[axis], 8);
-                for (int byteIdx = 7; byteIdx >= 0; --byteIdx)
-                    pos.push_back(static_cast<uint8_t>((u >> (byteIdx * 8)) & 0xFF));
+                m_worldManager.sendMapChunkBulk(kv.first, session, 0, packetSender);
             }
+            else
+            {
+                const int dropChunkX = static_cast<int>(std::floor(session.x / 16.0));
+                const int dropChunkZ = static_cast<int>(std::floor(session.z / 16.0));
+                m_worldManager.sendFlatChunk(kv.first, dropChunkX, dropChunkZ, session, packetSender);
+            }
+
+            // 3. Player Position And Look (0x08): doubles + floats + flags.
+            // Network::Packet::writeInt/writeDouble is big-endian on the wire
+            // for every Minecraft S2C packet, so we build the body inline.
+            std::vector<uint8_t> pos;
+            Network::Packet::writeDouble(pos, session.x);
+            Network::Packet::writeDouble(pos, session.y);
+            Network::Packet::writeDouble(pos, session.z);
+            Network::Packet::writeFloat(pos, session.yaw);
+            Network::Packet::writeFloat(pos, session.pitch);
+            pos.push_back(0x00); // Flags = 0x00 (absolute coords, no teleport ID trailer on 1.8)
             sendPacket(kv.first, 0x08, pos);
+
+            // 4. Rest of the world: prefetch+emit every chunk in the render
+            //    box around the new position. updateChunksAroundPlayer skips
+            //    the drop-point chunk via loadedChunks (sendMapChunkBulk
+            //    inserted it during step 2), and enqueues the remaining
+            //    chunks on WorldStorage's async worker for this tick's
+            //    ready-and-unloaded ones; tickChunkStreaming flushes the
+            //    rest on subsequent ticks.
+            constexpr int kPlaneSwitchRenderDistance = 5;
+            m_worldManager.updateChunksAroundPlayer(kv.first, session,
+                                                    kPlaneSwitchRenderDistance, packetSender);
 
             Core::Logger::info("setPlayerWorldId: moved " + playerName +
                                " to worldId=" + std::to_string(newWorldId) +
@@ -323,6 +503,17 @@ namespace LightweightMC::Network
             return true;
         }
         return false;
+    }
+
+    // ---- setPlayerWorldId (public wrapper) ----------------------------------
+    // Delegates to setPlayerWorldAt with hasExplicitPosition=false so standard
+    // Minecraft per-plane semantics decide the arrival point (either the player's
+    // saved coordinates on the destination plane or that plane's default spawn
+    // on first visit). Portal code should call setPlayerWorldAt directly with
+    // hasExplicitPosition=true so the portal author chooses the exit point.
+    bool NetworkManager::setPlayerWorldId(const std::string &playerName, int32_t newWorldId)
+    {
+        return setPlayerWorldAt(playerName, newWorldId, 0.0, 0.0, 0.0, false);
     }
 
     // ---- tickChunkStreaming ---------------------------------------------------

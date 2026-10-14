@@ -50,6 +50,30 @@ namespace LightweightMC::Storage
 
         uint8_t deathCount{0};
         int64_t lastSeen{0}; // Unix timestamp, 0 = never recorded
+
+        // Multiworld / dimension-plane selector (mirrors PlayerSession::worldId).
+        // Persisted in the `players` SQLite table as `world_id INTEGER DEFAULT 0`
+        // so a `/gotor <plane>` survives a relogin: `Database::loadPlayerData`
+        // reads it back and PlayerManager's login handler writes it onto the
+        // fresh PlayerSession before the first
+        // `getWorldStorageFor(session.worldId)` call in `sendPlayPackets`.
+        // Standard planes use pre-1.12 vanilla IDs (0 Overworld, -1 Nether, 1
+        // End) plus a reserved 100-series slot for the Minecraft Legends-style
+        // Aether special dimension; `/world create` custom planes allocate
+        // IDs 101+ starting at `kFirstCustomWorldId` in `Database.cpp`.
+        int32_t worldId{0};
+
+        // Players hold independent coordinates per plane (standard Minecraft
+        // behaviour for a multi-world server). `lastX/lastY/lastZ` on the
+        // `players` row always describe the plane `world_id` names, so a plain
+        // save/restore pair round-trips correctly. `hasPositionData` marks
+        // whether the current PlayerData payload carries real coordinates;
+        // partial-write callers (setPlayerOpLevel, setPlayerGameMode, ...)
+        // build a PlayerData with default 0.5/7.0/0.5 which must NOT clobber
+        // the per-plane mirror in the SQLite `player_positions` table. Player
+        // Session's own `applyTo` sets this flag; the login/telemetry paths
+        // leave it false.
+        bool hasPositionData{false};
     };
 
     // -------------------------------------------------------------
@@ -87,6 +111,34 @@ namespace LightweightMC::Storage
         // by NetworkManager::setPlayerWorldId so a live-plane switch persists
         // across relogins. Returns false when the username has no row.
         bool setPlayerWorldIdByName(const std::string &username, int32_t worldId);
+
+        // ---- Per-plane player coordinates (0.0.14 multiworld fix) ------------
+        // Standard Minecraft keeps a *separate* coordinate space per dimension
+        // plane. Walking far in the Overworld then transitioning to End must not
+        // reappear at the Overworld's (x, z) in the End (which is often void
+        // terrain). Coordinates are stored per (uuid, world_id) in the SQLite
+        // `player_positions` table so:
+        //   * savePlayerData also mirrors the current-plane coords into it
+        //     (only when PlayerData::hasPositionData is true);
+        //   * loadPlayerData consults it for the plane the row says the player
+        //     is on, overriding `last_x/last_y/last_z` when an entry exists;
+        //   * NetworkManager::setPlayerWorldAt / setPlayerWorldId save the
+        //     leaving plane's coords before the switch and load the destination
+        //     plane's coords on arrival (or fall back to that plane's default
+        //     spawn), which is exactly the standard Minecraft teleport semantic
+        //     the /gotor command already assumes but the previous code did not
+        //     implement.
+        // Future portal code should call NetworkManager::setPlayerWorldAt with
+        // hasExplicitPosition=true so the portal author chooses the arrival
+        // point on the destination plane; the same player_positions rows back
+        // the standard /gotor path.
+        bool savePlayerPosition(const std::string &uuid, int32_t worldId,
+                                double x, double y, double z,
+                                float yaw, float pitch);
+        bool loadPlayerPosition(const std::string &uuid, int32_t worldId,
+                                double &x, double &y, double &z,
+                                float &yaw, float &pitch) const;
+        bool deletePlayerPosition(const std::string &uuid, int32_t worldId);
 
         // --- Game rules persistence (server_data.db) ---
         bool saveGameRule(const GameRuleData &rule);

@@ -73,6 +73,13 @@ namespace LightweightMC::Player
 
         deathCount = data.deathCount;
         lastSeen = data.lastSeen;
+
+        // Plane the previous session was on (0 by default for fresh rows or
+        // rows migrated without the world_id column; pre-1.12 -1 for Nether,
+        // 1 for End, 100 for the Aether special dimension, 101+ for `/world
+        // create` planes). loadedChunks is empty on login so the client
+        // re-streams the new plane's terrain without an explicit clear here.
+        worldId = data.worldId;
     }
 
     void PlayerSession::applyTo(Storage::PlayerData &data) const
@@ -134,6 +141,21 @@ namespace LightweightMC::Player
         data.opLevel = opLevel;
 
         data.deathCount = deathCount;
+
+        // Multiworld plane selector. Persisted with every save so a `/gotor`
+        // or `/world join` switch on a live session is picked up on the next
+        // login (see Database::loadPlayerData -> LoginHandler in PlayerManager).
+        data.worldId = worldId;
+
+        // Flag that the payload carries real session coordinates so Database::
+        // savePlayerData knows to mirror them into the per-plane `player_posi-
+        // tions` table (standard Minecraft keeps one coordinate space per plane
+        // -- see the matching block in Database.cpp). Partial-write callers
+        // (setPlayerOpLevel, setPlayerGameMode) build a fresh PlayerData and
+        // never call applyTo, so hasPositionData stays false and the mirror is
+        // skipped, preventing a default 0.5/7.0/0.5 from clobbering the plane's
+        // last-known position.
+        data.hasPositionData = true;
     }
 
     void PlayerSession::resetVolatileState()

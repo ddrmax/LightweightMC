@@ -53,6 +53,14 @@ namespace LightweightMC::Storage
             bool_value INTEGER NOT NULL DEFAULT 0,
             int_value INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS player_positions (
+            uuid TEXT NOT NULL,
+            world_id INTEGER NOT NULL,
+            x DOUBLE, y DOUBLE, z DOUBLE,
+            yaw FLOAT, pitch FLOAT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (uuid, world_id)
+        );
     )";
 
         char *errMsg = nullptr;
@@ -140,9 +148,9 @@ namespace LightweightMC::Storage
             (uuid, username, spawn_x, spawn_y, spawn_z, spawn_yaw, spawn_pitch, last_x, last_y, last_z, last_yaw, last_pitch, inventory_blob, last_seen,
              health, food_level, food_saturation, food_exhaustion, gamemode, has_spawn, bed_x, bed_y, bed_z,
              fall_distance, air, on_fire, fire, sleeping, sleep_timer, flying, sprinting,
-             xp_level, xp_progress, xp_total, death_count, op_level)
+             xp_level, xp_progress, xp_total, death_count, op_level, world_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         )";
 
         sqlite3_stmt *stmt = nullptr;
@@ -197,6 +205,10 @@ namespace LightweightMC::Storage
         sqlite3_bind_int64(stmt, 33, data.totalExperience);
         sqlite3_bind_int(stmt, 34, data.deathCount);
         sqlite3_bind_int(stmt, 35, data.opLevel);
+        // Plane the session is currently on. Persisted on every save so the
+        // last-known-plane survives a relogin even without
+        // Database::setPlayerWorldIdByName (used by the live /gotor switch).
+        sqlite3_bind_int(stmt, 36, data.worldId);
 
         bool success = (sqlite3_step(stmt) == SQLITE_DONE);
         if (!success)
@@ -204,6 +216,28 @@ namespace LightweightMC::Storage
             Core::Logger::error("Failed to execute savePlayerData for " + data.username + ": " + std::string(sqlite3_errmsg(m_db)));
         }
         sqlite3_finalize(stmt);
+
+        // Standard Minecraft keeps a separate coordinate space per plane. In
+        // addition to the flat last_x/last_y/last_z fields on the players row
+        // (which describe the plane named by world_id), mirror those
+        // coordinates into the per-plane `player_positions` table so a later
+        // /gotor or portal hop can find the player's last position on any
+        // plane they visited -- not just the last one they were on. Skip the
+        // mirror when the caller built a partial PlayerData (op-level or game
+        // mode updates construct a fresh PlayerData whose last_x/y/z are
+        // still default 0.5/7.0/0.5, which must not overwrite the real
+        // per-plane coordinates we already have).
+        if (success && data.hasPositionData && !data.uuid.empty())
+        {
+            if (!savePlayerPosition(data.uuid, data.worldId, data.lastX, data.lastY, data.lastZ,
+                                    data.lastYaw, data.lastPitch))
+            {
+                Core::Logger::warn("savePlayerData: per-plane mirror (player_positions) for " +
+                                   data.username + " failed -- login restore will fall back to "
+                                   "the flat last_x/y/z columns on the players row");
+            }
+        }
+
         return success;
     }
 
@@ -217,7 +251,7 @@ namespace LightweightMC::Storage
                    last_x, last_y, last_z, last_yaw, last_pitch, inventory_blob,
                    health, food_level, food_saturation, food_exhaustion, gamemode, has_spawn, bed_x, bed_y, bed_z,
                    fall_distance, air, on_fire, fire, sleeping, sleep_timer, flying, sprinting,
-                   xp_level, xp_progress, xp_total, death_count, op_level
+                   xp_level, xp_progress, xp_total, death_count, op_level, world_id
             FROM players WHERE uuid = ?;
         )";
 
@@ -283,11 +317,45 @@ namespace LightweightMC::Storage
             outData.deathCount = static_cast<uint8_t>(num(stmt, 32));
             outData.opLevel = static_cast<uint8_t>(num(stmt, 33));
 
+            // Plane the last session was on (column 34). NULL on rows written
+            // before the schema migration -- default 0 (Overworld) is what the
+            // login handler expects.
+            outData.worldId = static_cast<int32_t>(num(stmt, 34));
+
             // Bed spawn is "not present" unless flagged and coordinates are valid.
             outData.hasBedSpawn = outData.hasSpawn && outData.bedX >= 0 && outData.bedY >= 0 && outData.bedZ >= 0;
         }
 
         sqlite3_finalize(stmt);
+
+        // Standard Minecraft maintains per-plane player coordinates. Once the
+        // flat player row is loaded, consult the per-plane mirror (player_posi-
+        // tions) for the plane the row says the player is on. If the mirror has
+        // a fresher or authoritative entry (a legacy row where the flat last_x
+        // /last_y/last_z fields were clobbered by a partial savePlayerData
+        // from setPlayerOpLevel / setPlayerGameMode -- or an entry recorded by
+        // a setPlayerWorldId plane switch that never went through savePlayerData
+        // before disconnecting), override the flat fields with the per-plane
+        // values so login lands the player at their last visited position on
+        // that specific plane rather than the position they had when the last
+        // full save happened. When no per-plane entry exists, fall back to the
+        // flat columns and let NetworkManager::setPlayerWorldAt's spawn-fallback
+        // logic (called on subsequent /gotor) handle a first-visit on that plane.
+        if (found)
+        {
+            double px = 0.0, py = 0.0, pz = 0.0;
+            float pyaw = 0.0f, ppitch = 0.0f;
+            if (loadPlayerPosition(uuid, outData.worldId, px, py, pz, pyaw, ppitch))
+            {
+                outData.lastX = px;
+                outData.lastY = py;
+                outData.lastZ = pz;
+                outData.lastYaw = pyaw;
+                outData.lastPitch = ppitch;
+                outData.hasPositionData = true;
+            }
+        }
+
         return found;
     }
 
@@ -680,6 +748,104 @@ namespace LightweightMC::Storage
         }
         sqlite3_bind_int(stmt, 1, worldId);
         sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    // ---- Per-plane coordinate storage (0.0.14 fix) ---------------------------
+    // See Database.hpp for the semantics: one row per (uuid, world_id). `save-
+    // PlayerPosition` inserts-or-replaces so subsequent saves on the same plane
+    // overwrite the last-known coordinate; `loadPlayerPosition` returns false
+    // when the plane has never been visited (so callers can distinguish "not
+    // visited yet" from "visited and standing at 0,0,0"). `deletePlayerPosition`
+    // is provided for future portal / plane-teardown cleanup.
+    bool Database::savePlayerPosition(const std::string &uuid, int32_t worldId,
+                                       double x, double y, double z,
+                                       float yaw, float pitch)
+    {
+        if (!m_db || uuid.empty())
+            return false;
+
+        const char *sql =
+            "INSERT OR REPLACE INTO player_positions "
+            "(uuid, world_id, x, y, z, yaw, pitch, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare savePlayerPosition: " +
+                                std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_text(stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, worldId);
+        sqlite3_bind_double(stmt, 3, x);
+        sqlite3_bind_double(stmt, 4, y);
+        sqlite3_bind_double(stmt, 5, z);
+        sqlite3_bind_double(stmt, 6, yaw);
+        sqlite3_bind_double(stmt, 7, pitch);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        if (!ok)
+        {
+            Core::Logger::error("Failed to execute savePlayerPosition for " +
+                                uuid + " on plane " + std::to_string(worldId) +
+                                ": " + std::string(sqlite3_errmsg(m_db)));
+        }
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool Database::loadPlayerPosition(const std::string &uuid, int32_t worldId,
+                                       double &x, double &y, double &z,
+                                       float &yaw, float &pitch) const
+    {
+        if (!m_db || uuid.empty())
+            return false;
+
+        const char *sql =
+            "SELECT x, y, z, yaw, pitch FROM player_positions "
+            "WHERE uuid = ? AND world_id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare loadPlayerPosition: " +
+                                std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_text(stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, worldId);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            found = true;
+            x = sqlite3_column_double(stmt, 0);
+            y = sqlite3_column_double(stmt, 1);
+            z = sqlite3_column_double(stmt, 2);
+            yaw = static_cast<float>(sqlite3_column_double(stmt, 3));
+            pitch = static_cast<float>(sqlite3_column_double(stmt, 4));
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
+    bool Database::deletePlayerPosition(const std::string &uuid, int32_t worldId)
+    {
+        if (!m_db || uuid.empty())
+            return false;
+
+        const char *sql =
+            "DELETE FROM player_positions WHERE uuid = ? AND world_id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare deletePlayerPosition: " +
+                                std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_text(stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, worldId);
         const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
         sqlite3_finalize(stmt);
         return ok;

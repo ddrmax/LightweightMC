@@ -5,6 +5,203 @@ All notable changes made to the project **LightweightMC** are documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project respects [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.0.14] - 2026-10-13
+
+### Added
+
+- **`Storage::PlayerData::worldId`** field (mirrors `PlayerSession::worldId`)
+  persisted in the `players` SQLite table as `world_id INTEGER DEFAULT 0`.
+  Round-trips through both halves of the login flow:
+  `Database::loadPlayerData` reads column 34 (world_id) and the login handler in
+  `PlayerManager.cpp` copies it onto `session.worldId` before the first
+  `getWorldStorageFor(session.worldId)` call in `sendPlayPackets`.
+  `Database::savePlayerData` and `PlayerSession::applyTo` also write the field
+  back on every save, so a live `/gotor` switch persists across relogins even
+  without the `Database::setPlayerWorldIdByName` path firing.
+
+- **Per-plane player coordinates (`Storage::Database::player_positions` SQLite
+  table + `Storage::PlayerData::hasPositionData`).** New SQLite table
+  keyed on `(uuid, world_id)` records `x`, `y`, `z`, `yaw`, `pitch` and an
+  `updated_at` timestamp for every plane a player has occupied, so a
+  player who used `/gotor` or (later) a portal no longer inherits their
+  source-plane coordinates on the destination plane. Three write paths
+  feed the table: (1) the periodic `savePlayerData` mirror — guarded by
+  the new `PlayerData::hasPositionData` bool which defaults to `false`
+  and is flipped to `true` inside `PlayerSession::applyTo`, the *only*
+  entry point reached by live per-plane saves, so partial-write callers
+  that construct a fresh `PlayerData` with placeholder coords
+  (`setPlayerOpLevel`, `setPlayerGameMode`) never clobber the real
+  per-plane values; (2) the new `NetworkManager::setPlayerWorldAt(player
+  Name, newWorldId, x, y, z, hasExplicitPosition)` which saves the
+  departure-plane coords and either loads the previously-stored arrival
+  coords or falls back to the plane's default spawn on first visit
+  (`hasExplicitPosition=false`), or else writes the caller-provided
+  `(x,y,z)` verbatim as the arrival point (`hasExplicitPosition=true`,
+  which is the primitive a future portal system will call to pin the
+  exit on the destination plane); and (3) the login path — `Database::
+  loadPlayerData` now calls `Database::loadPlayerPosition(uuid, worldId,
+  ...)` for the plane the flat `world_id` column says the player is on
+  and, if an entry exists, overrides the flat `lastX/lastY/lastZ/yaw/
+  pitch` fields with the per-plane row. `setPlayerWorldId` becomes a
+  thin wrapper delegating to `setPlayerWorldAt(..., 0.0, 0.0, 0.0, false)`
+  so the existing `/gotor` console path inherits the new behaviour
+  without any call-site change. `setPlayerWorldAt` also resolves the
+  uuid via `PlayerManager::getInstance().getPlayerUuid(playerName)` as a
+  fallback when `session.uuid` is empty (mid-login players), keeping
+  both coordinate-save paths keyed on the same identifier.
+
+- **`WorldManager::setSkyDimension` + `WorldManager::skyDimensionFor` sky-render
+  trick for non-vanilla planes.** Vanilla 1.8 clients only know three sky
+  renders keyed by the `dimension` field of the S2C `JoinGame` (0x01) login
+  byte and S2C `Respawn` (0x07) plane-switch int32 — `0` (Overworld blue),
+  `1` (End / Star Keep purple), `-1` (Nether dark grey). Any server plane
+  with a non-vanilla id (Aether at 100 by default, `/world create` custom
+  ids 101+, and the planes landing in 0.0.15) has no sky of its own;
+  without the trick the client kept the previous plane's sky across the
+  switch and defaulted to Overworld on reconnect. `WorldManager::skyDimensionFor(planeId)`
+  returns the planeId itself for `{0, 1, -1}` and otherwise returns whatever
+  `WorldManager::setSkyDimension(planeId, hint)` registered, defaulting to
+  0 (Overworld sky). `NetworkManager::setPlayerWorldAt` now writes that
+  hint into the 0x07 `dimension` int32 (instead of the raw newWorldId) and
+  `PlayerManager::sendPlayPackets` writes `static_cast<uint8_t>(static_cast<int8_t>(...))`
+  into the 0x01 `dimension` byte at login (so Nether's -1 becomes the expected
+  `0xFF` on the wire); server-side state (`session.worldId`, `m_worlds`
+  keys, `player_positions` rows) keeps the true plane id so storage lookups,
+  chunk streaming and persistence paths are unaffected. Callers added in 0.0.15
+  (`/world create --sky <overworld|nether|end>` and the new dimension
+  registry) will call `setSkyDimension` to opt each new plane into the sky it
+  wants; `setSkyDimension` silently ignores hints outside `{0, 1, -1}`.
+- **Wiki: Multiworld-and-Dimensions "Sky render trick for non-standard planes"
+  section** documenting the 0/1/-1 sky table, the two entry points that
+  consume `skyDimensionFor`, and the persistence caveat (server-side keys
+  stay on the true plane id, only the wire value is remapped).
+
+
+### Fixed
+
+- **Relogin after `/gotor <plane>` returned to Overworld.**
+  `Database::loadPlayerData`'s SELECT list previously stopped at `op_level`, and
+  the login handler in `src/managers/PlayerManager.cpp` never wrote
+  `session.worldId` from the loaded `PlayerData` — so a player who used `/gotor
+  nether` or `/world create` and then reconnected was put back in plane 0
+  (Overworld) even though the SQLite `world_id` column said plane −1. The SELECT
+  now includes `world_id` and the login handler restores
+  `currentSession.worldId = playerData.worldId` before the first chunk-streaming
+  call. Verified by pre-seeding `world_id = -1` in `server_data.db`, booting the
+  server, logging in a fresh client, and observing the log line
+  `Restored player state for UUID [...] (...) ... on plane worldId=-1.`
+- **`aether-special-dimension` (bool, written but never read) → `aether-plane-id`
+  (int, default 100, actually read at boot).** The config key emitted by
+  `ConfigManager::forEachCanonicalDefault` in `include/core/ConfigManager.hpp`
+  was documented as "written only, never read"; plane id 100 was hard-coded in
+  `NetworkSocket.cpp::NetworkManager::start` (in both `kStandardPlanes` and
+  `planeSpecs`), in `NetworkWorlds.cpp::describeWorld`'s `switch (outId)`, and in
+  the `NetworkWorlds.cpp` file-header comment. The key is now an int
+  (`[world] aether-plane-id = 100` by default), read once at boot, threaded into
+  both `Database::setWorldById` (registry row) and the `m_worlds` map key
+  (`planeSpecs[3] = {aetherPlaneId, "world-aether.db", AETHER, aetherActive}`),
+  with a boot-time validation rejecting collisions with the vanilla pre-1.12
+  slots (0 / −1 / 1). `describeWorld`'s per-plane SQLite file lookup was switched
+  to match by **name** rather than by numeric id so re-homing the reserved slot
+  keeps the correct `world-aether.db` filename mapping. `Database::registerWorld`'s
+  `max(world_registry.id) + 1` allocator already reserved the configured slot
+  automatically, so custom `/world create` planes can never collide with the
+  configurable Aether id.
+
+- **Vanilla clients never closed the "loading world" screen on `/gotor` or a
+  future portal plane-switch.** Pre-fix `NetworkManager::setPlayerWorldAt`
+  pushed a bare S2C Position (0x08) after mutating `session.x/y/z/worldId`,
+  but vanilla 1.8 requires a specific 4-packet stream to close its loading
+  screen: (1) `0x07` Respawn / Init Spawn Point with `dimension:int32,
+  difficulty:u8=2, gamemode:u8, levelType:"default"` — declares the new
+  plane to the client, clears its cached Overworld chunks, and starts the
+  loading screen for the destination; (2) a single MapChunkBulk (0x26) body
+  carrying **only the drop-point chunk** so the client can decide which
+  blocks to stand the player on; (3) `0x08` Player Position And Look with
+  `x/y/z` doubles + `yaw/pitch` floats + `flags:u8=0x00` (absolute) and
+  **no trailing teleport-ID VarInt** (that field belongs to 1.9+ only,
+  adding it shifted every subsequent packet body and made the client
+  reject the position); (4) the surrounding chunk stream within render
+  distance. Sending only `0x08` (pre-fix) meant the client saw an updated
+  position on a plane whose loading screen was still open on the previous
+  plane's cache — the reported "no-op on screen" symptom. `setPlayerWorldAt`
+  now emits all four in order: `0x07` via a freshly-built respawn buffer,
+  drop-point chunk via `sendMapChunkBulk(fd, session, 0, packetSender)` for
+  1.8+ (`sendFlatChunk` single chunk for pre-1.8 clients, whose equivalent
+  is 0x21), `0x08` with the full body via `Network::Packet::writeDouble`/
+  `writeFloat`, and finally `updateChunksAroundPlayer(fd, session, 5, packetSender)`
+  to prefetch+emit the remaining chunks; `session.loadedChunks` is
+  cleared first so the drop-point chunk inserted by the rd=0 pass is
+  skipped by the rd=5 pass. `session.prevChunkX/Z` are reset to the
+  login-burst sentinel (`std::numeric_limits<int32_t>::min()`) before the
+  stream so the next `updateChunksAroundPlayer` pads the request box
+  symmetrically around the player rather than 2x ahead in a stale
+  movement direction from the previous plane.
+- **`NetworkEvents.cpp` inline scoreboard refresh loop in `pollEvents` replaced
+  with `ScoreboardManager::tick(m_clients, packetSender)`.** The inline
+  `for (const auto &[fd, ses] : m_clients)` loop that dispatched `sendScoreboard`
+  + `sendTablistHeaderFooter` per PLAY client without first snapshotting the
+  fd list was UB once any client disconnected mid-refresh: those two sends go
+  through `NetworkManager::sendPacket` which can cascade
+  `flushSendBuffer -> handleDisconnect -> m_clients.erase(fd)` and invalidate
+  the range-for iterator (and any reference to `ses`) on a later pass. The
+  crash surfaced during `bot_test` under ASan as a heap-use-after-free inside
+  the erased `std::unordered_map<int, PlayerSession>` node read at line 313
+  of NetworkEvents.cpp. `ScoreboardManager::tick` already snapshots the live
+  (fd -> PLAY) pairs into a local `std::vector<int>` before dispatching and
+  re-looks each fd up on its own pass, so delegating to it fixes the use-after-
+  free without any other behaviour change.
+- **`hexPreview(body, bodyOff + packetEnd)` at `NetworkEvents.cpp:166` →
+  `hexPreview(body, packetEnd)`.** `body` points into the receive buffer at
+  offset `headerOff` (so it has exactly `packetEnd = packetLen` valid bytes)
+  but the call site also added `bodyOff`, the varint prefix length that had
+  already been consumed inside the packet-id decode — a two-byte over-read on
+  every debug hex log line for a small-varint packet. ASan reported this as
+  heap-buffer-overflow at `hexPreview` (line 52) reading `1 byte` past a
+  16-byte `std::vector<uint8_t>` allocation for the standard handshake
+  frame; harmless under the normal build (adjacent heap reads stay in-mapped)
+  but it landed on a page boundary occasionally and now SIGSEGVs reproducibly
+  after the coord changes shift heap layout, breaking `run_tests.sh`. Only the
+  debug-log path was affected; the packet body itself was parsed correctly.
+
+  after `/gotor`.** Before 0.0.14, `Database::loadPlayerData` returned a
+  single flat `(lastX, lastY, lastZ, yaw, pitch)` tuple for the player
+  regardless of which plane they were on, and `NetworkManager::setPlayer
+  WorldId` only updated the flat `world_id` column. A player who stood at
+  say `(120, 45, -80)` in the Overworld and used `/gotor nether` was
+  respawned in Nether at `(120, 45, -80)` — coordinates that made sense
+  in the Overworld but not necessarily in the destination plane, and any
+  subsequent Overworld relogin would restore those Nether-flavoured
+  coordinates. The new `player_positions` SQLite table records per-plane
+  coordinates keyed by `(uuid, world_id)`; `setPlayerWorldAt` saves the
+  departure-plane row before switching, loads any arrival-plane row (or
+  the plane's default spawn on first visit) so `/gotor` drops the player
+  where they previously stood on that plane instead of teleporting them
+  to the source-plane coordinates, and the login path in `Database::
+  loadPlayerData` re-reads the per-plane row for the plane the flat
+  `world_id` column indicates. `setPlayerWorldId` becomes a wrapper
+  around `setPlayerWorldAt(..., hasExplicitPosition=false)` so the
+  existing `/gotor` console path picks this behaviour up with no
+  change at the call site.
+
+### Documentation
+
+- **`PlayerSession.hpp` world/plane layout comment (line ~103) rewritten** to
+  document the pre-1.12 vanilla Java Edition layout the code actually uses
+  (Overworld 0 / Nether −1 / End 1 / Aether `<aether-plane-id>` default 100 /
+  custom 101+) instead of the aspirational "0/1/2 with 3..99 reserved" block
+  that has never matched the code since 0.0.6.
+- **`WorldCommands.hpp` `/world create` subcommand summary** fixed to read
+  "allocate a new plane (id >= 101)" (was "id >= 100", matching
+  `kFirstCustomWorldId = 101` in `Database.cpp` and the Aether reserved-slot
+  convention).
+- Wiki [Multiworld & Dimensions](Multiworld-and-Dimensions) updated:
+  config-key table, plane table, and intro paragraph now describe the
+  configurable `[world] aether-plane-id` key; the four "Doc/code mismatches
+  worth flagging" callouts are replaced with a resolved-in-0.0.14 note while
+  keeping the still-open `pregenerateWorld` callout.
+
+---
 ## [0.0.13] - 2026-12-10
 
 ### Added

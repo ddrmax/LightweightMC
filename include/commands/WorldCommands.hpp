@@ -332,7 +332,7 @@ public:
 // ---Command /world ---
 // Subcommand tree for multiworld management:
 //   /world list                      -> enumerate registered plane names
-//   /world create <name> <style>     -> allocate a new plane (id >= 100)
+//   /world create <name> <style>     -> allocate a new plane (id >= 101)
 //   /world info <name>               -> report the id + style of a registered plane
 // Wire-through CommandContext.createWorld / listWorlds closures in Server.cpp.
 class WorldCommand : public Command
