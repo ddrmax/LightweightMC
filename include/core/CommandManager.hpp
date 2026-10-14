@@ -135,6 +135,65 @@ struct CommandContext
     // serves. Returns false when the name is not registered.
     std::function<bool(const std::string &worldName, int32_t &outId, std::string &outStyle, std::string &outDbPath)> describeWorld =
         [](const std::string &, int32_t &, std::string &, std::string &) -> bool { return false; };
+
+    // Optional hook used by /setworldspawn. Server-side implementations
+    // wire this to NetworkManager::setWorldSpawnByName, which writes
+    // the plane's spawn triple to the world_registry SQLite table's
+    // spawn_x/spawn_y/spawn_z columns and mirrors it into WorldManager::
+    // m_worldSpawn so the login path and NetworkManager::setPlayerWorldAt
+    // pick the new value up on the next portal / /gotor transition.
+    std::function<bool(const std::string &worldName, double x, double y, double z)> setWorldSpawn =
+        [](const std::string &, double, double, double) -> bool { return false; };
+
+    // Optional hook used by /world spawn (a "query" flavour the console
+    // may add later). Server-side implementations wire this to
+    // NetworkManager::getWorldSpawnByName which prefers the in-memory
+    // WorldManager cache and falls back to SQLite; false when the plane
+    // is unregistered.
+    std::function<bool(const std::string &worldName, double &outX, double &outY, double &outZ)> getWorldSpawn =
+        [](const std::string &, double &, double &, double &) -> bool { return false; };
+
+    // Optional hook used by /seed [planeName] [value]. Reads the plane's
+    // live WorldStorage::getWorldSeed() first (so /seed reports the seed
+    // the terrain generation actually used even on planes that were
+    // boot-seeded from server.properties before the SQLite column was
+    // created), falling back to the WorldManager cache and the world_
+    // registry SQLite column. Returns kDefaultWorldSeed (0) for
+    // unregistered planes or for planes never explicitly seeded.
+    std::function<int64_t(const std::string &worldName)> getWorldSeed =
+        [](const std::string &) -> int64_t { return 0; };
+
+    // Optional hook used by /seed <planeName> <value>. Writes both the
+    // SQLite world_registry world_seed column and WorldStorage::setWorld
+    // Seed on the live plane so future chunk generations on that plane
+    // use the new seed. Already-generated chunks stay unchanged.
+    std::function<bool(const std::string &worldName, int64_t seed)> setWorldSeed =
+        [](const std::string &, int64_t) -> bool { return false; };
+
+    // Optional hook used by /setblock <x> <y> <z> <blockName> and
+    // /place <block> <x1 y1 z1 x2 y2 z2>. Dispatches to NetworkManager:
+    //:setBlockAtPlane -> WorldStorage::saveBlockChange on the target
+    // plane's live chunk blob. `combined` uses the pre-1.13 storage
+    // form (blockId << 4 | meta) matching WorldStorage's in-memory
+    // chunk layout.
+    std::function<bool(int32_t planeId, int wx, int wy, int wz, uint16_t combined)> setBlockAtPlane =
+        [](int32_t, int, int, int, uint16_t) -> bool { return false; };
+
+    // Optional hook used by /spawnpoint [player] [x y z]. Persists the
+    // player row's spawn_x/spawn_y/spawn_z columns via
+    // NetworkManager::updatePlayerSpawnByName, which resolves the display
+    // name to a UUID via PlayerManager::getPlayerUuid so unknown names
+    // return false rather than writing garbage.
+    std::function<bool(const std::string &playerName, double x, double y, double z)> setPlayerSpawn =
+        [](const std::string &, double, double, double) -> bool { return false; };
+
+    // Command handlers for /setblock, /place and /setworldspawn need to
+    // know which plane to write on when the invocation comes from a chat
+    // context (the caller's live session knows its PlayerSession::worldId;
+    // the console thread defaults to 0 = Overworld unless the caller
+    // explicitly passes a plane name). CommandManager::executeCommand
+    // populates this before calling cmd->execute().
+    int32_t senderWorldId{0};
 };
 
 class Command

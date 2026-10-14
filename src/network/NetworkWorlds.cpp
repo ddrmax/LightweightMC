@@ -243,6 +243,137 @@ namespace LightweightMC::Network
         return out;
     }
 
+    // ---- Multiworld world-control command backends (0.0.16) -----------------
+    // Wire the /setworldspawn, /seed, /spawnpoint, /setblock and /place
+    // console + chat commands into NetworkManager's live state. Each helper
+    // resolves the plane name via the world_registry SQLite table (like
+    // lookupWorldId / describeWorld) so all standard + custom planes work
+    // identically; then dispatches to the appropriate SQLite column and/or
+    // WorldManager in-memory mirror so the login path sees the change
+    // without a fresh SQLite lookup.
+
+    bool NetworkManager::setWorldSpawnByName(const std::string &worldName,
+                                              double x, double y, double z)
+    {
+        if (worldName.empty())
+            return false;
+        const int32_t id = lookupWorldId(worldName);
+        if (id == -2147483648)
+        {
+            Core::Logger::warn("setWorldSpawnByName: plane \"" + worldName + "\" is not registered");
+            return false;
+        }
+        // SQLite write (persists across restarts) + in-memory mirror so the
+        // login path (NetworkManager::setPlayerWorldAt / PlayerManager::sendPlay
+        // Packets fall-through default) reads it back without another lookup.
+        const bool sqliteOk = m_database.setWorldSpawn(id, x, y, z);
+        m_worldManager.setWorldSpawn(id, x, y, z);
+        Core::Logger::info("setWorldSpawnByName: plane \"" + worldName + "\" (id=" + std::to_string(id) +
+                           ") spawn -> (" + std::to_string(x) + ", " + std::to_string(y) + ", " +
+                           std::to_string(z) + ")");
+        return sqliteOk;
+    }
+
+    bool NetworkManager::getWorldSpawnByName(const std::string &worldName,
+                                              double &x, double &y, double &z) const
+    {
+        x = Storage::kDefaultWorldSpawnX;
+        y = Storage::kDefaultWorldSpawnY;
+        z = Storage::kDefaultWorldSpawnZ;
+        if (worldName.empty())
+            return false;
+        const int32_t id = lookupWorldId(worldName);
+        if (id == -2147483648)
+            return false;
+        // Cache first so we return the runtime value even if SQLite is
+        // momentarily out-of-sync (e.g. after a hot /setworldspawn that
+        // has not yet been flushed to disk).
+        if (m_worldManager.getWorldSpawn(id, x, y, z))
+            return true;
+        return m_database.getWorldSpawn(id, x, y, z);
+    }
+
+    int64_t NetworkManager::getWorldSeedByName(const std::string &worldName) const
+    {
+        if (worldName.empty())
+            return Storage::kDefaultWorldSeed;
+        const int32_t id = lookupWorldId(worldName);
+        if (id == -2147483648)
+            return Storage::kDefaultWorldSeed;
+        // Prefer the live WorldStorage value so /seed reports what terrain
+        // generation actually used (NetworkManager::start seeds it from
+        // [world] world-seed in server.properties even if the SQLite world
+        // _seed column has not yet been written for that plane).
+        auto it = m_worlds.find(id);
+        if (it != m_worlds.end() && it->second)
+        {
+            const std::uint64_t live = it->second->getWorldSeed();
+            if (live != 0ULL)
+                return static_cast<int64_t>(live);
+        }
+        const int64_t cached = m_worldManager.getWorldSeed(id);
+        if (cached != Storage::kDefaultWorldSeed)
+            return cached;
+        return m_database.getWorldSeed(id);
+    }
+
+    bool NetworkManager::setWorldSeedByName(const std::string &worldName, int64_t seed)
+    {
+        if (worldName.empty())
+            return false;
+        const int32_t id = lookupWorldId(worldName);
+        if (id == -2147483648)
+        {
+            Core::Logger::warn("setWorldSeedByName: plane \"" + worldName + "\" is not registered");
+            return false;
+        }
+        const bool sqliteOk = m_database.setWorldSeed(id, seed);
+        m_worldManager.setWorldSeed(id, seed);
+        auto it = m_worlds.find(id);
+        if (it != m_worlds.end() && it->second)
+        {
+            // Chunks already on disk keep their terrain; only future
+            // generateChunk() calls pick up the new seed.
+            it->second->setWorldSeed(static_cast<std::uint64_t>(seed));
+        }
+        Core::Logger::info("setWorldSeedByName: plane \"" + worldName +
+                           "\" (id=" + std::to_string(id) + ") world_seed=" + std::to_string(seed));
+        return sqliteOk;
+    }
+
+    bool NetworkManager::setBlockAtPlane(int32_t planeId, int wx, int wy, int wz,
+                                          uint16_t combined)
+    {
+        auto it = m_worlds.find(planeId);
+        if (it == m_worlds.end() || !it->second)
+        {
+            Core::Logger::warn("setBlockAtPlane: plane id " + std::to_string(planeId) + " not live");
+            return false;
+        }
+        // Same arithmetic-shift chunk mapping WorldStorage::blockAtWorld
+        // uses so wx = -1 lands in chunk -1 with relX = 15.
+        const int chunkX = (wx >> 4);
+        const int chunkZ = (wz >> 4);
+        const int relX = wx & 0xF;
+        const int relZ = wz & 0xF;
+        it->second->saveBlockChange(chunkX, chunkZ, relX, wy, relZ, combined);
+        return true;
+    }
+
+    bool NetworkManager::updatePlayerSpawnByName(const std::string &playerName,
+                                                  double x, double y, double z)
+    {
+        if (playerName.empty())
+            return false;
+        const std::string uuid = Player::PlayerManager::getInstance().getPlayerUuid(playerName);
+        if (uuid.empty())
+        {
+            Core::Logger::warn("updatePlayerSpawnByName: no known uuid for player \"" + playerName + "\"");
+            return false;
+        }
+        return m_database.updatePlayerSpawn(uuid, x, y, z);
+    }
+
     // ---- setPlayerWorldId / setPlayerWorldAt --------------------------------
     // Live in-place plane switch for a currently-online player. The wire path:
     //   - Look up the online session by username.

@@ -126,6 +126,97 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
   consult the policy (`setPlayerWorldAt`, `loadPlayerData`,
   `savePlayerState`).
 
+### Added (world-control follow-up — 2026-10-14)
+
+- **World-control command set wired end-to-end (`/seed`, `/setworldspawn`,
+  `/setblock`, `/place`, `/spawnpoint`).** Five previously stub-only
+  commands in `include/commands/WorldCommands.hpp` used to echo a canned
+  "done" reply without touching world state; they now parse arguments,
+  resolve the target plane (via `world_registry` lookups) and dispatch
+  through `NetworkManager`'s new live-state API so the changes persist to
+  SQLite + WorldStorage and are picked up by the login path on the next
+  `/gotor` / portal transition.
+  - **`/seed [planeName] [<value>]`** reads the plane's runtime `WorldSto
+  rage::getWorldSeed()` (boot-seeded from `[world] world-seed` in
+  `server.properties`) and, with a numeric argument, writes both the
+  `world_registry` world_seed INTEGER column AND the live `WorldStor
+  age::setWorldSeed()` so future chunk regenerations on that plane pick
+  up the new value. Already-generated chunks stay unchanged.
+  - **`/setworldspawn [x] [y] [z] [planeName]`** writes the plane's
+    spawn triple to the `world_registry` `spawn_x` / `spawn_y` /
+    `spawn_z` DOUBLE columns (default 0.5 / 64.0 / 0.5) and mirrors it
+    into `WorldManager::m_worldSpawn` so
+    `NetworkManager::setPlayerWorldAt` and future portal authors pick
+    the new spawn up on the next plane switch. Called with no args it
+    queries the Overworld spawn.
+  - **`/setblock <x> <y> <z> <blockName>`** writes a single block on the
+    caller's plane (chat contexts use `PlayerSession::worldId`; console
+    defaults to Overworld id 0) via `WorldStorage::saveBlockChange`
+    (which lazily generates the target chunk when it isn't yet on disk).
+    Block names resolve through a table built from
+    `include/world/MC17BlockIds.hpp` so a `grass_block` / `dirt` /
+    `stone` / `sandstone` / `bedrock` / `snow` / `log` / `leaves` /
+    `water` / `lava` / `torch` / `furnace` / `lit_furnace` / `bookshelf`
+    / `chest` / `crafting_table` / `brick` / `iron_ore` / `diamond_ore`
+    / etc. all work.
+  - **`/place <block> <x1> <y1> <z1> <x2> <y2> <z2>`** fills a cuboid
+    on the same plane, capped at 4096 blocks so a rogue invocation
+    cannot loop over the whole plane height range.
+  - **`/spawnpoint [player] [x] [y] [z]`** updates the caller's (or
+    named player's) row `spawn_x` / `spawn_y` / `spawn_z` columns via
+    the new `Database::updatePlayerSpawn` targeted UPDATE (never
+    touches inventory / coordinates / world_id / gamemode, unlike
+    `savePlayerData`'s INSERT-OR-REPLACE). Console invocations broadcast
+    via `Command::affectsPlayerState()` so the connected client sees
+    the change.
+
+- **`world_registry` extension: `spawn_x` / `spawn_y` / `spawn_z` DOUBLE
+  + `world_seed` INTEGER columns (CREATE defaults 0.5 / 64.0 / 0.5 / 0).**
+  Fresh CREATE tables carry them; legacy 0.0.14 / 0.0.15 `server_data.db`
+  rows pick them up via the same `pragma_table_info` probe + ALTER
+  TABLE migration pattern already used for `inventory_policy` /
+  `force_gamemode` from 0.0.15. Verified after boot: the four fixed
+  planes (Overworld / Nether / End / Aether) all carry the vanilla
+  (0.5, 64, 0.5) spawn and `world_seed=0`.
+
+- **New `Storage::Database` API for the 0.0.15 world-control follow-up:**
+  `setWorldSpawn(id, x, y, z)` / `getWorldSpawn(id, &x, &y, &z)` /
+  `setWorldSeed(id, seed)` / `getWorldSeed(id)` / `updatePlayerSpawn(
+  uuid, x, y, z)` (targeted UPDATE + probe so an unknown uuid returns
+  false instead of writing garbage).
+
+- **`WorldManager` hot-path mirrors `m_worldSpawn` (planeId →
+  `std::array<double, 3>`) and `m_worldSeed` (planeId →
+  `int64_t`)** with `setWorldSpawn` / `getWorldSpawn` / `setWorldSeed`
+  / `getWorldSeed` so `NetworkManager::setPlayerWorldAt` and the login
+  path read the current spawn / seed without another SQLite walk.
+
+- **`NetworkManager` new world-control backend methods:** `setWorldSpaw
+  nByName`, `getWorldSpawnByName`, `setWorldSeedByName`, `getWorldSeed
+  ByName`, `setBlockAtPlane(planeId, wx, wy, wz, combined)`,
+  `updatePlayerSpawnByName(name, x, y, z)`. All resolve the plane name
+  through `world_registry` (via `lookupWorldId`) so `overworld` /
+  `nether` / `end` / `aether` and any custom `/world create` name
+  target correctly.
+
+- **New `CommandContext` hooks + `senderWorldId` field:** `setWorldSpawn`
+  / `getWorldSpawn` / `getWorldSeed` / `setWorldSeed` / `setBlockAtPlane`
+  / `setPlayerSpawn` (defaults to no-op) and `senderWorldId` (populated
+  from `PlayerSession::worldId` in the chat path so `/setblock` and
+  `/place` write on the caller's current plane rather than always Overw
+  orld). Wired in `Server::processConsoleInput`, `Server::startConsoleT
+  hread` (threaded console path) and `PlayerHandler.cpp` (in-game chat).
+
+- **All 5 regression tests still pass at exit=0** (chest / reorg / probe
+  / spawn / bot) and the boot log has zero `ERR]` messages after the
+  `world_registry` ALTER migration ran on the pre-0.0.15 `server_data.db`
+  on disk.
+
+- **No changes needed in `ConfigManager::forEachCanonicalDefault`:** the
+  0.0.15 world-control follow-up columns are written via commands, not via
+  `server.properties`, so the 0.0.15 auto-backfill reconciliation path
+  is untouched.
+
 ### Notes
 
 - **Existing 0.0.14 server_data.db continues to work.** The two new

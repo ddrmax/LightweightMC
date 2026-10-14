@@ -590,7 +590,11 @@ namespace LightweightMC::Storage
                 name TEXT UNIQUE COLLATE NOCASE,
                 style TEXT,
                 inventory_policy INTEGER DEFAULT 0,
-                force_gamemode INTEGER DEFAULT -1
+                force_gamemode INTEGER DEFAULT -1,
+                spawn_x DOUBLE DEFAULT 0.5,
+                spawn_y DOUBLE DEFAULT 64.0,
+                spawn_z DOUBLE DEFAULT 0.5,
+                world_seed INTEGER DEFAULT 0
             );
         )";
         char *errMsg = nullptr;
@@ -601,15 +605,20 @@ namespace LightweightMC::Storage
             if (errMsg) sqlite3_free(errMsg);
             return false;
         }
-        // Legacy 0.0.14 server_data.db rows keep the three-column CREATE
-        // signature so the two new columns are added via ALTER TABLE
-        // migrations (same pragma_table_info probe + best-effort ALTER
-        // pattern used by Database::initPlayers for the flat player rows).
-        // Fresh CREATE already carries them, so the ALTER only runs on
-        // legacy DBs and is otherwise a no-op.
+        // Legacy 0.0.14 / 0.0.15 server_data.db rows keep the earlier CREATE
+        // signature so the new columns (inventory_policy / force_gamemode
+        // for 0.0.15 and spawn_x / spawn_y / spawn_z / world_seed for
+        // 0.0.16) are added via ALTER TABLE migrations (same pragma_table_info
+        // probe + best-effort ALTER pattern used by Database::initPlayers for
+        // the flat player rows). Fresh CREATE already carries all of them,
+        // so the ALTER only runs on legacy DBs and is otherwise a no-op.
         const char *newColumns[] = {
             "inventory_policy INTEGER DEFAULT 0",
             "force_gamemode INTEGER DEFAULT -1",
+            "spawn_x DOUBLE DEFAULT 0.5",
+            "spawn_y DOUBLE DEFAULT 64.0",
+            "spawn_z DOUBLE DEFAULT 0.5",
+            "world_seed INTEGER DEFAULT 0",
         };
         for (const char *col : newColumns)
         {
@@ -893,6 +902,163 @@ namespace LightweightMC::Storage
         sqlite3_finalize(stmt);
         return out;
     }
+
+    // ---------------------------------------------------------------------
+    // Per-plane world spawn + world seed (0.0.16 world-control commands).
+    //
+    //   /setworldspawn <x> <y> <z> writes this triple to the plane's
+    //   world_registry row (spawn_x / spawn_y / spawn_z DOUBLE columns)
+    //   and mirrors it in WorldManager::m_worldSpawn so the login path
+    //   (PlayerManager::sendPlayPackets falling back to plane default
+    //   spawn, NetworkManager::setPlayerWorldAt's "leaving-plane
+    //   coordinates not stored" branch, and future portal authors)
+    //   can consult the cache without a fresh SQLite lookup.
+    //
+    //   /seed <plane> reads the world_seed INTEGER column; when the
+    //   plane's WorldStorage runtime seed differs (a server boot from
+    //   server.properties' `[world] world-seed` may have seeded the
+    //   in-memory WorldStorage before the SQLite column was created),
+    //   NetworkManager::getWorldSeedByName prefers the WorldStorage
+    //   value so the command reports the seed that was actually used
+    //   for terrain generation. /seed <plane> <value> writes both the
+    //   SQLite column and WorldStorage::setWorldSeed so subsequent
+    //   chunk regenerations on that plane use the new value.
+    //
+    //   /spawnpoint writes only the player row's spawn_x/y/z columns
+    //   (see updatePlayerSpawn); the update bypasses savePlayerData's
+    //   INSERT-OR-REPLACE so it never clobbers inventory, coordinates
+    //   or the world_id column.
+    // ---------------------------------------------------------------------
+    bool Database::setWorldSpawn(int32_t id, double x, double y, double z)
+    {
+        if (!m_db)
+            return false;
+        const char *sql =
+            "UPDATE world_registry SET spawn_x = ?, spawn_y = ?, spawn_z = ? WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setWorldSpawn: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_double(stmt, 1, x);
+        sqlite3_bind_double(stmt, 2, y);
+        sqlite3_bind_double(stmt, 3, z);
+        sqlite3_bind_int(stmt, 4, id);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        if (!ok)
+        {
+            Core::Logger::warn("setWorldSpawn: no world_registry row for plane id " + std::to_string(id));
+        }
+        return ok;
+    }
+
+    bool Database::getWorldSpawn(int32_t id, double &outX, double &outY, double &outZ) const
+    {
+        outX = kDefaultWorldSpawnX;
+        outY = kDefaultWorldSpawnY;
+        outZ = kDefaultWorldSpawnZ;
+        if (!m_db)
+            return false;
+        const char *sql = "SELECT spawn_x, spawn_y, spawn_z FROM world_registry WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
+        sqlite3_bind_int(stmt, 1, id);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            found = true;
+            if (sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+                outX = sqlite3_column_double(stmt, 0);
+            if (sqlite3_column_type(stmt, 1) != SQLITE_NULL)
+                outY = sqlite3_column_double(stmt, 1);
+            if (sqlite3_column_type(stmt, 2) != SQLITE_NULL)
+                outZ = sqlite3_column_double(stmt, 2);
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
+    bool Database::setWorldSeed(int32_t id, int64_t seed)
+    {
+        if (!m_db)
+            return false;
+        const char *sql = "UPDATE world_registry SET world_seed = ? WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setWorldSeed: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int64(stmt, 1, seed);
+        sqlite3_bind_int(stmt, 2, id);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        if (!ok)
+        {
+            Core::Logger::warn("setWorldSeed: no world_registry row for plane id " + std::to_string(id));
+        }
+        return ok;
+    }
+
+    int64_t Database::getWorldSeed(int32_t id) const
+    {
+        if (!m_db)
+            return kDefaultWorldSeed;
+        const char *sql = "SELECT world_seed FROM world_registry WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return kDefaultWorldSeed;
+        sqlite3_bind_int(stmt, 1, id);
+        int64_t out = kDefaultWorldSeed;
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            out = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        return out;
+    }
+
+    // Targeted UPDATE of only the spawn_x / spawn_y / spawn_z columns on a
+    // player row (never touches last_x/y/z, world_id, inventory_blob,
+    // gamemode, op level, etc.). Probes first so /spawnpoint on an
+    // unknown player returns false rather than silently no-op succeeding.
+    bool Database::updatePlayerSpawn(const std::string &uuid, double x, double y, double z)
+    {
+        if (!m_db || uuid.empty())
+            return false;
+        {
+            const char *probeSql = "SELECT COUNT(*) FROM players WHERE uuid = ?;";
+            sqlite3_stmt *probe = nullptr;
+            if (sqlite3_prepare_v2(m_db, probeSql, -1, &probe, nullptr) != SQLITE_OK)
+            {
+                Core::Logger::error("Failed to prepare updatePlayerSpawn probe: " + std::string(sqlite3_errmsg(m_db)));
+                return false;
+            }
+            sqlite3_bind_text(probe, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
+            int exists = 0;
+            if (sqlite3_step(probe) == SQLITE_ROW)
+                exists = sqlite3_column_int(probe, 0);
+            sqlite3_finalize(probe);
+            if (exists == 0)
+                return false;
+        }
+        const char *sql = "UPDATE players SET spawn_x = ?, spawn_y = ?, spawn_z = ? WHERE uuid = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare updatePlayerSpawn: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_double(stmt, 1, x);
+        sqlite3_bind_double(stmt, 2, y);
+        sqlite3_bind_double(stmt, 3, z);
+        sqlite3_bind_text(stmt, 4, uuid.c_str(), -1, SQLITE_TRANSIENT);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
     // ---------------------------------------------------------------------
     // Per-plane inventory SQLite table (SEPARATE / RESTRICTED policies).
     // Fresh CREATE TABLE keeps 0.0.14 DBs unaffected -- SYNC planes never

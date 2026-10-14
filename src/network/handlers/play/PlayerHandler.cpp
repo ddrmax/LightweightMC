@@ -108,6 +108,37 @@ namespace PlayerHandler
                 return net.describeWorld(worldName, outId, outStyle, outDbPath);
             };
 
+            // 0.0.16 world-control hooks: /setworldspawn, /seed, /setblock,
+            // /place and /spawnpoint issued from the in-game chat. /setblock
+            // and /place write on the caller's current plane (PlayerSession:
+            //:worldId) so a chat command from a Nether-logged player edits
+            // Nether rather than the Overworld.
+            ctx.senderWorldId = session.worldId;
+            ctx.setWorldSpawn = [&net](const std::string &worldName, double x, double y, double z) -> bool
+            {
+                return net.setWorldSpawnByName(worldName, x, y, z);
+            };
+            ctx.getWorldSpawn = [&net](const std::string &worldName, double &x, double &y, double &z) -> bool
+            {
+                return net.getWorldSpawnByName(worldName, x, y, z);
+            };
+            ctx.getWorldSeed = [&net](const std::string &worldName) -> int64_t
+            {
+                return net.getWorldSeedByName(worldName);
+            };
+            ctx.setWorldSeed = [&net](const std::string &worldName, int64_t seed) -> bool
+            {
+                return net.setWorldSeedByName(worldName, seed);
+            };
+            ctx.setBlockAtPlane = [&net](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool
+            {
+                return net.setBlockAtPlane(planeId, wx, wy, wz, combined);
+            };
+            ctx.setPlayerSpawn = [&net](const std::string &name, double x, double y, double z) -> bool
+            {
+                return net.updatePlayerSpawnByName(name, x, y, z);
+            };
+
             CommandManager::getInstance().executeCommand(ctx, message);
             return;
         }

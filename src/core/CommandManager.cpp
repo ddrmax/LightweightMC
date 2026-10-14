@@ -64,7 +64,7 @@ bool CommandManager::executeCommand(const CommandContext &ctx, const std::string
     auto it = m_commands.find(cmdName);
     if (it == m_commands.end())
     {
-        ctx.reply("Unknown command. Type \"/help\" for help.");
+        ctx.reply("Unknown command. Type /help for help.");
         LightweightMC::Core::Logger::warn("[CommandManager] Unknown command attempt: " + cmdName + " by " + ctx.sender);
         return false;
     }

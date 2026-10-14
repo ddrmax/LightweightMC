@@ -126,6 +126,54 @@ namespace LightweightMC::Network
                            std::string &outStyle,
                            std::string &outDbPath) const;
 
+        // ---- Multiworld world-control commands (0.0.16) ----------------------
+        // Writes the plane's spawn triple to world_registry (spawn_x /
+        // spawn_y / spawn_z DOUBLE columns) and mirrors it in
+        // WorldManager::m_worldSpawn so the login path and NetworkManager::setPlayerWorldAt
+        // can consult the cache. The plane name resolves through the
+        // world_registry table (like lookupWorldId / describeWorld) so
+        // "overworld" / "nether" / "end" / "aether" / any custom name are
+        // all valid targets.
+        bool setWorldSpawnByName(const std::string &worldName,
+                                 double x, double y, double z);
+        // Reads the plane's spawn triple (cache first, SQLite world_registry
+        // fallback). Fills x/y/z with the vanilla (0.5, 64, 0.5) default
+        // when neither layer has a value; returns true only when an
+        // explicit value was found.
+        bool getWorldSpawnByName(const std::string &worldName,
+                                 double &x, double &y, double &z) const;
+
+        // Reads the plane's seed: prefers the live WorldStorage::getWorldSeed()
+        // value (so `/seed` reflects whatever server boot seeded it with from
+        // [world] world-seed in server.properties) and falls back to the
+        // SQLite world_registry world_seed column. Returns kDefaultWorldSeed
+        // when neither layer carries a value.
+        int64_t getWorldSeedByName(const std::string &worldName) const;
+        // Writes both layers: SQLite world_registry world_seed column AND
+        // WorldStorage::setWorldSeed on the live plane so subsequent
+        // chunk generations on that plane use the new seed (already-
+        // generated chunks stay unchanged until re-generated).
+        bool setWorldSeedByName(const std::string &worldName, int64_t seed);
+
+        // Write a single block on the given plane at absolute world
+        // coordinates (wx, wy, wz). `combined` carries the pre-1.13
+        // storage form (blockId << 4 | meta) matching WorldStorage's
+        // in-memory chunk layout. Dispatches through
+        // WorldStorage::saveBlockChange, which lazily generates the
+        // chunk when it is not yet on disk so the write always succeeds
+        // on registered planes.
+        bool setBlockAtPlane(int32_t planeId, int wx, int wy, int wz,
+                             uint16_t combined);
+
+        // Patch the player row's spawn_x / spawn_y / spawn_z columns
+        // (via Database::updatePlayerSpawn so inventory, coordinates,
+        // gamemode, world_id, etc. are not clobbered the way savePlayer
+        // Data's INSERT-OR-REPLACE would). Resolves the display name to
+        // a UUID via PlayerManager::getPlayerUuid so an unknown name
+        // returns false rather than writing garbage.
+        bool updatePlayerSpawnByName(const std::string &playerName,
+                                     double x, double y, double z);
+
         // Number of live in-memory WorldStorage instances. Registered-but-
         // deactivated planes (active=false config flag) are in world_registry
         // but not in m_worlds, so this count only reflects the planes the

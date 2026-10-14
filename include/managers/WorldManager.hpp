@@ -3,6 +3,7 @@
 #include "storage/Database.hpp"
 #include "player/PlayerSession.hpp"
 #include "managers/ScoreboardManager.hpp"
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -210,11 +211,77 @@ namespace LightweightMC::World
             return Storage::kForceGameModeInherit;
         }
 
+        // ------------------------------------------------------------------
+        // Per-plane world spawn + per-plane world seed (0.0.16 world-
+        // control commands: /setworldspawn, /seed, /spawnpoint, /setblock,
+        // /place). Mirrors the world_registry SQLite columns
+        //   spawn_x DOUBLE DEFAULT 0.5,
+        //   spawn_y DOUBLE DEFAULT 64.0,
+        //   spawn_z DOUBLE DEFAULT 0.5,
+        //   world_seed INTEGER DEFAULT 0
+        // so PlayerManager::sendPlayPackets and NetworkManager::setPlayer
+        // WorldAt can consult the cache without a fresh SQLite lookup on
+        // every login / portal transition.
+        //
+        // setWorldSpawn / getWorldSpawn carry the plane's default spawn
+        // triple; callers that want the standard Minecraft behaviour get
+        // the vanilla (0.5, 64, 0.5) values back (Storage::kDefaultWorld
+        // SpawnX/Y/Z) when the plane has never been touched by /setworld
+        // spawn, so pre-0.0.16 planes keep working unchanged.
+        //
+        // setWorldSeed / getWorldSeed mirror WorldStorage::setWorldSeed
+        // to a hot-path cache keyed on planeId; callers reading the seed
+        // for a plane whose WorldStorage was boot-seeded from server.
+        //properties get the SQLite-column value unless NetworkManager
+        // prefers the WorldStorage value (see getWorldSeedByName).
+        // ------------------------------------------------------------------
+        void setWorldSpawn(int32_t planeId, double x, double y, double z)
+        {
+            m_worldSpawn[planeId] = {x, y, z};
+        }
+
+        bool getWorldSpawn(int32_t planeId, double &x, double &y, double &z) const
+        {
+            auto it = m_worldSpawn.find(planeId);
+            if (it == m_worldSpawn.end())
+            {
+                x = Storage::kDefaultWorldSpawnX;
+                y = Storage::kDefaultWorldSpawnY;
+                z = Storage::kDefaultWorldSpawnZ;
+                return false;
+            }
+            x = it->second[0];
+            y = it->second[1];
+            z = it->second[2];
+            return true;
+        }
+
+        void setWorldSeed(int32_t planeId, int64_t seed)
+        {
+            m_worldSeed[planeId] = seed;
+        }
+
+        int64_t getWorldSeed(int32_t planeId) const
+        {
+            auto it = m_worldSeed.find(planeId);
+            if (it != m_worldSeed.end())
+                return it->second;
+            return Storage::kDefaultWorldSeed;
+        }
+
     private:
         std::unordered_map<int32_t, std::unique_ptr<Storage::WorldStorage>> &m_worlds;
         std::unordered_map<int32_t, int32_t> m_skyDimension;
         std::unordered_map<int32_t, int32_t> m_inventoryPolicy;
         std::unordered_map<int32_t, int32_t> m_forceGameModeOnEntry;
+        // Per-plane world spawn cache (0.0.16). Keyed by planeId; values
+        // are (x, y, z) so a single lookup returns the whole triple.
+        // Empty cache implies "use Storage::kDefaultWorldSpawn*".
+        std::unordered_map<int32_t, std::array<double, 3>> m_worldSpawn;
+        // Per-plane seed cache mirroring WorldStorage::m_worldSeed so
+        // /seed reports the plane's runtime seed without walking SQLite
+        // on every invocation.
+        std::unordered_map<int32_t, int64_t> m_worldSeed;
     };
 }
 

@@ -236,6 +236,34 @@ namespace LightweightMC::Core
         {
             return m_network.describeWorld(worldName, outId, outStyle, outDbPath);
         };
+        // 0.0.16 world-control hooks: /setworldspawn, /seed, /setblock,
+        // /place and /spawnpoint. Console-thread invocations default to the
+        // Overworld (senderWorldId = 0) for /setblock and /place since the
+        // console thread is not tied to a live session.
+        consoleCtx.setWorldSpawn = [this](const std::string &worldName, double x, double y, double z) -> bool
+        {
+            return m_network.setWorldSpawnByName(worldName, x, y, z);
+        };
+        consoleCtx.getWorldSpawn = [this](const std::string &worldName, double &x, double &y, double &z) -> bool
+        {
+            return m_network.getWorldSpawnByName(worldName, x, y, z);
+        };
+        consoleCtx.getWorldSeed = [this](const std::string &worldName) -> int64_t
+        {
+            return m_network.getWorldSeedByName(worldName);
+        };
+        consoleCtx.setWorldSeed = [this](const std::string &worldName, int64_t seed) -> bool
+        {
+            return m_network.setWorldSeedByName(worldName, seed);
+        };
+        consoleCtx.setBlockAtPlane = [this](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool
+        {
+            return m_network.setBlockAtPlane(planeId, wx, wy, wz, combined);
+        };
+        consoleCtx.setPlayerSpawn = [this](const std::string &name, double x, double y, double z) -> bool
+        {
+            return m_network.updatePlayerSpawnByName(name, x, y, z);
+        };
 
         CommandManager::getInstance().executeCommand(consoleCtx, inputLine);
     }
@@ -369,6 +397,35 @@ namespace LightweightMC::Core
             consoleCtx.teleportPlayerToTarget = [network](const std::string &mover, const std::string &target) -> bool
             {
                 return network->teleportToPlayer(mover, target);
+            };
+
+            // 0.0.16 world-control hooks: /setworldspawn, /seed, /setblock,
+            // /place and /spawnpoint. The threaded console's ctx is not tied
+            // to a live session either, so /setblock + /place default to the
+            // Overworld (senderWorldId = 0).
+            consoleCtx.setWorldSpawn = [network](const std::string &worldName, double x, double y, double z) -> bool
+            {
+                return network->setWorldSpawnByName(worldName, x, y, z);
+            };
+            consoleCtx.getWorldSpawn = [network](const std::string &worldName, double &x, double &y, double &z) -> bool
+            {
+                return network->getWorldSpawnByName(worldName, x, y, z);
+            };
+            consoleCtx.getWorldSeed = [network](const std::string &worldName) -> int64_t
+            {
+                return network->getWorldSeedByName(worldName);
+            };
+            consoleCtx.setWorldSeed = [network](const std::string &worldName, int64_t seed) -> bool
+            {
+                return network->setWorldSeedByName(worldName, seed);
+            };
+            consoleCtx.setBlockAtPlane = [network](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool
+            {
+                return network->setBlockAtPlane(planeId, wx, wy, wz, combined);
+            };
+            consoleCtx.setPlayerSpawn = [network](const std::string &name, double x, double y, double z) -> bool
+            {
+                return network->updatePlayerSpawnByName(name, x, y, z);
             };
 
             std::vector<std::string> history;

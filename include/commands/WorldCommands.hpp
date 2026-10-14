@@ -1,6 +1,138 @@
 #pragma once
 
 #include "core/CommandManager.hpp"
+#include "world/MC17BlockIds.hpp"
+#include "core/Logger.hpp"
+
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <cstdlib>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <algorithm>
+
+namespace LightweightMC
+{
+    namespace Commands
+    {
+        namespace detail
+        {
+            // Parse a signed integer coordinate token (accepts the vanilla
+            // Minecraft form `x y z` and the shorthand 3-int triple split by
+            // CommandManager's arg splitter). Returns false on non-numeric
+            // input so commands can print a helpful Usage reply rather than
+            // silently writing garbage into world_registry / chunk blobs.
+            inline bool parseIntCoord(const std::string &s, int &out)
+            {
+                if (s.empty())
+                    return false;
+                std::istringstream iss(s);
+                long v = 0;
+                if (!(iss >> v))
+                    return false;
+                std::string leftover;
+                if (iss >> leftover)
+                    return false;
+                out = static_cast<int>(v);
+                return true;
+            }
+
+            // Same contract as parseIntCoord but for DOUBLE values so /spawn
+            //point / /setworldspawn can preserve Minecraft's sub-block spawn
+            // offsets (0.5, 64, 0.5 default).
+            inline bool parseDoubleCoord(const std::string &s, double &out)
+            {
+                if (s.empty())
+                    return false;
+                std::istringstream iss(s);
+                double v = 0.0;
+                if (!(iss >> v))
+                    return false;
+                std::string leftover;
+                if (iss >> leftover)
+                    return false;
+                out = v;
+                return true;
+            }
+
+            // Lower-cases a token so a caller can look up a block name without
+            // worrying about Java-style capitalisation (`Grass`, `GRASS_BLOCK`,
+            // `grass_block` all resolve).
+            inline std::string lowerCase(std::string s)
+            {
+                for (auto &c : s)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return s;
+            }
+
+            // Block-name lookup for /setblock and /place. Uses the numeric
+            // IDs from MC17BlockIds.hpp so the command layer never has to
+            // hard-code a magic number and the block vocabulary stays in sync
+            // with the terrain generator's vocabulary. Unknown names return
+            // false; the caller decides whether to reply with a Usage message
+            // or an "Unknown block" error.
+            inline bool blockNameToId(const std::string &name, uint16_t &outId)
+            {
+                static const std::unordered_map<std::string, uint16_t> table = []() {
+                    using namespace LightweightMC::World::Blocks17;
+                    std::unordered_map<std::string, uint16_t> t;
+                    t["air"] = AIR;
+                    t["stone"] = STONE;
+                    t["grass"] = GRASS_BLOCK;
+                    t["grass_block"] = GRASS_BLOCK;
+                    t["dirt"] = DIRT;
+                    t["cobblestone"] = COBBLESTONE;
+                    t["planks"] = PLANKS;
+                    t["wood_planks"] = PLANKS;
+                    t["bedrock"] = BEDROCK;
+                    t["rock"] = BEDROCK;
+                    t["water"] = WATER_STATIONARY;
+                    t["water_flowing"] = WATER_FLOWING;
+                    t["lava"] = LAVA_STATIONARY;
+                    t["lava_flowing"] = LAVA_FLOWING;
+                    t["sand"] = SAND;
+                    t["gravel"] = GRAVEL;
+                    t["log"] = LOG;
+                    t["wood"] = LOG;
+                    t["tree_trunk"] = LOG;
+                    t["leaves"] = LEAVES;
+                    t["sponge"] = SPONGE;
+                    t["glass"] = GLASS;
+                    t["sandstone"] = SANDSTONE;
+                    t["gold_ore"] = GOLD_ORE;
+                    t["iron_ore"] = IRON_ORE;
+                    t["coal_ore"] = COAL_ORE;
+                    t["lapis_ore"] = LAPIS_ORE;
+                    t["lapis_block"] = LAPIS_BLOCK;
+                    t["gold_block"] = GOLD_BLOCK;
+                    t["iron_block"] = IRON_BLOCK;
+                    t["diamond_ore"] = DIAMOND_ORE;
+                    t["diamond_block"] = DIAMOND_BLOCK;
+                    t["brick"] = BRICK_BLOCK;
+                    t["brick_block"] = BRICK_BLOCK;
+                    t["moossy_cobblestone"] = MOSSY_COBBLESTONE;
+                    t["mossy_cobblestone"] = MOSSY_COBBLESTONE;
+                    t["bookshelf"] = BOOKSHELF;
+                    t["chest"] = CHEST;
+                    t["crafting_table"] = CRAFTING_TABLE;
+                    t["furnace"] = FURNACE;
+                    t["lit_furnace"] = LIT_FURNACE;
+                    t["obsidian"] = OBSIDIAN;
+                    t["torch"] = TORCH;
+                    t["snow"] = SNOW;
+                    return t;
+                }();
+                const auto it = table.find(lowerCase(name));
+                if (it == table.end())
+                    return false;
+                outId = it->second;
+                return true;
+            }
+        } // detail
+    }     // Commands
+} // namespace LightweightMC
 
 
 // // ==========================================
@@ -115,19 +247,78 @@ class PlaceCommand : public Command
 {
 public:
     std::string getName() const override { return "place"; }
-    std::string getDescription() const override { return "Place a feature, jigsaw or structure."; }
-    std::string getUsage() const override { return "/place <feature|structure|template|jigsaw> ..."; }
+    std::string getDescription() const override { return "Fill a cuboid region with a block."; }
+    std::string getUsage() const override { return "/place <block> <x1> <y1> <z1> <x2> <y2> <z2>"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // The command mutates the world but not per-player state, so it does
+    // not flag affectsPlayerState().
+    bool affectsPlayerState() const override { return false; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        if (args.empty())
+        using namespace LightweightMC::Commands::detail;
+        if (args.size() < 7)
         {
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Element placed.");
+        uint16_t blockId = 0;
+        if (!blockNameToId(args[0], blockId))
+        {
+            ctx.reply("Unknown block: " + args[0]);
+            return;
+        }
+        int x1 = 0, y1 = 0, z1 = 0, x2 = 0, y2 = 0, z2 = 0;
+        if (!parseIntCoord(args[1], x1) || !parseIntCoord(args[2], y1) ||
+            !parseIntCoord(args[3], z1) || !parseIntCoord(args[4], x2) ||
+            !parseIntCoord(args[5], y2) || !parseIntCoord(args[6], z2))
+        {
+            ctx.reply("Coordinates must be integers. Usage: " + getUsage());
+            return;
+        }
+        const int32_t planeId = ctx.senderWorldId;
+        const uint16_t combined = Blocks17Combined(blockId);
+        // Order the corners and cap the fill so a rogue /place cannot loop
+        // over a whole plane's height range (bounded well under vanilla's
+        // default 4096-block limit for a command response).
+        const int lx = std::min(x1, x2), hx = std::max(x1, x2);
+        const int ly = std::min(y1, y2), hy = std::max(y1, y2);
+        const int lz = std::min(z1, z2), hz = std::max(z1, z2);
+        const long long dx = static_cast<long long>(hx - lx) + 1;
+        const long long dy = static_cast<long long>(hy - ly) + 1;
+        const long long dz = static_cast<long long>(hz - lz) + 1;
+        const long long volume = dx * dy * dz;
+        constexpr long long maxPlaceVolume = 4096LL;
+        if (volume <= 0 || volume > maxPlaceVolume)
+        {
+            ctx.reply("Region too large (limit " + std::to_string(maxPlaceVolume) +
+                      " blocks). Shrink the box and try again.");
+            return;
+        }
+        long long written = 0;
+        for (int x = lx; x <= hx; ++x)
+            for (int y = ly; y <= hy; ++y)
+                for (int z = lz; z <= hz; ++z)
+                {
+                    if (!ctx.setBlockAtPlane(planeId, x, y, z, combined))
+                    {
+                        ctx.reply("Place failed on plane " + std::to_string(planeId) +
+                                  " at (" + std::to_string(x) + ", " + std::to_string(y) +
+                                  ", " + std::to_string(z) + ")");
+                        return;
+                    }
+                    ++written;
+                }
+        LightweightMC::Core::Logger::debug("[CMD /place] plane=" + std::to_string(planeId) +
+                            " blockId=" + std::to_string(blockId) +
+                            " volume=" + std::to_string(written));
+        ctx.reply("Placed " + std::to_string(written) + " blocks.");
+    }
+
+    static uint16_t Blocks17Combined(uint16_t id)
+    {
+        return static_cast<uint16_t>((id << 4) | 0);
     }
 };
 
@@ -136,15 +327,58 @@ class SeedCommand : public Command
 {
 public:
     std::string getName() const override { return "seed"; }
-    std::string getDescription() const override { return "Shows the world seed."; }
-    std::string getUsage() const override { return "/Seed"; }
+    std::string getDescription() const override { return "Shows or sets the world seed for a plane."; }
+    std::string getUsage() const override { return "/seed [planeName] [<value>]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Setting a plane's seed mutates server state (chunks regenerate
+    // differently on that plane for future visits) but not a specific
+    // player's state, so broadcast stays off.
+    bool affectsPlayerState() const override { return false; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        (void)args;
-        ctx.reply("Seed: [1234567890]");
+        using namespace LightweightMC::Commands::detail;
+        // Resolve which plane's seed to read/write:
+        //   * No args -> the caller's current plane (chat contexts know
+        //     their PlayerSession::worldId; console defaults to Overworld
+        //     id 0 by ctx.senderWorldId default).
+        //   * 1 arg -> plane name (read-only query).
+        //   * 2 args -> plane name + numeric value (write).
+        // We resolve the caller's own plane via describeWorld when the
+        // caller did not name one so the reply names the plane the seed
+        // applies to (rather than an ambiguous "the current plane").
+        std::string planeName = "overworld";
+        if (!args.empty())
+            planeName = args[0];
+        const int64_t seed = ctx.getWorldSeed(planeName);
+        if (args.size() >= 2)
+        {
+            // /seed <planeName> <value>
+            std::istringstream iss(args[1]);
+            long long value = 0;
+            if (!(iss >> value))
+            {
+                ctx.reply("Seed value must be an integer. Usage: " + getUsage());
+                return;
+            }
+            std::string leftover;
+            if (iss >> leftover)
+            {
+                ctx.reply("Seed value must be an integer. Usage: " + getUsage());
+                return;
+            }
+            if (!ctx.setWorldSeed(planeName, value))
+            {
+                ctx.reply("Could not set seed for plane \"" + planeName +
+                          "\" (plane not registered?).");
+                return;
+            }
+            ctx.reply("Seed of " + planeName + " set to " + std::to_string(value) +
+                      " (already-generated chunks stay unchanged; future chunks pick up the new seed).");
+            return;
+        }
+        ctx.reply("Seed: [" + std::to_string(seed) + "] (plane: " + planeName + ")");
     }
 };
 
@@ -154,18 +388,52 @@ class SetBlockCommand : public Command
 public:
     std::string getName() const override { return "setblock"; }
     std::string getDescription() const override { return "Replaces a block with another block."; }
-    std::string getUsage() const override { return "/setblock <pos> <block>"; }
+    std::string getUsage() const override { return "/setblock <x> <y> <z> <blockName>"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Mutates the world on a plane, not any specific player's state.
+    bool affectsPlayerState() const override { return false; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        if (args.size() < 2)
+        using namespace LightweightMC::Commands::detail;
+        if (args.size() < 4)
         {
             ctx.reply("Usage: " + getUsage());
             return;
         }
+        int x = 0, y = 0, z = 0;
+        if (!parseIntCoord(args[0], x) || !parseIntCoord(args[1], y) || !parseIntCoord(args[2], z))
+        {
+            ctx.reply("Coordinates must be integers. Usage: " + getUsage());
+            return;
+        }
+        uint16_t blockId = 0;
+        if (!blockNameToId(args[3], blockId))
+        {
+            ctx.reply("Unknown block: " + args[3]);
+            return;
+        }
+        const int32_t planeId = ctx.senderWorldId;
+        const uint16_t combined = Blocks17Combined(blockId);
+        if (!ctx.setBlockAtPlane(planeId, x, y, z, combined))
+        {
+            ctx.reply("Could not write block on plane " + std::to_string(planeId) +
+                      " at (" + std::to_string(x) + ", " + std::to_string(y) +
+                      ", " + std::to_string(z) + ")");
+            return;
+        }
+        LightweightMC::Core::Logger::debug("[CMD /setblock] plane=" + std::to_string(planeId) +
+                            " x=" + std::to_string(x) +
+                            " y=" + std::to_string(y) +
+                            " z=" + std::to_string(z) +
+                            " blockId=" + std::to_string(blockId));
         ctx.reply("Block placed.");
+    }
+
+    static uint16_t Blocks17Combined(uint16_t id)
+    {
+        return static_cast<uint16_t>((id << 4) | 0);
     }
 };
 
@@ -175,14 +443,52 @@ class SetWorldSpawnCommand : public Command
 public:
     std::string getName() const override { return "setworldspawn"; }
     std::string getDescription() const override { return "Defines the world spawn point."; }
-    std::string getUsage() const override { return "/setworldspawn [pos]"; }
+    std::string getUsage() const override { return "/setworldspawn [x] [y] [z] [planeName]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    bool affectsPlayerState() const override { return false; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        (void)args;
-        ctx.reply("Spawn of the world defined.");
+        using namespace LightweightMC::Commands::detail;
+        // The command can be invoked with no args to query the current
+        // spawn (returns the vanilla (0.5, 64, 0.5) default when the
+        // plane has never been touched by /setworldspawn).
+        if (args.empty())
+        {
+            double x = 0.0, y = 0.0, z = 0.0;
+            const bool set = ctx.getWorldSpawn("overworld", x, y, z);
+            ctx.reply("World spawn for overworld: (" + std::to_string(x) + ", " +
+                      std::to_string(y) + ", " + std::to_string(z) + ")" +
+                      (set ? " (explicit)" : " (default)"));
+            return;
+        }
+        // Parse 3-4 args: [x] [y] [z] [planeName]. planeName optional;
+        // when absent, "overworld" is used so a console invocation without
+        // a session context still targets a well-known plane.
+        if (args.size() < 3)
+        {
+            ctx.reply("Usage: " + getUsage());
+            return;
+        }
+        double x = 0.0, y = 0.0, z = 0.0;
+        if (!parseDoubleCoord(args[0], x) || !parseDoubleCoord(args[1], y) || !parseDoubleCoord(args[2], z))
+        {
+            ctx.reply("Coordinates must be numeric. Usage: " + getUsage());
+            return;
+        }
+        std::string planeName = "overworld";
+        if (args.size() >= 4)
+            planeName = args[3];
+        if (!ctx.setWorldSpawn(planeName, x, y, z))
+        {
+            ctx.reply("Could not set spawn for plane \"" + planeName + "\" (plane not registered?).");
+            return;
+        }
+        LightweightMC::Core::Logger::info("setworldspawn: plane=" + planeName + " -> " +
+                           std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z));
+        ctx.reply("Spawn of the world \"" + planeName + "\" defined at (" +
+                  std::to_string(x) + ", " + std::to_string(y) + ", " + std::to_string(z) + ").");
     }
 };
 
@@ -192,14 +498,58 @@ class SpawnPointCommand : public Command
 public:
     std::string getName() const override { return "spawnpoint"; }
     std::string getDescription() const override { return "Defines the spawn point of a player."; }
-    std::string getUsage() const override { return "/spawnpoint [targets] [pos]"; }
+    std::string getUsage() const override { return "/spawnpoint [player] [x] [y] [z]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Sets a specific player's respawn point -- that is a per-player state
+    // change so console invocation broadcasts to the connected client so
+    // the player knows their respawn changed.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        (void)args;
-        ctx.reply("Spawnpoint defined.");
+        using namespace LightweightMC::Commands::detail;
+        if (args.empty())
+        {
+            ctx.reply("Usage: " + getUsage());
+            return;
+        }
+        // Vanilla /spawnpoint semantics: 0 or 1 leading non-numeric token
+        // names the player (default = the caller's own username); remaining
+        // three numeric tokens are the respawn position.
+        std::string target = ctx.sender;
+        size_t coordStart = 0;
+        {
+            double probe = 0.0;
+            if (!parseDoubleCoord(args[0], probe))
+            {
+                target = args[0];
+                coordStart = 1;
+            }
+        }
+        if (args.size() < coordStart + 3)
+        {
+            ctx.reply("Usage: " + getUsage());
+            return;
+        }
+        double x = 0.0, y = 0.0, z = 0.0;
+        if (!parseDoubleCoord(args[coordStart], x) ||
+            !parseDoubleCoord(args[coordStart + 1], y) ||
+            !parseDoubleCoord(args[coordStart + 2], z))
+        {
+            ctx.reply("Coordinates must be numeric. Usage: " + getUsage());
+            return;
+        }
+        if (!ctx.setPlayerSpawn(target, x, y, z))
+        {
+            ctx.reply("Could not set spawnpoint for " + target +
+                      " (player unknown or no row yet).");
+            return;
+        }
+        LightweightMC::Core::Logger::info("spawnpoint: player=" + target + " -> " +
+                           std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z));
+        ctx.reply("Spawnpoint of " + target + " set to (" +
+                  std::to_string(x) + ", " + std::to_string(y) + ", " + std::to_string(z) + ").");
     }
 };
 

@@ -142,6 +142,19 @@ namespace LightweightMC::Storage
     constexpr int32_t kForceGameModeAdventure = 2;
     constexpr int32_t kForceGameModeSpectator = 3;
 
+    // -------------------------------------------------------------
+    // World spawn / world seed defaults for the 0.0.16 world-control
+    // command set (/setworldspawn, /seed, /spawnpoint, /setblock,
+    // /place). Mirrors Minecraft's vanilla Overworld spawn origin and
+    // the "no seed given" behaviour so pre-0.0.16 world_registry rows
+    // (which do not carry these new columns) round-trip identically
+    // until the ALTER TABLE migrations add them.
+    // -------------------------------------------------------------
+    constexpr double kDefaultWorldSpawnX = 0.5;
+    constexpr double kDefaultWorldSpawnY = 64.0;
+    constexpr double kDefaultWorldSpawnZ = 0.5;
+    constexpr int64_t kDefaultWorldSeed = 0;
+
     class Database
     {
     private:
@@ -285,6 +298,48 @@ namespace LightweightMC::Storage
         // Reads the plane's force_gamemode column; returns kForceGameModeInherit
         // when unset so vanilla planes keep the player's current mode.
         int32_t getWorldForceGameMode(int32_t id) const;
+
+        // ---- Per-plane spawn point + per-plane seed (0.0.16 world
+        // control). Two columns added to the world_registry table:
+        //
+        //   spawn_x / spawn_y / spawn_z (DOUBLE, DEFAULT 0.5 / 64.0 /
+        //   0.5) -- the plane's world spawn, i.e. where a brand-new
+        //   player (or one whose per-player spawn has not been set)
+        //   first appears after /gotor or portal transition. Standard
+        //   Minecraft's vanilla Overworld spawn is (0.5, 64, 0.5) so
+        //   the defaults match that behaviour.
+        //
+        //   world_seed (INTEGER, DEFAULT 0) -- the seed fed into the
+        //   plane's WorldStorage::generateChunk(); matches WorldStorage's
+        //   `m_worldSeed`. The server boots the seed from
+        //   `[world] world-seed` in server.properties for the three
+        //   standard planes + Aether; `/seed <planeName>` reads this
+        //   column back so `/seed` matches the runtime terrain, and
+        //   `/seed <planeName> <value>` writes it so future chunk
+        //   regenerations use the new seed (already-generated chunks stay
+        //   unchanged; a re-generated plane picks up the new value).
+        //
+        // Fresh CREATE tables carry these columns; legacy 0.0.15
+        // server_data.db rows pick them up via the same ALTER TABLE
+        // migration pattern used for `inventory_policy` /
+        // `force_gamemode` in initWorldRegistry.
+        bool setWorldSpawn(int32_t id, double x, double y, double z);
+        // Reads the plane's spawn triple; returns the vanilla
+        // (0.5, 64, 0.5) default when the row is missing / unset so
+        // pre-0.0.16 planes keep standard Minecraft behaviour.
+        bool getWorldSpawn(int32_t id, double &outX, double &outY, double &outZ) const;
+        bool setWorldSeed(int32_t id, int64_t seed);
+        // Reads the plane's world_seed column; returns
+        // kDefaultWorldSeed when unset so legacy rows match "no seed
+        // given" vanilla behaviour.
+        int64_t getWorldSeed(int32_t id) const;
+
+        // Targeted UPDATE of only the spawn_x/spawn_y/spawn_z columns
+        // on a player row keyed by UUID. Used by /spawnpoint so it
+        // does not clobber the rest of the row (inventory, world_id,
+        // coordinates) the way savePlayerData's INSERT-OR-REPLACE
+        // would. Returns false when the uuid has no row.
+        bool updatePlayerSpawn(const std::string &uuid, double x, double y, double z);
 
         // --- Per-plane inventory persistence (player_inventories) ----------
         // New SQLite table holding the SEPARATE / RESTRICTED plane blobs so
