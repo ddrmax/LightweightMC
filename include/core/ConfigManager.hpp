@@ -148,6 +148,22 @@ private:
         // another id in the reserved 100-series.
         emit("world", "aether-active", "true");
         emit("world", "aether-plane-id", "100");
+        // Per-plane inventory policy and forced gamemode on entry for Aether
+        // (0.0.15 plane-scoped inventory chain). Values:
+        //   aether-inventory-policy = standard   # standard | separate | restricted
+        //   aether-force-gamemode   = none       # none | survival | creative | adventure | spectator
+        // "standard" keeps vanilla Minecraft's cross-plane blob sharing (the
+        // flat players.inventory_blob column); "separate" opens a per-plane
+        // blob on player_inventories(uuid, world_id) so a creative sandbox's
+        // loot never leaks back to the mining chain and vice-versa; "restricted"
+        // uses the same storage but treats it as one-way (arriving never
+        // inherits the source's inventory and leaving never carries items
+        // back -- intended for PVP / PVE training maps). "none" keeps whatever
+        // game mode the player carried in; survival/creative/adventure/spectator
+        // pin session.gamemode on arrival so a creative sandbox stays creative
+        // even when the player was on survival elsewhere.
+        emit("world", "aether-inventory-policy", "standard");
+        emit("world", "aether-force-gamemode", "none");
     }
 
     // Overwrite every canonical key with its default. Used when the config

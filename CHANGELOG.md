@@ -66,6 +66,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
   SQLite via `Database::setWorldInventoryPolicy` / `setWorldForceGameMode`
   and mirroring them onto `WorldManager` for the hot path. Vanilla
   Overworld / Nether / End stay on their CREATE defaults.
+- **`ConfigManager::forEachCanonicalDefault()` extended with the two new
+  `server.properties` keys.** Because the reconciliation pass
+  (`ConfigManager::load` → `reconcileDefaultsUnlocked` → `m_parser.save`)
+  shares that canonical list between the "fresh file" path
+  (`setDefaultsUnlocked`) and the "backfill missing keys from an older
+  file" path, adding
+  `emit("world", "aether-inventory-policy", "standard")` and
+  `emit("world", "aether-force-gamemode", "none")` makes both a fresh
+  boot and a legacy 0.0.14 `server.properties` pick the keys up
+  automatically — no `if (missing) write` site in `NetworkSocket.cpp`
+  is needed. Boot log confirms this on legacy DBs with
+  `[ConfigManager] Upgraded server.properties from an older schema to
+  the current one (2 key(s) added).`
 
 - **Plane-scoped inventory transfer inside
   `NetworkManager::setPlayerWorldAt`** runs BEFORE any wire packet
