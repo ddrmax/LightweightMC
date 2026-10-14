@@ -15,6 +15,30 @@ namespace LightweightMC::Storage
         float spawnYaw{0.0f}, spawnPitch{0.0f};
         double lastX{0.5}, lastY{7.0}, lastZ{0.5};
         float lastYaw{0.0f}, lastPitch{0.0f};
+        // -------------------------------------------------------------
+        // Inventory slot -- the exact blob the player currently holds
+        // depends on the plane-scoped inventory policy stored on the
+        // world_registry row (see `kInventoryPolicy*` constants below):
+        //   * SYNC (kInventoryPolicySync, default for Overworld / Nether
+        //     / End / Aether / mining worlds): maps to the flat
+        //     `players.inventory_blob` column so /gotor or a portal
+        //     carries items across planes transparently (standard
+        //     Minecraft behaviour).
+        //   * SEPARATE (kInventoryPolicySeparate) and RESTRICTED
+        //     (kInventoryPolicyRestricted) planes map this slot to the
+        //     plane-scoped blob on the `player_inventories(uuid, world_id)`
+        //     SQLite table so switching planes swaps the whole inventory
+        //     rather than carrying items across. SEPARATE is intended
+        //     for flat / creative sandbox planes (flat world, no gen,
+        //     usually paired with force-gamemode=creative); RESTRICTED
+        //     is for PVP / PVE training worlds whose loot must never
+        //     leak back into SYNC / SEPARATE inventories.
+        // `Database::loadPlayerData` picks the correct slot on the
+        // login path; `PlayerManager::savePlayerState` routes the
+        // session's inventory to `savePlayerInventory` for non-SYNC
+        // planes and preserves the flat `players.inventory_blob` so
+        // the shared SYNC slot is never accidentally cleared.
+        // -------------------------------------------------------------
         std::vector<uint8_t> inventoryData{};
 
         // -------------------------------------------------------------
@@ -92,6 +116,31 @@ namespace LightweightMC::Storage
         bool boolValue{false};
         int64_t intValue{0};
     };
+
+    // ---------------------------------------------------------------------
+    // Multiworld plane inventory policy + forced game mode (0.0.15
+    // plane-switch inventory fix). Encoded as world_registry's
+    // inventory_policy / force_gamemode INTEGER columns so a single
+    // SQLite row describes how each plane treats inventory across
+    // /gotor and (future) portal transitions and whether it forces a
+    // specific game mode on entry. Defaults SYNC / INHERIT match
+    // standard Minecraft behaviour so vanilla 0/-1/1 planes, the
+    // reserved Aether special dimension, and pre-0.0.15 custom
+    // planes keep working without further edits.
+    //
+    // Callers: NetworkManager::setPlayerWorldAt (hot path, via
+    // WorldManager's cached maps), PlayerManager::savePlayerState
+    // (per-plane save mirror), and Database::loadPlayerData (login
+    // path) all use these constants so the encoding stays in one
+    // place.
+    constexpr int32_t kInventoryPolicySync = 0;      // standard Minecraft behaviour
+    constexpr int32_t kInventoryPolicySeparate = 1;  // per-plane creative-sandbox blob
+    constexpr int32_t kInventoryPolicyRestricted = 2; // per-plane PVP/PVE blob, one-way
+    constexpr int32_t kForceGameModeInherit = -1;    // no forced mode on entry
+    constexpr int32_t kForceGameModeSurvival = 0;    // matches PlayerSession::gamemode
+    constexpr int32_t kForceGameModeCreative = 1;
+    constexpr int32_t kForceGameModeAdventure = 2;
+    constexpr int32_t kForceGameModeSpectator = 3;
 
     class Database
     {
@@ -180,6 +229,78 @@ namespace LightweightMC::Storage
         // touching the custom ID range.
         bool setWorldById(int32_t id, const std::string &name,
                           const std::string &style);
+
+        // ---- Multiworld plane inventory policy (world_registry extension) --
+        // Two additional INTEGER columns on the world_registry table control
+        // how a plane handles inventory across /gotor and (future) portal
+        // transitions:
+        //
+        //   inventory_policy
+        //       0 SYNC      (DEFAULT) -- one shared inventory slot persisted
+        //                     on the flat players.inventory_blob column.
+        //                     Items transfer between SYNC planes (Overworld,
+        //                     Nether, End, Aether, mining worlds, ...)
+        //                     transparently; this is standard Minecraft
+        //                     behaviour.
+        //       1 SEPARATE            -- per-plane blob keyed on (uuid,
+        //                     planeId) in the new player_inventories table.
+        //                     Intended for flat "creative sandbox" planes:
+        //                     flat / no-gen terrain, overworld height, and
+        //                     almost always paired with force-gamemode=creative
+        //                     so the plane author can hand players their own
+        //                     loot that never leaks back to the SYNC chain.
+        //       2 RESTRICTED          -- same storage as SEPARATE but treated
+        //                     as one-way: items gained on the plane stay on
+        //                     the plane, and arriving from any other plane
+        //                     never inherits the source's inventory (loads
+        //                     empty / the plane's own row if the player has
+        //                     been training there earlier). PVP / PVE
+        //                     training worlds.
+        //
+        //   force_gamemode
+        //       -1 INHERIT  (DEFAULT) -- do not change the player's current
+        //                     mode on plane entry.
+        //        0 SURVIVAL, 1 CREATIVE, 2 ADVENTURE, 3 SPECTATOR --
+        //                     matches PlayerSession::gamemode / the S2C
+        //                     JoinGame 0x01 + Respawn 0x07 gamemode byte.
+        //                     Forced onto the session when the player
+        //                     switches onto this plane (used for
+        //                     creative sandbox planes and PVP training
+        //                     maps that pin game mode).
+        //
+        // Concrete values live in the enclosing Storage namespace as
+        // `kInventoryPolicy*` / `kForceGameMode*` constexpr ints (declared
+        // right above class Database) so callers can write
+        // `Storage::kInventoryPolicySeparate` instead of a magic 1.
+
+        // Fresh DBs get both columns via CREATE TABLE; existing 0.0.14
+        // server_data.db rows pick them up via ALTER TABLE migrations run
+        // inside initWorldRegistry.
+        bool setWorldInventoryPolicy(int32_t id, int32_t policy);
+        bool setWorldForceGameMode(int32_t id, int32_t forceGm);
+        // Reads the plane's inventory_policy column; returns
+        // kInventoryPolicySync when the row is missing or unset so legacy
+        // planes keep standard Minecraft behaviour without further edits.
+        int32_t getWorldInventoryPolicy(int32_t id) const;
+        // Reads the plane's force_gamemode column; returns kForceGameModeInherit
+        // when unset so vanilla planes keep the player's current mode.
+        int32_t getWorldForceGameMode(int32_t id) const;
+
+        // --- Per-plane inventory persistence (player_inventories) ----------
+        // New SQLite table holding the SEPARATE / RESTRICTED plane blobs so
+        // they don't fight with the flat players.inventory_blob column. SYNC
+        // planes never touch this table.
+        bool initPlayerInventoriesTable();
+        bool savePlayerInventory(const std::string &uuid, int32_t worldId,
+                                 const std::vector<uint8_t> &blob);
+        bool loadPlayerInventory(const std::string &uuid, int32_t worldId,
+                                 std::vector<uint8_t> &blobOut,
+                                 bool &hasRowOut) const;
+        // Reads ONLY the flat players.inventory_blob column so SEPARATE /
+        // RESTRICTED save paths can preserve the SYNC slot without pulling
+        // the whole PlayerData through a separate loadPlayerData call.
+        bool loadSyncInventoryBlob(const std::string &uuid,
+                                   std::vector<uint8_t> &blobOut) const;
     };
 
 } // namespace LightweightMC::Storage

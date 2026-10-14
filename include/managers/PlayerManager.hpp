@@ -56,10 +56,14 @@ namespace LightweightMC::Player
         // the data was persisted successfully.
         bool setPlayerOpLevel(const std::string &playerName, uint8_t opLevel);
 
-    private:
-        PlayerManager() = default;
-
+        // Static helpers (public so external callers -- NetworkManager::set
+        // PlayerWorldAt's plane-switch inventory transfer in particular --
+        // can round-trip a session's unordered_map<int, ItemStack> through
+        // the SQLite inventory blob without duplicating the format here).
         static std::vector<uint8_t> serializeInventory(const std::unordered_map<int, ItemStack> &inventory);
         static void deserializeInventory(const std::vector<uint8_t> &data, std::unordered_map<int, ItemStack> &outInventory);
+
+    private:
+        PlayerManager() = default;
     };
 }

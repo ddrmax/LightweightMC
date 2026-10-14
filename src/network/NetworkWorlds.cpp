@@ -427,6 +427,75 @@ namespace LightweightMC::Network
             auto packetSender = [this](int fd, int32_t p, const std::vector<uint8_t> &b)
             { sendPacket(fd, p, b); };
 
+            // ----------------------------------------------------------------
+            // Plane-scoped inventory transfer (0.0.15 plane-switch inventory
+            // fix). Standard Minecraft keeps one inventory across Overworld /
+            // Nether / End / Aether (kInventoryPolicySync); special planes
+            // opt into a plane-scoped blob via world_registry's inventory_
+            // policy column: SEPARATE for creative sandboxes (flat world,
+            // overworld height, no gen -- their loot lives only on that
+            // plane) and RESTRICTED for PVP / PVE training maps whose items
+            // must never leak back to a SYNC chain. The transfer runs
+            // BEFORE any wire packet so the client's inventory view already
+            // matches what the server will persist when the player next
+            // disconnects:
+            //   1. Snapshot session.inventory, save into the DEPARTING
+            //      plane's slot (SEPARATE/RESTRICTED go to
+            //      player_inventories(uuid, oldWorldId); SYNC slots are
+            //      written by the periodic savePlayerState flush so we
+            //      skip a redundant mid-switch write here).
+            //   2. Load the ARRIVING plane's slot (SYNC reads the flat
+            //      players.inventory_blob column; SEPARATE/RESTRICTED
+            //      read their own player_inventories row -- empty on first
+            //      visit, which is exactly the intended "fresh creative
+            //      sandbox / fresh training map" state and also prevents
+            //      items from a SYNC plane from leaking into a RESTRICTED
+            //      plane on arrival).
+            //   3. Overwrite session.inventory from the arrival blob so
+            //      downstream consumers (broadcast 0x05, savePlayerState
+            //      mirror, next /gotor) see the plane-scoped slot.
+            //
+            // Same-plane switches skip the SQLite round-trips because the
+            // slot is identical to itself.
+            const int32_t departurePolicy = m_worldManager.getInventoryPolicy(oldWorldId);
+            const int32_t arrivalPolicy = m_worldManager.getInventoryPolicy(newWorldId);
+            if (oldWorldId != newWorldId)
+            {
+                const std::vector<uint8_t> departureBlob =
+                    Player::PlayerManager::serializeInventory(session.inventory);
+                if (departurePolicy != Storage::kInventoryPolicySync)
+                {
+                    if (!m_database.savePlayerInventory(playerUuid, oldWorldId, departureBlob))
+                    {
+                        Core::Logger::warn("setPlayerWorldAt: could not persist departure-plane "
+                                           "inventory for " + playerName + " on worldId=" +
+                                           std::to_string(oldWorldId) + " (SEPARATE / RESTRICTED slot)");
+                    }
+                }
+
+                std::vector<uint8_t> arrivalBlob;
+                if (arrivalPolicy == Storage::kInventoryPolicySync)
+                {
+                    m_database.loadSyncInventoryBlob(playerUuid, arrivalBlob);
+                }
+                else
+                {
+                    bool hasRow = false;
+                    m_database.loadPlayerInventory(playerUuid, newWorldId, arrivalBlob, hasRow);
+                }
+                session.inventory.clear();
+                Player::PlayerManager::deserializeInventory(arrivalBlob, session.inventory);
+            }
+
+            // Forced game mode on arrival: pin session.gamemode BEFORE the
+            // 0x07 Respawn byte so the wire byte and the session's next
+            // savePlayerState mirror agree (creative sandbox planes pin
+            // CREATIVE even when the player was on SURVIVAL elsewhere;
+            // PVP training maps pin whatever the plane author set).
+            const int32_t arrivalForceGm = m_worldManager.getForceGameModeOnEntry(newWorldId);
+            if (arrivalForceGm != Storage::kForceGameModeInherit)
+                session.gamemode = static_cast<uint8_t>(arrivalForceGm);
+
             // 1. Respawn (0x07): dimension, difficulty, gamemode, levelType.
             // Dimension is signed int32 so vanilla's Nether (-1) and any
             // custom plane id (>=101) both fit; difficulty 2 = Normal,

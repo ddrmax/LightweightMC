@@ -1,5 +1,6 @@
 #pragma once
 #include "storage/WorldStorage.hpp"
+#include "storage/Database.hpp"
 #include "player/PlayerSession.hpp"
 #include "managers/ScoreboardManager.hpp"
 #include <cstdint>
@@ -145,9 +146,75 @@ namespace LightweightMC::World
             return 0;
         }
 
+        // ------------------------------------------------------------------
+        // Per-plane inventory policy + forced game mode (0.0.15 plane-switch
+        // inventory fix).
+        //
+        // Vanilla Minecraft carries one global inventory across dimension
+        // planes, which is what most players expect when hopping Overworld
+        // <-> Nether <-> End. Special planes break that assumption in two
+        // ways:
+        //   * "flat / creative sandbox" (a special flat world with
+        //     overworld height, no structures/ores/villages/trees, forced
+        //     creative) wants its OWN inventory so loot on that plane never
+        //     leaks back to the mining chain and vice versa.
+        //   * PVP / PVE training planes want a one-way training slot: items
+        //     gained there stay there, arriving never inherits from any
+        //     other plane, leaving never carries items back.
+        //
+        // The server-side state machine (NetworkManager::setPlayerWorldAt
+        // and Database::loadPlayerData) consults these two accessors to
+        // decide which SQLite slot to read / write. Policies are declared
+        // via Storage::kInventoryPolicy{Sync,Separate,Restricted} and modes
+        // via Storage::kForceGameMode{Inherit,Survival,Creative,Adventure,Spectator}
+        // in include/storage/Database.hpp so the encoding stays in one
+        // place.
+        //
+        // NetworkManager::start seeds both maps at boot by reading
+        // `[world] aether-inventory-policy` and `[world] aether-force-
+        // gamemode` from server.properties (custom /world create planes
+        // can call setInventoryPolicy / setForceGameModeOnEntry after
+        // allocation, and Database::getWorldInventoryPolicy is the fallback
+        // for anything not in the cache -- it reads the world_registry row
+        // directly).
+        void setInventoryPolicy(int32_t planeId, int32_t policy)
+        {
+            m_inventoryPolicy[planeId] = policy;
+        }
+
+        int32_t getInventoryPolicy(int32_t planeId) const
+        {
+            auto it = m_inventoryPolicy.find(planeId);
+            if (it != m_inventoryPolicy.end())
+                return it->second;
+            // SYNC is the standard Minecraft behaviour every vanilla plane
+            // and pre-0.0.15 custom plane inherits; returning it here keeps
+            // unregistered planes functional even if the SQLite lookup
+            // happens to be unavailable.
+            return Storage::kInventoryPolicySync;
+        }
+
+        void setForceGameModeOnEntry(int32_t planeId, int32_t forceGm)
+        {
+            m_forceGameModeOnEntry[planeId] = forceGm;
+        }
+
+        int32_t getForceGameModeOnEntry(int32_t planeId) const
+        {
+            auto it = m_forceGameModeOnEntry.find(planeId);
+            if (it != m_forceGameModeOnEntry.end())
+                return it->second;
+            // INHERIT is the standard Minecraft behaviour: a plane with no
+            // explicit force preserves whatever mode the player carried in
+            // (creative on creative, survival on survival, ...).
+            return Storage::kForceGameModeInherit;
+        }
+
     private:
         std::unordered_map<int32_t, std::unique_ptr<Storage::WorldStorage>> &m_worlds;
         std::unordered_map<int32_t, int32_t> m_skyDimension;
+        std::unordered_map<int32_t, int32_t> m_inventoryPolicy;
+        std::unordered_map<int32_t, int32_t> m_forceGameModeOnEntry;
     };
 }
 

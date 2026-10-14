@@ -5,6 +5,133 @@ All notable changes made to the project **LightweightMC** are documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project respects [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.0.15] - 2026-10-13
+
+### Added
+
+- **Per-plane inventory policy (world_registry extension + `player_inventories`
+  SQLite table).** Vanilla Minecraft carries one shared inventory across
+  dimension planes; the server keeps that behaviour for the standard chain
+  (Overworld #0 / Nether #-1 / End #1 / Aether #100 by default / mining
+  worlds) but 0.0.15 lets special planes break it in two documented ways:
+  - **SEPARATE (1)** — per-plane blob keyed on `(uuid, world_id)` in the
+    new `player_inventories` SQLite table, intended for flat / creative
+    sandbox planes (flat world, overworld height, no structures/ores/
+    villages/trees) whose loot never leaks back to the mining chain and
+    vice-versa. Almost always paired with `force_gamemode = 1 CREATIVE`
+    so the plane pins creative on entry even when the player was on
+    survival elsewhere.
+  - **RESTRICTED (2)** — same storage as SEPARATE but treated as one-way:
+    arriving on the plane from any other plane never inherits the source's
+    inventory (loads empty / that plane's own blob if the player was
+    training there earlier), and leaving never carries items back.
+    Intended for PVP / PVE training maps.
+  - **SYNC (0)** — the default (and pre-0.0.15 behaviour for every plane):
+    one blob persisted on the flat `players.inventory_blob` column so
+    items transfer across planes transparently (standard Minecraft).
+
+- **`world_registry` extension columns (`inventory_policy INTEGER DEFAULT 0`
+  and `force_gamemode INTEGER DEFAULT -1`).** `force_gamemode` is
+  orthogonal and lets the plane pin a game mode on entry (`-1 INHERIT`
+  keeps whatever mode the player carried in; `0 SURVIVAL`, `1 CREATIVE`,
+  `2 ADVENTURE`, `3 SPECTATOR` override `session.gamemode` on arrival).
+  `Database::initWorldRegistry` adds them to the CREATE TABLE and also
+  runs ALTER TABLE migrations with a pragma_table_info probe so existing
+  0.0.14 server_data.db rows pick them up transparently. Encoding lives
+  in `include/storage/Database.hpp` as `Storage::kInventoryPolicy*` and
+  `Storage::kForceGameMode*` constexpr ints so callers write
+  `Storage::kInventoryPolicySeparate` instead of a magic `1`.
+
+- **New `Storage::Database` API for the plane-scoped inventory chain:**
+  `setWorldInventoryPolicy` / `getWorldInventoryPolicy`,
+  `setWorldForceGameMode` / `getWorldForceGameMode`,
+  `initPlayerInventoriesTable` (CREATE TABLE with PRIMARY KEY `(uuid,
+  world_id)`), `savePlayerInventory(uuid, worldId, blob)`,
+  `loadPlayerInventory(uuid, worldId, blobOut, hasRowOut)`, and
+  `loadSyncInventoryBlob(uuid, blobOut)` (reads ONLY the flat
+  `players.inventory_blob` column so SEPARATE / RESTRICTED save paths can
+  preserve the shared SYNC slot rather than overwrite it with a plane
+  blob).
+
+- **`WorldManager` policy maps + hot-path accessors**
+  (`m_inventoryPolicy` and `m_forceGameModeOnEntry` keyed by planeId with
+  `setInventoryPolicy` / `getInventoryPolicy` and
+  `setForceGameModeOnEntry` / `getForceGameModeOnEntry`). Both default to
+  the standard-Minecraft values (`SYNC` / `INHERIT`) when a plane is not
+  in the cache so unregistered custom planes and legacy DBs keep working.
+  `NetworkManager::start` seeds the Aether entries at boot by reading
+  `[world] aether-inventory-policy` (`standard`/`separate`/`restricted`)
+  and `[world] aether-force-gamemode` (`none`/`survival`/`creative`/
+  `adventure`/`spectator`) from `server.properties`, persisting them to
+  SQLite via `Database::setWorldInventoryPolicy` / `setWorldForceGameMode`
+  and mirroring them onto `WorldManager` for the hot path. Vanilla
+  Overworld / Nether / End stay on their CREATE defaults.
+
+- **Plane-scoped inventory transfer inside
+  `NetworkManager::setPlayerWorldAt`** runs BEFORE any wire packet
+  (0x07 Respawn / drop-point chunk / 0x08 Position / rest-of-box chunks)
+  so the client's inventory view and game mode already match what the
+  server will persist on the next save flush. Departure blob is written
+  to the departure's slot (SEPARATE / RESTRICTED go to
+  `player_inventories(uuid, oldWorldId)`; SYNC blobs stay on the flat
+  column and are flushed by the periodic `savePlayerState`), the arrival
+  blob is read from the arrival's slot (SYNC via
+  `Database::loadSyncInventoryBlob`; SEPARATE / RESTRICTED via
+  `Database::loadPlayerInventory(uuid, newWorldId, blob, hasRow)`), and
+  `session.inventory` is cleared then re-hydrated from the arrival blob.
+  `session.gamemode` is also pinned from
+  `WorldManager::getForceGameModeOnEntry(newWorldId)` before the 0x07
+  Respawn's gamemode byte is written, so the wire byte and the session's
+  next save mirror agree (creative sandbox planes pin CREATIVE even
+  when the player was on SURVIVAL elsewhere).
+
+- **`Database::loadPlayerData` plane-scoped inventory restore.** After
+  reading `world_id` (column 34) from the flat players row, the login
+  path consults the plane's `inventory_policy` on `world_registry` and,
+  when SEPARATE / RESTRICTED, replaces `PlayerData::inventoryData` with
+  the plane-scoped blob on `player_inventories(uuid, world_id)` so
+  `PlayerManager`'s login handler restores the plane's own inventory
+  instead of the shared SYNC chain. Missing plane row (first visit)
+  yields an empty blob, matching the intended "fresh creative sandbox /
+  fresh training map" state and preventing items from a SYNC chain from
+  leaking into a RESTRICTED plane on arrival.
+
+- **`PlayerManager::savePlayerState` policy-aware save.** Consults
+  `Database::getWorldInventoryPolicy(session.worldId)` for the plane the
+  session is currently on; SYNC planes keep using the flat
+  `players.inventory_blob` column, and SEPARATE / RESTRICTED planes route
+  the current session blob to `savePlayerInventory(uuid, worldId, blob)`
+  and re-read the existing flat SYNC blob into `data.inventoryData`
+  (via `loadSyncInventoryBlob`) so the INSERT-OR-REPLACE that
+  `Database::savePlayerData` runs preserves the shared SYNC chain rather
+  than overwriting it with a plane-scoped blob.
+
+- **Wiki: Multiworld-and-Dimensions "Plane inventory policy" section**
+  documenting the SYNC / SEPARATE / RESTRICTED table, the `force_gamemode`
+  encoding, the `[world] aether-inventory-policy` / `[world] aether-force-
+  gamemode` config keys, and the three server-side entry points that
+  consult the policy (`setPlayerWorldAt`, `loadPlayerData`,
+  `savePlayerState`).
+
+### Notes
+
+- **Existing 0.0.14 server_data.db continues to work.** The two new
+  `world_registry` columns come from CREATE TABLE (fresh DBs) or ALTER
+  TABLE migrations (legacy DBs); `player_inventories` is a brand-new
+  CREATE TABLE that pre-0.0.14 DBs get empty. Vanilla planes stay on
+  their SYNC / INHERIT defaults so the 4-packet plane-switch sequence
+  added in 0.0.14 (0x07 → 0x26 → 0x08 → rest-chunks) is unchanged on
+  the wire.
+- **First fix for 0.0.15.** Later 0.0.15 work will extend `/world
+  create` with `--inventory <standard|separate|restricted>` and
+  `--force-gamemode <mode>` flags and add a `GenStyle::FLAT` style so
+  a "flat world with overworld height, no structures / ores / villages /
+  trees, creative mode" plane can be described end-to-end in one command.
+  The DB-level setters and the in-memory `WorldManager` mirrors are
+  already in place, so the CLI follow-up only needs to route the flags
+  through them.
+
+---
 ## [0.0.14] - 2026-10-13
 
 ### Added

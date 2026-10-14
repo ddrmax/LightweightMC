@@ -1,5 +1,6 @@
 #include "storage/Database.hpp"
 #include "core/Logger.hpp"
+#include <ctime>
 
 namespace LightweightMC::Storage
 {
@@ -356,6 +357,32 @@ namespace LightweightMC::Storage
             }
         }
 
+        // Plane-scoped inventory: SEPARATE / RESTRICTED planes keep their
+        // own blob on the player_inventories(uuid, world_id) row rather
+        // than on the flat players.inventory_blob column. The SELECT above
+        // always filled outData.inventoryData with the flat SYNC blob; if
+        // the world_registry row for the plane the player is currently on
+        // declares a non-SYNC policy, replace the blob with the plane row
+        // so PlayerManager's login handler restores the plane-scoped
+        // inventory instead of the shared SYNC chain. Missing plane row
+        // (first visit) means empty inventory -- that is exactly the
+        // intended behaviour for a fresh creative sandbox or PVP training
+        // map: the player starts with nothing on that plane.
+        if (found)
+        {
+            const int32_t planePolicy = getWorldInventoryPolicy(outData.worldId);
+            if (planePolicy == kInventoryPolicySeparate || planePolicy == kInventoryPolicyRestricted)
+            {
+                std::vector<uint8_t> planeBlob;
+                bool hasRow = false;
+                loadPlayerInventory(uuid, outData.worldId, planeBlob, hasRow);
+                outData.inventoryData.swap(planeBlob);
+                // (hasRow is intentionally ignored: an empty blob restores
+                // an empty inventory, which is the desired first-visit
+                // state for SEPARATE / RESTRICTED planes.)
+            }
+        }
+
         return found;
     }
 
@@ -561,7 +588,9 @@ namespace LightweightMC::Storage
             CREATE TABLE IF NOT EXISTS world_registry (
                 id INTEGER UNIQUE,
                 name TEXT UNIQUE COLLATE NOCASE,
-                style TEXT
+                style TEXT,
+                inventory_policy INTEGER DEFAULT 0,
+                force_gamemode INTEGER DEFAULT -1
             );
         )";
         char *errMsg = nullptr;
@@ -571,6 +600,51 @@ namespace LightweightMC::Storage
                                 std::string(errMsg ? errMsg : "unknown"));
             if (errMsg) sqlite3_free(errMsg);
             return false;
+        }
+        // Legacy 0.0.14 server_data.db rows keep the three-column CREATE
+        // signature so the two new columns are added via ALTER TABLE
+        // migrations (same pragma_table_info probe + best-effort ALTER
+        // pattern used by Database::initPlayers for the flat player rows).
+        // Fresh CREATE already carries them, so the ALTER only runs on
+        // legacy DBs and is otherwise a no-op.
+        const char *newColumns[] = {
+            "inventory_policy INTEGER DEFAULT 0",
+            "force_gamemode INTEGER DEFAULT -1",
+        };
+        for (const char *col : newColumns)
+        {
+            std::string colName(col);
+            const size_t sp = colName.find(' ');
+            if (sp != std::string::npos)
+                colName.resize(sp);
+            std::string checkSql = "SELECT COUNT(*) FROM pragma_table_info('world_registry') WHERE name = '" + colName + "';";
+            sqlite3_stmt *probe = nullptr;
+            if (sqlite3_prepare_v2(m_db, checkSql.c_str(), -1, &probe, nullptr) == SQLITE_OK)
+            {
+                int exists = 0;
+                if (sqlite3_step(probe) == SQLITE_ROW)
+                    exists = sqlite3_column_int(probe, 0);
+                sqlite3_finalize(probe);
+                if (!exists)
+                {
+                    std::string alterSql = std::string("ALTER TABLE world_registry ADD COLUMN ") + col + ";";
+                    char *alterErr = nullptr;
+                    if (sqlite3_exec(m_db, alterSql.c_str(), nullptr, nullptr, &alterErr) != SQLITE_OK)
+                    {
+                        Core::Logger::error("Failed to migrate world_registry column " + colName +
+                                            ": " + std::string(alterErr ? alterErr : "unknown"));
+                        if (alterErr) sqlite3_free(alterErr);
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                sqlite3_finalize(probe);
+                Core::Logger::error("Failed to probe world_registry column " + colName +
+                                    ": " + std::string(sqlite3_errmsg(m_db)));
+                return false;
+            }
         }
         return true;
     }
@@ -727,6 +801,211 @@ namespace LightweightMC::Storage
         sqlite3_finalize(stmt);
         return ok;
     }
+
+    // ---------------------------------------------------------------------
+    // Multiworld plane inventory policy -- world_registry extension.
+    //
+    // Two new columns (inventory_policy, force_gamemode) let a plane pick
+    // how it handles inventory across /gotor and (future) portal
+    // transitions and, independently, whether to force a game mode on
+    // entry. Defaults are 0 SYNC / -1 INHERIT so vanilla planes and
+    // planes registered before 0.0.15 keep standard Minecraft behaviour
+    // without further edits. See Database.hpp's kInventoryPolicy* and
+    // kForceGameMode* constants for the encoding.
+    // ---------------------------------------------------------------------
+    bool Database::setWorldInventoryPolicy(int32_t id, int32_t policy)
+    {
+        if (!m_db)
+            return false;
+        if (policy < kInventoryPolicySync || policy > kInventoryPolicyRestricted)
+        {
+            Core::Logger::warn("setWorldInventoryPolicy: policy=" + std::to_string(policy) +
+                               " out of range [0..2]; clamping to SYNC so legacy planes keep standard behaviour");
+            policy = kInventoryPolicySync;
+        }
+        const char *sql = "UPDATE world_registry SET inventory_policy = ? WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setWorldInventoryPolicy: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int(stmt, 1, policy);
+        sqlite3_bind_int(stmt, 2, id);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool Database::setWorldForceGameMode(int32_t id, int32_t forceGm)
+    {
+        if (!m_db)
+            return false;
+        if (forceGm != kForceGameModeInherit &&
+            (forceGm < kForceGameModeSurvival || forceGm > kForceGameModeSpectator))
+        {
+            Core::Logger::warn("setWorldForceGameMode: forceGm=" + std::to_string(forceGm) +
+                               " invalid; falling back to INHERIT (-1)");
+            forceGm = kForceGameModeInherit;
+        }
+        const char *sql = "UPDATE world_registry SET force_gamemode = ? WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setWorldForceGameMode: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int(stmt, 1, forceGm);
+        sqlite3_bind_int(stmt, 2, id);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    int32_t Database::getWorldInventoryPolicy(int32_t id) const
+    {
+        if (!m_db)
+            return kInventoryPolicySync;
+        const char *sql = "SELECT inventory_policy FROM world_registry WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return kInventoryPolicySync;
+        sqlite3_bind_int(stmt, 1, id);
+        int32_t out = kInventoryPolicySync;
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            out = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        return out;
+    }
+
+    int32_t Database::getWorldForceGameMode(int32_t id) const
+    {
+        if (!m_db)
+            return kForceGameModeInherit;
+        const char *sql = "SELECT force_gamemode FROM world_registry WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return kForceGameModeInherit;
+        sqlite3_bind_int(stmt, 1, id);
+        int32_t out = kForceGameModeInherit;
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            out = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        return out;
+    }
+    // ---------------------------------------------------------------------
+    // Per-plane inventory SQLite table (SEPARATE / RESTRICTED policies).
+    // Fresh CREATE TABLE keeps 0.0.14 DBs unaffected -- SYNC planes never
+    // touch this table so their flat players.inventory_blob column stays
+    // authoritative for the shared inventory chain.
+    // ---------------------------------------------------------------------
+    bool Database::initPlayerInventoriesTable()
+    {
+        if (!m_db)
+            return false;
+        const char *sql = R"(
+            CREATE TABLE IF NOT EXISTS player_inventories (
+                uuid TEXT NOT NULL,
+                world_id INTEGER NOT NULL,
+                inventory_data BLOB NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (uuid, world_id)
+            );
+        )";
+        char *errMsg = nullptr;
+        if (sqlite3_exec(m_db, sql, nullptr, nullptr, &errMsg) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to initialise player_inventories: " +
+                                std::string(errMsg ? errMsg : "unknown"));
+            if (errMsg) sqlite3_free(errMsg);
+            return false;
+        }
+        return true;
+    }
+
+    bool Database::savePlayerInventory(const std::string &uuid, int32_t worldId,
+                                       const std::vector<uint8_t> &blob)
+    {
+        if (!m_db || uuid.empty())
+            return false;
+        const char *sql =
+            "INSERT OR REPLACE INTO player_inventories "
+            "(uuid, world_id, inventory_data, updated_at) VALUES (?, ?, ?, ?);";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare savePlayerInventory: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_text(stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, worldId);
+        sqlite3_bind_blob(stmt, 3, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 4, static_cast<int64_t>(std::time(nullptr)));
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool Database::loadPlayerInventory(const std::string &uuid, int32_t worldId,
+                                       std::vector<uint8_t> &blobOut, bool &hasRowOut) const
+    {
+        blobOut.clear();
+        hasRowOut = false;
+        if (!m_db || uuid.empty())
+            return false;
+        const char *sql =
+            "SELECT inventory_data FROM player_inventories WHERE uuid = ? AND world_id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
+        sqlite3_bind_text(stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, worldId);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            found = true;
+            hasRowOut = true;
+            const int n = sqlite3_column_bytes(stmt, 0);
+            if (n > 0)
+            {
+                const uint8_t *bytes = static_cast<const uint8_t *>(sqlite3_column_blob(stmt, 0));
+                blobOut.assign(bytes, bytes + n);
+            }
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
+    // Reads the flat players.inventory_blob column only, so PlayerManager::savePlayerState
+    // can preserve the shared SYNC slot when the player currently sits on a
+    // SEPARATE / RESTRICTED plane. Database::savePlayerData's INSERT OR
+    // REPLACE semantics would otherwise write NULL to inventory_blob.
+    bool Database::loadSyncInventoryBlob(const std::string &uuid,
+                                          std::vector<uint8_t> &blobOut) const
+    {
+        blobOut.clear();
+        if (!m_db || uuid.empty())
+            return false;
+        const char *sql = "SELECT inventory_blob FROM players WHERE uuid = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
+        sqlite3_bind_text(stmt, 1, uuid.c_str(), -1, SQLITE_TRANSIENT);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            found = true;
+            const int n = sqlite3_column_bytes(stmt, 0);
+            if (n > 0)
+            {
+                const uint8_t *bytes = static_cast<const uint8_t *>(sqlite3_column_blob(stmt, 0));
+                blobOut.assign(bytes, bytes + n);
+            }
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
 
     // Update the world_id column on the player row matching the given username.
     // Kept as a name-based lookup (rather than uuid-based) because NetworkManager

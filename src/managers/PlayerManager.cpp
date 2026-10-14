@@ -4,6 +4,7 @@
 #include "core/Logger.hpp"
 #include "core/utils.hpp"
 #include "storage/WorldStorage.hpp"
+#include "storage/Database.hpp"
 #include <cstdio>
 #include <cmath>
 
@@ -454,7 +455,38 @@ namespace LightweightMC::Player
         // points, XP, ...) from the session into the database row.
         session.applyTo(data);
 
-        data.inventoryData = serializeInventory(session.inventory);
+        // 0.0.15 plane-switch inventory policy: SYNC planes (default for
+        // Overworld / Nether / End / Aether / mining worlds) keep using
+        // the flat players.inventory_blob column; SEPARATE / RESTRICTED
+        // planes (creative sandboxes and PVP / PVE training maps) route
+        // the current session's inventory to the per-plane row on
+        // player_inventories(uuid, session.worldId) instead, and re-load
+        // the existing flat SYNC blob into data.inventoryData so the
+        // INSERT OR REPLACE that Database::savePlayerData runs preserves
+        // the shared SYNC chain rather than overwriting it with a plane
+        // blob (which would wipe items a mining player had on their
+        // SYNC slot when they logged a save flush while standing on a
+        // creative sandbox).
+        const int32_t planePolicy = db.getWorldInventoryPolicy(session.worldId);
+        const std::vector<uint8_t> sessionBlob = Player::PlayerManager::serializeInventory(session.inventory);
+        if (planePolicy == Storage::kInventoryPolicySync)
+        {
+            data.inventoryData = sessionBlob;
+        }
+        else
+        {
+            // Preserve the shared SYNC blob (a first-time SYNC save may
+            // leave it empty; that is the correct "no items yet" state).
+            std::vector<uint8_t> syncBlob;
+            db.loadSyncInventoryBlob(data.uuid, syncBlob);
+            data.inventoryData.swap(syncBlob);
+            if (!db.savePlayerInventory(data.uuid, session.worldId, sessionBlob))
+            {
+                Core::Logger::warn("savePlayerState: could not persist plane-scoped "
+                                   "inventory for " + session.username + " on worldId=" +
+                                   std::to_string(session.worldId) + " (SEPARATE / RESTRICTED slot)");
+            }
+        }
 
         if (db.savePlayerData(data))
         {

@@ -130,6 +130,73 @@ namespace LightweightMC::Network
             }
         }
 
+        // 0.0.15 plane-switch inventory policy extension: two new columns
+        // (inventory_policy / force_gamemode) on world_registry plus a
+        // fresh player_inventories SQLite table for per-plane blobs.
+        // Legacy DBs pick up the columns via ALTER TABLE migrations inside
+        // initWorldRegistry; player_inventories is a brand-new CREATE TABLE
+        // so pre-0.0.14 DBs get an empty table on first boot.
+        if (!m_database.initPlayerInventoriesTable())
+        {
+            Core::Logger::error("Failed to initialise player_inventories SQLite table.");
+            return false;
+        }
+
+        // Seed the Aether special-dimension inventory policy + forced game
+        // mode from server.properties so switching onto Aether either
+        // shares the standard Minecraft inventory chain (default) or
+        // gets its own SEPARATE / RESTRICTED slot per the plane author's
+        // intent. Vanilla Overworld / Nether / End stay on their CREATE
+        // defaults (SYNC / INHERIT); future custom planes registered at
+        // >=101 via /world create can be opted in via the WorldManager
+        // setters in a follow-up (the DB-level setters are also wired
+        // through so a fork can persist policies across restarts).
+        const std::string aetherInvPolicy = ConfigManager::getInstance().getString(
+            "world", "aether-inventory-policy", "standard");
+        int32_t aetherPolicy = Storage::kInventoryPolicySync;
+        if (aetherInvPolicy == "separate")
+            aetherPolicy = Storage::kInventoryPolicySeparate;
+        else if (aetherInvPolicy == "restricted")
+            aetherPolicy = Storage::kInventoryPolicyRestricted;
+        else if (aetherInvPolicy != "standard")
+        {
+            Core::Logger::warn("[NetworkManager] Unknown world.aether-inventory-policy, "
+                               "falling back to standard (SYNC)");
+        }
+
+        const std::string aetherGm = ConfigManager::getInstance().getString(
+            "world", "aether-force-gamemode", "none");
+        int32_t aetherForceGm = Storage::kForceGameModeInherit;
+        if (aetherGm == "survival")
+            aetherForceGm = Storage::kForceGameModeSurvival;
+        else if (aetherGm == "creative")
+            aetherForceGm = Storage::kForceGameModeCreative;
+        else if (aetherGm == "adventure")
+            aetherForceGm = Storage::kForceGameModeAdventure;
+        else if (aetherGm == "spectator")
+            aetherForceGm = Storage::kForceGameModeSpectator;
+        else if (aetherGm != "none")
+        {
+            Core::Logger::warn("[NetworkManager] Unknown world.aether-force-gamemode, "
+                               "falling back to none (INHERIT)");
+        }
+
+        if (!m_database.setWorldInventoryPolicy(aetherPlaneId, aetherPolicy))
+            Core::Logger::warn("world.aether-inventory-policy could not be persisted to world_registry "
+                               "for aetherPlaneId=" + std::to_string(aetherPlaneId) +
+                               " (in-memory WorldManager policy still applies for this session)");
+        if (!m_database.setWorldForceGameMode(aetherPlaneId, aetherForceGm))
+            Core::Logger::warn("world.aether-force-gamemode could not be persisted to world_registry "
+                               "for aetherPlaneId=" + std::to_string(aetherPlaneId) +
+                               " (in-memory WorldManager policy still applies for this session)");
+
+        // Mirror the SQLite policy onto WorldManager's hot-path cache so
+        // setPlayerWorldAt and login restore use the same value on the
+        // first session after boot; Database::getWorldInventoryPolicy is
+        // the fallback for anything not in the cache.
+        m_worldManager.setInventoryPolicy(aetherPlaneId, aetherPolicy);
+        m_worldManager.setForceGameModeOnEntry(aetherPlaneId, aetherForceGm);
+
         // m_worlds is an unordered_map, so insertion into an existing key
         // does not invalidate references held elsewhere; no reserve() is
         // required for correctness (bucket growth only touches the map's
