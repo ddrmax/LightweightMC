@@ -42,7 +42,8 @@ namespace LightweightMC::Storage::Gen
     // giant trees, so seams at chunk borders are just canopy clipping.
     void plantGiantTree(int lx, int lz, int surfaceY,
                         int height, int trunkW, int trunkD,
-                        std::uint16_t canopyId,
+                        std::uint16_t trunkCombined,
+                        std::uint16_t canopyCombined,
                         std::uint16_t *blocks)
     {
         const int topY = surfaceY + height;
@@ -60,7 +61,7 @@ namespace LightweightMC::Storage::Gen
                     int bx = lx + ix;
                     int bz = lz + iz;
                     if (bx < 0 || bx >= 16 || bz < 0 || bz >= 16) continue;
-                    blocks[cell(bx, bz, by)] = B::combined17(B::WOOD);
+                    blocks[cell(bx, bz, by)] = trunkCombined;
                 }
             }
         }
@@ -92,7 +93,7 @@ namespace LightweightMC::Storage::Gen
                     if (inTrunk && by <= topY) continue;
                     // Only overwrite AIR so we don't overwrite neighbours' canopies.
                     if (blocks[cell(bx, bz, by)] == B::AIR)
-                        blocks[cell(bx, bz, by)] = B::combined17(canopyId);
+                        blocks[cell(bx, bz, by)] = canopyCombined;
                 }
             }
         }
@@ -147,12 +148,28 @@ namespace LightweightMC::Storage::Gen
             int height = 10 + static_cast<int>(rand.nextInt(41));   // 10..50
             int trunkW = 1 + static_cast<int>(rand.nextInt(4));     // 1..4
             int trunkD = 1 + static_cast<int>(rand.nextInt(4));     // 1..4
-            // Species pick -- LEAVES (id 18) or LEAVES2 (id 161).
-            std::uint16_t canopy = (rand.nextInt(2) == 0)
-                                       ? B::LEAVES
-                                       : B::LEAVES2;
+            // Species pick -- pick one of 7 wood/leaf species so trunk and
+            // canopy share the same (id, meta). LOG (id 17) meta 0=Oak /
+            // 1=Pine / 2=Jungle / 3=Bamboo / 4=Palm pairs with LEAVES
+            // (id 18) at the same meta; LOG2 (id 162) meta 0=Acacia /
+            // 1=Dark Oak pairs with LEAVES2 (id 161) at the same meta.
+            const int species = static_cast<int>(rand.nextInt(7));
+            std::uint16_t trunkCombined;
+            std::uint16_t canopyCombined;
+            if (species < 5)
+            {
+                trunkCombined = B::combined17(B::LOG, static_cast<std::uint8_t>(species));
+                canopyCombined = B::combined17(B::LEAVES, static_cast<std::uint8_t>(species));
+            }
+            else
+            {
+                const int m = species - 5;   // 0=Acacia, 1=Dark Oak
+                trunkCombined = B::combined17(B::LOG2, static_cast<std::uint8_t>(m));
+                canopyCombined = B::combined17(B::LEAVES2, static_cast<std::uint8_t>(m));
+            }
             plantGiantTree(anchorX, anchorZ, SURFACE_Y,
-                           height, trunkW, trunkD, canopy, blocks);
+                           height, trunkW, trunkD,
+                           trunkCombined, canopyCombined, blocks);
         }
 
         // Deliberately skipped: ore, caves, dungeons, villages, mineshafts.

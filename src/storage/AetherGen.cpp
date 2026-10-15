@@ -28,19 +28,22 @@ namespace LightweightMC::Storage::Gen
     // --------------------------------------------------------------- Greek temple
     //
     // A mythology-style temple written on top of an Aether island. Uses only
-    // sandstone-family blocks (SANDSTONE id 24 for the body, SANDSTONE_STAIRS
-    // id 128 for the stepped pediment) so temples visually match the
-    // island material and read as "carved out of the sky-island rock".
+    // quartz-family blocks (QUARTZ_BLOCK id 155 for the body, QUARTZ_STAIRS
+    // id 156 for the stepped pediment) so temples visually read as "carved
+    // out of sky-island crystal" -- the sandstone island body underneath
+    // stays sandstone (that is what generateAetherOre's host material is
+    // anchored on), but the temple itself is quartz so the mythology
+    // structures stand out against the sky-island palette.
     //
     // Layout (chunk-local, anchored so (ax, az) is the west corner of the
     // temple floor):
-    //   * Floor: 6x5 sandstone slab at surfaceY+1.
-    //   * 4 corner pillars, 4 blocks tall, one sandstone block per level.
+    //   * Floor: 6x5 quartz slab at surfaceY+1.
+    //   * 4 corner pillars, 4 blocks tall, one quartz block per level.
     //   * Two inner pillars on the long axis (6 - 2 = 4 positions wide) at
     //     height 4.
-    //   * Roof: solid sandstone slab spanning the 6x5 footprint at
+    //   * Roof: solid quartz slab spanning the 6x5 footprint at
     //     surfaceY + 6.
-    //   * Pediment (roofline ornament): a row of SANDSTONE_STAIRS at
+    //   * Pediment (roofline ornament): a row of QUARTZ_STAIRS at
     //     surfaceY + 7 running along the long (x) axis.
     //   * Steps on the front (west edge, az side): a two-step staircase
     //     running down from surfaceY+1 to surfaceY.
@@ -56,8 +59,8 @@ namespace LightweightMC::Storage::Gen
             if (y < 1 || y > 250) return;
             blocks[cell(lx, lz, y)] = B::combined17(id);
         };
-        const std::uint16_t SAND = B::SANDSTONE;
-        const std::uint16_t STAIR = B::SANDSTONE_STAIRS;
+        const std::uint16_t SAND = B::QUARTZ_BLOCK;
+        const std::uint16_t STAIR = B::QUARTZ_STAIRS;
 
         // 1) Floor slab (surfaceY + 1 so temple sits ON the island).
         for (int i = 0; i < W; ++i)
