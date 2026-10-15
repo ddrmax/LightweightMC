@@ -218,32 +218,70 @@ namespace PlayerHandler
         // Aether plane's y=-16 sky-void (islands live at y=30..100 with a
         // floating-island underside; anything under -16 has escaped the
         // island chain and would otherwise fall through to the Overworld
-        // surface far below), teleport them back to the Overworld spawn
-        // rather than letting the client free-fall 100+ blocks. Non-Aether
-        // planes (Overworld / Nether / End / Creative / Mining / Twilight)
-        // keep vanilla gravity semantics -- the client drives y on its
-        // side, so we simply log a diagnostic and let the existing
-        // broadcastPacket(0x18) below carry the low y back to the client.
+        // surface far below), teleport them back to the Overworld spawn.
+        //
+        // Critically, NetworkManager::setPlayerWorldAt persists the DEPARTING
+        // plane's session coordinates into player_positions(uuid, oldWorldId)
+        // before loading the arrival plane's row, so if we teleported with
+        // session.y still sitting at y<=-16 that fall position becomes the
+        // authoritative Aether row and the very next /gotor aether restores
+        // the player to y<=-16 -- which re-triggers this hook and locks them
+        // into a teleport loop. So we snap the session to Aether's world
+        // spawn (WorldManager's setWorldSpawn cache, or the plane's
+        // findStandingFeetY on first visit -- which is what setPlayerWorldAt
+        // itself uses for the "no saved row" arrival path) before invoking
+        // setPlayerWorldAt, guaranteeing the departure-plane save records a
+        // safe y. Non-Aether planes keep vanilla gravity semantics -- the
+        // client drives y on its side, so we simply log a diagnostic and let
+        // the existing broadcastPacket(0x18) below carry the low y back to
+        // the client.
         if (positionChanged && session.y <= -16.0)
         {
             const int32_t aetherPlaneId =
                 ConfigManager::getInstance().get<int32_t>("world", "aether-plane-id", 100);
             if (session.worldId == aetherPlaneId)
             {
+                // Resolve the safe Aether respawn point. Prefer an explicit
+                // WorldManager::setWorldSpawn entry (a fork / admin tool may
+                // have pinned Aether's spawn on the world_registry column);
+                // otherwise fall back to the plane's standing-feet scan at
+                // (0,0) so the player lands on whatever island sits beneath
+                // the plane's nominal origin.
+                double spawnX = 0.5, spawnY = 64.0, spawnZ = 0.5;
+                if (!worldManager.getWorldSpawn(aetherPlaneId, spawnX, spawnY, spawnZ))
+                {
+                    auto &aetherStorage = worldManager.getWorldStorageFor(aetherPlaneId);
+                    const int feetY = aetherStorage.findStandingFeetY(0, 0, 100);
+                    spawnX = 0.5;
+                    spawnY = (feetY >= 0) ? static_cast<double>(feetY) + 1.0 : 64.0;
+                    spawnZ = 0.5;
+                }
+                // Re-anchor the session before the plane switch so the
+                // Aether-departure save records the safe spawn. Without this
+                // line the fall position (y<=-16) is written into
+                // player_positions(uuid, aetherPlaneId) and the next /gotor
+                // restores the player into the void -- reproducing this hook
+                // on every re-entry.
+                session.x = spawnX;
+                session.y = spawnY;
+                session.z = spawnZ;
+                session.yaw = 0.0;
+                session.pitch = 0.0;
                 LightweightMC::Core::Logger::info("[AetherVoid] " + session.username +
                                                   " fell below y=-16 on plane id=" +
-                                                  std::to_string(session.worldId) +
-                                                  " (Aether); routing to Overworld spawn via setPlayerWorldId(0)");
+                                                  std::to_string(aetherPlaneId) +
+                                                  " (Aether); re-anchored session to plane spawn (" +
+                                                  std::to_string(spawnX) + ", " +
+                                                  std::to_string(spawnY) + ", " +
+                                                  std::to_string(spawnZ) +
+                                                  ") before routing to Overworld via setPlayerWorldId(0)");
+                // setPlayerWorldAt(hasExplicitPosition=false) now writes the
+                // safe Aether spawn into the departure row, then loads the
+                // player's saved Overworld row (or the Overworld default
+                // spawn) and updates session.worldId / x / y / z / yaw /
+                // pitch accordingly. No additional manual session mutation
+                // is needed after this call.
                 net.setPlayerWorldId(session.username, 0);
-                // Reflect the plane switch on the session so subsequent
-                // chunk-streaming and the 0x18 broadcast below report the
-                // new context (the helper already updated WorldManager's
-                // spawn slot; we mirror the worldId on the session record
-                // so the next movement packet keeps the same view).
-                session.worldId = 0;
-                session.x = 0.0;
-                session.y = 64.0;
-                session.z = 0.0;
                 session.onGround = false;
             }
             else

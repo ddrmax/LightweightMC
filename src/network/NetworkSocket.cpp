@@ -112,7 +112,7 @@ namespace LightweightMC::Network
         // embedded planes so a fork that re-homes one of them does not
         // silently overwrite another's WorldStorage slot.
         const int32_t creativePlaneId = ConfigManager::getInstance().get<int32_t>("world", "creative-plane-id", 99);
-        const int32_t miningPlaneId   = ConfigManager::getInstance().get<int32_t>("world", "mining-plane-id",   98);
+        const int32_t miningPlaneId = ConfigManager::getInstance().get<int32_t>("world", "mining-plane-id", 98);
         const int32_t twilightPlaneId = ConfigManager::getInstance().get<int32_t>("world", "twilight-plane-id", 97);
         const int32_t kReservedVanillaIds[3] = {0, -1, 1};
         for (int32_t candidate : {creativePlaneId, miningPlaneId, twilightPlaneId})
@@ -258,7 +258,7 @@ namespace LightweightMC::Network
             // + Twilight use blue Overworld sky (1 = End's purple sky is
             // reserved for End; sky=1 in the task notes means "custom sky
             // marker" and we translate that to the closest vanilla visual).
-            m_worldManager.setSkyDimension(sp.planeId, 1);
+            m_worldManager.setSkyDimension(sp.planeId, 0);
         }
 
         // m_worlds is an unordered_map, so insertion into an existing key
@@ -346,7 +346,8 @@ namespace LightweightMC::Network
 
         Core::Logger::info("Multiworld ready: pre-1.12 dimension IDs "
                            "(Overworld #0 / Nether #-1 / End #1); 0.0.15 special planes "
-                           "Aether #" + std::to_string(aetherPlaneId) +
+                           "Aether #" +
+                           std::to_string(aetherPlaneId) +
                            " / Creative #" + std::to_string(creativePlaneId) +
                            " / Mining #" + std::to_string(miningPlaneId) +
                            " / Twilight #" + std::to_string(twilightPlaneId) +
