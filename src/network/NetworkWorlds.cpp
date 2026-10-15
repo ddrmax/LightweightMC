@@ -74,6 +74,13 @@ namespace LightweightMC::Network
             return Storage::GenStyle::AETHER;
         if (s == "end")
             return Storage::GenStyle::END;
+        // 0.0.15 phase 4: "flat" is a CLI alias for the CREATIVE generator
+        // (flat infinite canvas: solid dirt/grass column, no ore, trees or
+        // structures). Keeping it a name-only alias rather than a new enum
+        // value avoids a new FlatGen.cpp / CMake target while still giving
+        // admins a semantically obvious name in /world create's usage hint.
+        if (s == "flat")
+            return Storage::GenStyle::CREATIVE;
         if (s == "creative")
             return Storage::GenStyle::CREATIVE;
         if (s == "mining")
@@ -157,7 +164,17 @@ namespace LightweightMC::Network
         return true;
     }
 
-    int32_t NetworkManager::createWorld(const std::string &worldName, const std::string &style)
+    //
+    // 0.0.15 phase 4: the widened signature carries per-plane inventory
+    // policy (Storage::kInventoryPolicy*), forced game mode on entry
+    // (Storage::kForceGameMode*) and explicit world seed (kDefaultWorldSeed
+    // == 0 meaning "inherit from primary/Overworld"). The header declares
+    // the three defaults; the definition here does not repeat them, so
+    // existing two-argument call sites in Server.cpp (which the console
+    // command layer wires to this function) keep compiling and running
+    // with the standard SYNC / INHERIT / inherit behaviour.
+    int32_t NetworkManager::createWorld(const std::string &worldName, const std::string &style,
+                                        int32_t inventoryPolicy, int32_t forceGameMode, int64_t seed)
     {
         if (worldName.empty())
         {
@@ -175,6 +192,36 @@ namespace LightweightMC::Network
             Core::Logger::error("createWorld: unable to register world \"" + worldName +
                                 "\" in world_registry");
             return -1;
+        }
+
+        // 0.0.15 phase 4: propagate --inventory / --force-gamemode / --seed
+        // from the /world create CLI into the world_registry SQLite row and
+        // mirror the policy + game-mode choice into WorldManager so the hot
+        // path (NetworkManager::setPlayerWorldAt / PlayerHandler) sees the
+        // same values the DB just persisted. Only write when the caller
+        // passed a non-default value so plain `/world create foo overworld`
+        // keeps SYNC / INHERIT / inherit-from-Overworld untouched and the
+        // row layout stays byte-identical to the 0.0.15 phase 3 form.
+        if (inventoryPolicy != Storage::kInventoryPolicySync)
+        {
+            if (!m_database.setWorldInventoryPolicy(assignedId, inventoryPolicy))
+                Core::Logger::warn("createWorld: could not persist inventory_policy for id=" +
+                                   std::to_string(assignedId) + " (in-memory mirror still applies this session)");
+            m_worldManager.setInventoryPolicy(assignedId, inventoryPolicy);
+        }
+        if (forceGameMode != Storage::kForceGameModeInherit)
+        {
+            if (!m_database.setWorldForceGameMode(assignedId, forceGameMode))
+                Core::Logger::warn("createWorld: could not persist force_gamemode for id=" +
+                                   std::to_string(assignedId) + " (in-memory mirror still applies this session)");
+            m_worldManager.setForceGameModeOnEntry(assignedId, forceGameMode);
+        }
+        if (seed != Storage::kDefaultWorldSeed)
+        {
+            if (!m_database.setWorldSeed(assignedId, seed))
+                Core::Logger::warn("createWorld: could not persist world_seed for id=" +
+                                   std::to_string(assignedId) +
+                                   " (WorldStorage::setWorldSeed below still pins this session's seed)");
         }
 
         // 2) Allocate a fresh WorldStorage instance using a per-world SQLite
@@ -214,11 +261,16 @@ namespace LightweightMC::Network
         // Mirror the current server's Overworld seed so a custom plane sits in
         // the same LCG stream as the primary plane. Preset from the requested
         // style; unknown style names fall back to OVERWORLD (see styleFromName).
+        // 0.0.15 phase 4: when the caller supplied an explicit --seed, prefer
+        // it over the Overworld's value so a custom plane (e.g. a --inventory
+        // separate flat sandbox) can pin its own deterministic terrain.
         const Storage::WorldStorage *primary = nullptr;
         auto overIt = m_worlds.find(0);
         if (overIt != m_worlds.end())
             primary = overIt->second.get();
-        storage->setWorldSeed(primary ? primary->getWorldSeed() : 0ULL);
+        storage->setWorldSeed(seed != Storage::kDefaultWorldSeed
+                                  ? static_cast<std::uint64_t>(seed)
+                                  : (primary ? primary->getWorldSeed() : 0ULL));
         storage->setGenerationStyle(styleFromName(normalizedStyle));
         // storage->pregenerateWorld(12);
 

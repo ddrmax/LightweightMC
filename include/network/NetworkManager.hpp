@@ -104,8 +104,19 @@ namespace LightweightMC::Network
         // "Aether" slot belongs to the special-dimension config; see the
         // fixed 0/-1/1 assignments for Overworld/Nether/End).
         // The `style` string maps to a Storage::GenStyle --
-        // "overworld" / "superflat" / "test-grid" / "nether" / "aether" / "end".
-        int32_t createWorld(const std::string &worldName, const std::string &style);
+        // "overworld" / "superflat" / "test-grid" / "nether" / "aether" / "end"
+        // / "creative" / "mining" / "twilight" / "flat" (0.0.15 phase 4 alias
+        // for "creative").
+        //
+        // Phase 4 widens the signature so /world create can also carry the
+        // per-plane inventory policy, forced game mode and world seed chosen
+        // at creation time. Defaults preserve the pre-0.0.15 follow-up
+        // behaviour (SYNC / INHERIT / inherit-from-primary) so the older
+        // two-argument call sites keep working without changes.
+        int32_t createWorld(const std::string &worldName, const std::string &style,
+                            int32_t inventoryPolicy = Storage::kInventoryPolicySync,
+                            int32_t forceGameMode = Storage::kForceGameModeInherit,
+                            int64_t seed = Storage::kDefaultWorldSeed);
 
         // Looks up an existing world by registered name. Returns its worldId
         // (Overworld=0, Nether=-1, End=1, Aether=100, custom>=101) or the

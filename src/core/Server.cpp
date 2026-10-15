@@ -224,9 +224,15 @@ namespace LightweightMC::Core
         };
         // /world create <name> <style>: allocate a fresh >=100 id in the
         // world_registry SQLite table and open a per-plane SQLite file.
-        consoleCtx.createWorld = [this](const std::string &worldName, const std::string &style) -> int32_t
+        // 0.0.15 phase 4 widens the closure to carry --inventory /
+        // --force-gamemode / --seed from the console command handler
+        // through to NetworkManager::createWorld; the /world create
+        // sub-branch in WorldCommands.hpp always supplies all five
+        // arguments so the closure just forwards them.
+        consoleCtx.createWorld = [this](const std::string &worldName, const std::string &style,
+                                        int32_t inventoryPolicy, int32_t forceGameMode, int64_t seed) -> int32_t
         {
-            return m_network.createWorld(worldName, style);
+            return m_network.createWorld(worldName, style, inventoryPolicy, forceGameMode, seed);
         };
         consoleCtx.listWorlds = [this]() -> std::vector<std::string>
         {
@@ -360,9 +366,10 @@ namespace LightweightMC::Core
                     return false;
                 return network->setPlayerWorldId(playerName, id);
             };
-            consoleCtx.createWorld = [network](const std::string &worldName, const std::string &style) -> int32_t
+            consoleCtx.createWorld = [network](const std::string &worldName, const std::string &style,
+                                               int32_t inventoryPolicy, int32_t forceGameMode, int64_t seed) -> int32_t
             {
-                return network->createWorld(worldName, style);
+                return network->createWorld(worldName, style, inventoryPolicy, forceGameMode, seed);
             };
             consoleCtx.listWorlds = [network]() -> std::vector<std::string>
             {

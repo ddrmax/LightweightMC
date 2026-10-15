@@ -96,9 +96,17 @@ namespace PlayerHandler
                     return false;
                 return net.setPlayerWorldId(playerName, id);
             };
-            ctx.createWorld = [&net](const std::string &worldName, const std::string &style) -> int32_t
+            // 0.0.15 phase 4: widen the in-game admin chat closure to match
+            // CommandContext::createWorld's new five-argument shape so a
+            // `/world create foo flat --inventory separate --force-gamemode
+            // creative` line sent in-game reaches the same DB setters +
+            // WorldManager mirrors that the console-thread closures in
+            // Server.cpp wire. WorldCommands.hpp always supplies all five
+            // arguments, so the closure just forwards them.
+            ctx.createWorld = [&net](const std::string &worldName, const std::string &style,
+                                     int32_t inventoryPolicy, int32_t forceGameMode, int64_t seed) -> int32_t
             {
-                return net.createWorld(worldName, style);
+                return net.createWorld(worldName, style, inventoryPolicy, forceGameMode, seed);
             };
             ctx.listWorlds = [&net]() -> std::vector<std::string>
             {

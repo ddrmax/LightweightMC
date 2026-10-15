@@ -3,6 +3,12 @@
 #include "core/CommandManager.hpp"
 #include "world/MC17BlockIds.hpp"
 #include "core/Logger.hpp"
+// 0.0.15 phase 4: /world create's --inventory / --force-gamemode flags need
+// the Storage::kInventoryPolicy* / Storage::kForceGameMode* constexprs and
+// Storage::kDefaultWorldSeed so the parser maps user tokens to the same
+// sentinels NetworkSocket.cpp's resolveInventoryPolicy / resolveGameMode
+// lambdas emit for the [world] aether-* boot pass.
+#include "storage/Database.hpp"
 
 #include <array>
 #include <cctype>
@@ -695,7 +701,11 @@ public:
     }
     std::string getUsage() const override
     {
-        return "/world <list|create <name> <style>|info <name>>";
+        // 0.0.15 phase 4: /world create grew --inventory / --force-gamemode /
+        // --seed flags; the shorthand here points the operator to the full
+        // usage string emitted by the `sub == "create"` branch's own Usage
+        // reply (which spells out the accepted value sets).
+        return "/world <list|create <name> <style> [--inventory ...] [--force-gamemode ...] [--seed ...]|info <name>>";
     }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 3; }
@@ -730,14 +740,114 @@ public:
         {
             if (args.size() < 3)
             {
-                ctx.reply("Usage: /world create <name> <style> (style = overworld|superflat|test-grid|nether|aether)");
+                ctx.reply("Usage: /world create <name> <style> "
+                          "[--inventory <standard|separate|restricted>] "
+                          "[--force-gamemode <survival|creative|adventure|spectator|none>] "
+                          "[--seed <int>]  (style = overworld|superflat|test-grid|nether|aether|end|flat|creative|mining|twilight)");
                 return;
             }
-            const int32_t id = ctx.createWorld(args[1], args[2]);
+            // 0.0.15 phase 4: parse optional --inventory / --force-gamemode
+            // / --seed flags out of args[3..]. Unknown tokens reply with a
+            // targeted message and abort; the two name->enum lambdas
+            // mirror NetworkSocket.cpp's resolveInventoryPolicy /
+            // resolveGameMode resolvers so the CLI vocabulary stays
+            // identical between the boot pass and the runtime flag.
+            //
+            // Fully-qualify `LightweightMC::Storage::` because WorldCommand
+            // is declared at global scope (the file's namespace block at
+            // lines 22-141 only covers the file's `detail` helpers), so
+            // the class body sits outside the enclosing LightweightMC
+            // namespace that would otherwise make `Storage::` reachable by
+            // ordinary unqualified namespace-name lookup.
+            auto resolveInventoryFlag = [](const std::string &raw, int32_t &out) -> bool
+            {
+                if (raw == "separate")   { out = LightweightMC::Storage::kInventoryPolicySeparate;   return true; }
+                if (raw == "restricted") { out = LightweightMC::Storage::kInventoryPolicyRestricted; return true; }
+                if (raw == "standard")   { out = LightweightMC::Storage::kInventoryPolicySync;       return true; }
+                return false;
+            };
+            auto resolveGameModeFlag = [](const std::string &raw, int32_t &out) -> bool
+            {
+                if (raw == "survival")  { out = LightweightMC::Storage::kForceGameModeSurvival;  return true; }
+                if (raw == "creative")  { out = LightweightMC::Storage::kForceGameModeCreative;  return true; }
+                if (raw == "adventure") { out = LightweightMC::Storage::kForceGameModeAdventure; return true; }
+                if (raw == "spectator") { out = LightweightMC::Storage::kForceGameModeSpectator; return true; }
+                if (raw == "none")      { out = LightweightMC::Storage::kForceGameModeInherit;   return true; }
+                return false;
+            };
+            int32_t inventoryPolicy = LightweightMC::Storage::kInventoryPolicySync;
+            int32_t forceGameMode = LightweightMC::Storage::kForceGameModeInherit;
+            int64_t seed = LightweightMC::Storage::kDefaultWorldSeed;
+            for (std::size_t i = 3; i < args.size(); ++i)
+            {
+                const std::string &tok = args[i];
+                if (tok != "--inventory" && tok != "--force-gamemode" && tok != "--seed")
+                {
+                    ctx.reply("Unknown token '" + tok + "' after <style>. Use --inventory / --force-gamemode / --seed.");
+                    return;
+                }
+                if (i + 1 >= args.size())
+                {
+                    ctx.reply("Missing value for flag '" + tok + "'.");
+                    return;
+                }
+                const std::string &val = args[++i];
+                if (tok == "--inventory")
+                {
+                    if (!resolveInventoryFlag(val, inventoryPolicy))
+                    {
+                        ctx.reply("Unknown --inventory value '" + val + "' (expected standard|separate|restricted).");
+                        return;
+                    }
+                }
+                else if (tok == "--force-gamemode")
+                {
+                    if (!resolveGameModeFlag(val, forceGameMode))
+                    {
+                        ctx.reply("Unknown --force-gamemode value '" + val + "' (expected survival|creative|adventure|spectator|none).");
+                        return;
+                    }
+                }
+                else
+                {
+                    std::istringstream iss(val);
+                    long long parsed = 0;
+                    if (!(iss >> parsed))
+                    {
+                        ctx.reply("Unknown --seed value '" + val + "' (expected an integer).");
+                        return;
+                    }
+                    std::string leftover;
+                    if (iss >> leftover)
+                    {
+                        ctx.reply("Unknown --seed value '" + val + "' (expected an integer).");
+                        return;
+                    }
+                    seed = static_cast<int64_t>(parsed);
+                }
+            }
+            const int32_t id = ctx.createWorld(args[1], args[2],
+                                               inventoryPolicy, forceGameMode, seed);
             if (id < 0)
+            {
                 ctx.reply("Could not create plane '" + args[1] + "'.");
-            else
-                ctx.reply("Created plane '" + args[1] + "' as id=" + std::to_string(id) + " style=" + args[2]);
+                return;
+            }
+            std::string policyTag = "standard";
+            if (inventoryPolicy == LightweightMC::Storage::kInventoryPolicySeparate)   policyTag = "separate";
+            else if (inventoryPolicy == LightweightMC::Storage::kInventoryPolicyRestricted) policyTag = "restricted";
+            std::string forceTag = "inherit";
+            if (forceGameMode == LightweightMC::Storage::kForceGameModeSurvival)   forceTag = "survival";
+            else if (forceGameMode == LightweightMC::Storage::kForceGameModeCreative)   forceTag = "creative";
+            else if (forceGameMode == LightweightMC::Storage::kForceGameModeAdventure) forceTag = "adventure";
+            else if (forceGameMode == LightweightMC::Storage::kForceGameModeSpectator) forceTag = "spectator";
+            ctx.reply("Created plane '" + args[1] + "' as id=" + std::to_string(id) +
+                      " style=" + args[2] +
+                      " inventory=" + policyTag +
+                      " force-gamemode=" + forceTag +
+                      (seed != LightweightMC::Storage::kDefaultWorldSeed
+                           ? " seed=" + std::to_string(seed)
+                           : std::string(" seed=inherit")));
         }
         else if (sub == "info")
         {

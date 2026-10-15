@@ -116,8 +116,17 @@ struct CommandContext
     // (an unordered_map keyed by worldId so negative pre-1.12 IDs like
     // Nether's -1 do not index out of bounds). Returns the assigned
     // worldId or -1 on failure.
-    std::function<int32_t(const std::string &worldName, const std::string &style)> createWorld =
-        [](const std::string &, const std::string &) -> int32_t { return -1; };
+    //
+    // 0.0.15 phase 4 widens the signature to also carry the plane's
+    // inventory policy (Storage::kInventoryPolicy* sentinel), forced game
+    // mode on entry (Storage::kForceGameMode* sentinel) and explicit world
+    // seed (0 == kDefaultWorldSeed meaning "inherit from Overworld").
+    // WorldCommands.hpp's /world create handler always passes all five
+    // arguments; the console-thread closures in Server.cpp forward them
+    // straight through to NetworkManager::createWorld.
+    std::function<int32_t(const std::string &worldName, const std::string &style,
+                          int32_t inventoryPolicy, int32_t forceGameMode, int64_t seed)> createWorld =
+        [](const std::string &, const std::string &, int32_t, int32_t, int64_t) -> int32_t { return -1; };
 
     // Optional hook used by /world list / /gotor to enumerate registered
     // planes. Server-side implementations typically return "overworld",

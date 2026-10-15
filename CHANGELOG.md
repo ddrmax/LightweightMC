@@ -235,6 +235,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
   already in place, so the CLI follow-up only needs to route the flags
   through them.
 
+### Added (world-control phase 4 — 2026-10-15)
+
+- **`/world create` CLI flags for per-plane policy, mode and seed.**
+  Extends `/world create <name> <style>` with three optional flags that
+  opt an individual custom plane into the same 0.0.15 inventory-policy
+  / force-gamemode / world-seed columns phase 2/3 wired at boot time:
+  - `--inventory <standard|separate|restricted>` routes the plane's
+    `inventory_policy` column via `Database::setWorldInventoryPolicy`
+    and mirrors into `WorldManager::setInventoryPolicy` so
+    `setPlayerWorldAt` / `loadPlayerData` / `savePlayerState` pick the
+    right inventory blob slot on the very next portal transition.
+  - `--force-gamemode <survival|creative|adventure|spectator|none>`
+    writes the plane's `force_gamemode` column via
+    `Database::setWorldForceGameMode` and mirrors into
+    `WorldManager::setForceGameModeOnEntry` so entering the plane snaps
+    `PlayerSession::gamemode` to the pinned value.
+  - `--seed <int>` writes the plane's `world_seed` column via
+    `Database::setWorldSeed` and pins the fresh `WorldStorage::
+    setWorldSeed` to the caller's value instead of inheriting the
+    Overworld's LCG stream.
+  Omitting any flag preserves the pre-phase-4 defaults (SYNC / INHERIT /
+  inherit-from-Overworld) so the row layout stays byte-identical to the
+  phase 3 form; only rows whose caller passed a non-default value pick
+  up the extra writes.
+
+- **`flat` style alias for `Storage::GenStyle::CREATIVE`** in
+  `NetworkWorlds.cpp::styleFromName` — an infinite flat canvas: solid
+  dirt/grass column, no ore, trees or structures (the intended
+  "sandbox" plane shape admins actually want to spell when pairing a
+  `--inventory separate` / `--force-gamemode creative` combo). The
+  alias keeps `Storage::GenStyle` untouched so no new `FlatGen.cpp` /
+  CMake target is required; `styleFromName("flat") ==
+  styleFromName("creative")`.
+
+- **Widened `NetworkManager::createWorld` + `CommandContext::createWorld`
+  signatures** to carry `(worldName, style, inventoryPolicy, forceGameMode,
+  seed)`. `NetworkManager.hpp` declares the three trailing defaults
+  (`Storage::kInventoryPolicySync`, `Storage::kForceGameModeInherit`,
+  `Storage::kDefaultWorldSeed`) so the widened impl in
+  `NetworkWorlds.cpp` keeps the older two-argument call-site shape
+  compiling; `CommandContext::createWorld` is a `std::function<>` with
+  no default arguments, so the three wiring sites
+  (`src/core/Server.cpp:232` console boot closure, `Server.cpp:369`
+  console-thread closure, `src/network/handlers/play/PlayerHandler.cpp:106`
+  in-game admin chat closure) forward all five arguments straight through.
+
 ---
 ## [0.0.14] - 2026-10-13
 
