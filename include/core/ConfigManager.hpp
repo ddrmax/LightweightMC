@@ -164,6 +164,38 @@ private:
         // even when the player was on survival elsewhere.
         emit("world", "aether-inventory-policy", "standard");
         emit("world", "aether-force-gamemode", "none");
+
+        // 0.0.15 embedded planes: Creative (id 99), Mining (id 98),
+        // Twilight (id 97). These follow the same special-dimension pattern
+        // as Aether -- hard-coded default ids in the 100-series band so
+        // Database::registerWorld's `max(id) + 1` allocator skips them when
+        // /world create allocates 101+, and per-plane *-active /
+        // *-plane-id / *-inventory-policy / *-force-gamemode keys mirroring
+        // the aether-* set.
+        //
+        // Creative is a flat buildable sandbox that mirrors the overworld's
+        // Perlin height (STONE sub-surface so redstone dust reads clearly
+        // against the ground, GRASS_BLOCK top, no ore/trees/caves/
+        // structures) and defaults to SEPARATE inventory + forced
+        // CREATIVE game mode so players never leak their mining loot into
+        // a sandbox. Mining is the resource-dense plane (overworld-shape
+        // terrain with a pinned PLAINS surface, 20x vanilla ore density
+        // in 10x clusters, no trees/caves/structures). Twilight is the
+        // giant-tree forest (flat PLAINS surface + 5 mixed-species giants
+        // per chunk via combined17(LOG/LOG2, meta) + combined17(LEAVES/
+        // LEAVES2, meta) so trunk and canopy always share a species).
+        emit("world", "creative-active", "true");
+        emit("world", "creative-plane-id", "99");
+        emit("world", "creative-inventory-policy", "separate");
+        emit("world", "creative-force-gamemode", "creative");
+        emit("world", "mining-active", "true");
+        emit("world", "mining-plane-id", "98");
+        emit("world", "mining-inventory-policy", "standard");
+        emit("world", "mining-force-gamemode", "none");
+        emit("world", "twilight-active", "true");
+        emit("world", "twilight-plane-id", "97");
+        emit("world", "twilight-inventory-policy", "standard");
+        emit("world", "twilight-force-gamemode", "none");
     }
 
     // Overwrite every canonical key with its default. Used when the config

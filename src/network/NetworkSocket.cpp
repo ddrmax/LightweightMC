@@ -105,6 +105,40 @@ namespace LightweightMC::Network
             return false;
         }
 
+        // 0.0.15 embedded planes: Creative (default 99), Mining (98),
+        // Twilight (97). Same shape as the aether-* keys above. Reject any
+        // collision with the vanilla pre-1.12 slots or with the Aether
+        // special-dimension id; also reject duplicates across the three
+        // embedded planes so a fork that re-homes one of them does not
+        // silently overwrite another's WorldStorage slot.
+        const int32_t creativePlaneId = ConfigManager::getInstance().get<int32_t>("world", "creative-plane-id", 99);
+        const int32_t miningPlaneId   = ConfigManager::getInstance().get<int32_t>("world", "mining-plane-id",   98);
+        const int32_t twilightPlaneId = ConfigManager::getInstance().get<int32_t>("world", "twilight-plane-id", 97);
+        const int32_t kReservedVanillaIds[3] = {0, -1, 1};
+        for (int32_t candidate : {creativePlaneId, miningPlaneId, twilightPlaneId})
+        {
+            for (int32_t reserved : kReservedVanillaIds)
+            {
+                if (candidate == reserved)
+                {
+                    Core::Logger::error("world.[creative|mining|twilight]-plane-id collides with a vanilla "
+                                        "pre-1.12 slot (0 / -1 / 1); refusing to start.");
+                    return false;
+                }
+            }
+            if (candidate == aetherPlaneId)
+            {
+                Core::Logger::error("world.[creative|mining|twilight]-plane-id collides with world.aether-plane-id; "
+                                    "refusing to start.");
+                return false;
+            }
+        }
+        if (creativePlaneId == miningPlaneId || miningPlaneId == twilightPlaneId || creativePlaneId == twilightPlaneId)
+        {
+            Core::Logger::error("world.[creative|mining|twilight]-plane-id values must be distinct; refusing to start.");
+            return false;
+        }
+
         // Register the standard planes and the Aether special dimension as
         // fixed IDs 0 / -1 / 1 / <aether-plane-id> bypassing the >=101 custom
         // allocator path. setWorldById is idempotent so a restart with
@@ -115,11 +149,14 @@ namespace LightweightMC::Network
             const char *name;
             const char *style;
         };
-        const StdPlane kStandardPlanes[4] = {
+        const StdPlane kStandardPlanes[7] = {
             {0, "overworld", "overworld"},
             {-1, "nether", "nether"},
             {1, "end", "end"},
             {aetherPlaneId, "aether", "aether"},
+            {creativePlaneId, "creative", "creative"},
+            {miningPlaneId, "mining", "mining"},
+            {twilightPlaneId, "twilight", "twilight"},
         };
         for (const auto &plane : kStandardPlanes)
         {
@@ -142,60 +179,87 @@ namespace LightweightMC::Network
             return false;
         }
 
-        // Seed the Aether special-dimension inventory policy + forced game
-        // mode from server.properties so switching onto Aether either
-        // shares the standard Minecraft inventory chain (default) or
-        // gets its own SEPARATE / RESTRICTED slot per the plane author's
-        // intent. Vanilla Overworld / Nether / End stay on their CREATE
-        // defaults (SYNC / INHERIT); future custom planes registered at
-        // >=101 via /world create can be opted in via the WorldManager
-        // setters in a follow-up (the DB-level setters are also wired
-        // through so a fork can persist policies across restarts).
-        const std::string aetherInvPolicy = ConfigManager::getInstance().getString(
-            "world", "aether-inventory-policy", "standard");
-        int32_t aetherPolicy = Storage::kInventoryPolicySync;
-        if (aetherInvPolicy == "separate")
-            aetherPolicy = Storage::kInventoryPolicySeparate;
-        else if (aetherInvPolicy == "restricted")
-            aetherPolicy = Storage::kInventoryPolicyRestricted;
-        else if (aetherInvPolicy != "standard")
+        // Seed every special-dimension plane's inventory policy + forced game
+        // mode from server.properties so switching onto that plane either
+        // shares the standard Minecraft inventory chain (default) or gets
+        // its own SEPARATE / RESTRICTED slot per the plane author's intent.
+        // Vanilla Overworld / Nether / End stay on their CREATE defaults
+        // (SYNC / INHERIT); Aether, Creative, Mining, Twilight all pull
+        // their own key. The three embedded 0.0.15 planes use the same
+        // mapping table as Aether (standard / separate / restricted; none /
+        // survival / creative / adventure / spectator) so a fork can
+        // persist policies across restarts via world_registry columns.
+        struct SpecialPlane
         {
-            Core::Logger::warn("[NetworkManager] Unknown world.aether-inventory-policy, "
-                               "falling back to standard (SYNC)");
-        }
+            int32_t planeId;
+            const char *keyName;
+        };
+        const SpecialPlane specialPlanes[4] = {
+            {aetherPlaneId, "aether"},
+            {creativePlaneId, "creative"},
+            {miningPlaneId, "mining"},
+            {twilightPlaneId, "twilight"},
+        };
 
-        const std::string aetherGm = ConfigManager::getInstance().getString(
-            "world", "aether-force-gamemode", "none");
-        int32_t aetherForceGm = Storage::kForceGameModeInherit;
-        if (aetherGm == "survival")
-            aetherForceGm = Storage::kForceGameModeSurvival;
-        else if (aetherGm == "creative")
-            aetherForceGm = Storage::kForceGameModeCreative;
-        else if (aetherGm == "adventure")
-            aetherForceGm = Storage::kForceGameModeAdventure;
-        else if (aetherGm == "spectator")
-            aetherForceGm = Storage::kForceGameModeSpectator;
-        else if (aetherGm != "none")
+        auto resolveInventoryPolicy = [](const std::string &raw, const char *keyName) -> int32_t
         {
-            Core::Logger::warn("[NetworkManager] Unknown world.aether-force-gamemode, "
-                               "falling back to none (INHERIT)");
+            if (raw == "separate")
+                return Storage::kInventoryPolicySeparate;
+            if (raw == "restricted")
+                return Storage::kInventoryPolicyRestricted;
+            if (raw == "standard")
+                return Storage::kInventoryPolicySync;
+            Core::Logger::warn(std::string("[NetworkManager] Unknown world.") + keyName +
+                               "-inventory-policy, falling back to standard (SYNC)");
+            return Storage::kInventoryPolicySync;
+        };
+        auto resolveGameMode = [](const std::string &raw, const char *keyName) -> int32_t
+        {
+            if (raw == "survival")
+                return Storage::kForceGameModeSurvival;
+            if (raw == "creative")
+                return Storage::kForceGameModeCreative;
+            if (raw == "adventure")
+                return Storage::kForceGameModeAdventure;
+            if (raw == "spectator")
+                return Storage::kForceGameModeSpectator;
+            if (raw == "none")
+                return Storage::kForceGameModeInherit;
+            Core::Logger::warn(std::string("[NetworkManager] Unknown world.") + keyName +
+                               "-force-gamemode, falling back to none (INHERIT)");
+            return Storage::kForceGameModeInherit;
+        };
+
+        for (const auto &sp : specialPlanes)
+        {
+            const std::string invRaw = ConfigManager::getInstance().getString(
+                "world", std::string(sp.keyName) + "-inventory-policy", "standard");
+            const std::string gmRaw = ConfigManager::getInstance().getString(
+                "world", std::string(sp.keyName) + "-force-gamemode", "none");
+            const int32_t policy = resolveInventoryPolicy(invRaw, sp.keyName);
+            const int32_t gm = resolveGameMode(gmRaw, sp.keyName);
+            if (!m_database.setWorldInventoryPolicy(sp.planeId, policy))
+                Core::Logger::warn(std::string("world.") + sp.keyName +
+                                   "-inventory-policy could not be persisted to world_registry for planeId=" +
+                                   std::to_string(sp.planeId) +
+                                   " (in-memory WorldManager policy still applies this session)");
+            if (!m_database.setWorldForceGameMode(sp.planeId, gm))
+                Core::Logger::warn(std::string("world.") + sp.keyName +
+                                   "-force-gamemode could not be persisted to world_registry for planeId=" +
+                                   std::to_string(sp.planeId) +
+                                   " (in-memory WorldManager policy still applies this session)");
+            m_worldManager.setInventoryPolicy(sp.planeId, policy);
+            m_worldManager.setForceGameModeOnEntry(sp.planeId, gm);
+
+            // 0.0.15 sky hint. Vanilla clients render exactly three skies
+            // (Overworld 0 / End 1 / Nether -1); every 0.0.15 special plane
+            // pairs with one of them so /gotor + respawn packets send a
+            // client-recognisable dimension id. Aether + Creative + Mining
+            // + Twilight use blue Overworld sky (1 = End's purple sky is
+            // reserved for End; sky=1 in the task notes means "custom sky
+            // marker" and we translate that to the closest vanilla visual).
+            m_worldManager.setSkyDimension(sp.planeId, 1);
         }
-
-        if (!m_database.setWorldInventoryPolicy(aetherPlaneId, aetherPolicy))
-            Core::Logger::warn("world.aether-inventory-policy could not be persisted to world_registry "
-                               "for aetherPlaneId=" + std::to_string(aetherPlaneId) +
-                               " (in-memory WorldManager policy still applies for this session)");
-        if (!m_database.setWorldForceGameMode(aetherPlaneId, aetherForceGm))
-            Core::Logger::warn("world.aether-force-gamemode could not be persisted to world_registry "
-                               "for aetherPlaneId=" + std::to_string(aetherPlaneId) +
-                               " (in-memory WorldManager policy still applies for this session)");
-
-        // Mirror the SQLite policy onto WorldManager's hot-path cache so
-        // setPlayerWorldAt and login restore use the same value on the
-        // first session after boot; Database::getWorldInventoryPolicy is
-        // the fallback for anything not in the cache.
-        m_worldManager.setInventoryPolicy(aetherPlaneId, aetherPolicy);
-        m_worldManager.setForceGameModeOnEntry(aetherPlaneId, aetherForceGm);
 
         // m_worlds is an unordered_map, so insertion into an existing key
         // does not invalidate references held elsewhere; no reserve() is
@@ -226,6 +290,9 @@ namespace LightweightMC::Network
         const bool netherActive = ConfigManager::getInstance().getBool("world", "nether-active", true);
         const bool endActive = ConfigManager::getInstance().getBool("world", "end-active", true);
         const bool aetherActive = ConfigManager::getInstance().getBool("world", "aether-active", true);
+        const bool creativeActive = ConfigManager::getInstance().getBool("world", "creative-active", true);
+        const bool miningActive = ConfigManager::getInstance().getBool("world", "mining-active", true);
+        const bool twilightActive = ConfigManager::getInstance().getBool("world", "twilight-active", true);
 
         if (!overworldActive)
         {
@@ -241,11 +308,14 @@ namespace LightweightMC::Network
             Storage::GenStyle style;
             bool active;
         };
-        const PlaneSpec planeSpecs[4] = {
+        const PlaneSpec planeSpecs[7] = {
             {0, "world.db", overworldStyle, overworldActive},
             {-1, "world-nether.db", Storage::GenStyle::NETHER, netherActive},
             {1, "world-end.db", Storage::GenStyle::END, endActive},
             {aetherPlaneId, "world-aether.db", Storage::GenStyle::AETHER, aetherActive},
+            {creativePlaneId, "world-creative.db", Storage::GenStyle::CREATIVE, creativeActive},
+            {miningPlaneId, "world-mining.db", Storage::GenStyle::MINING, miningActive},
+            {twilightPlaneId, "world-twilight.db", Storage::GenStyle::TWILIGHT, twilightActive},
         };
 
         for (const auto &spec : planeSpecs)
@@ -275,8 +345,13 @@ namespace LightweightMC::Network
                  kv.second->pregenerateWorld(20);*/
 
         Core::Logger::info("Multiworld ready: pre-1.12 dimension IDs "
-                           "(Overworld #0 / Nether #-1 / End #1 / Aether #" + std::to_string(aetherPlaneId) +
-                           " special per [world] aether-plane-id); custom worlds via /world create allocate IDs 101+");
+                           "(Overworld #0 / Nether #-1 / End #1); 0.0.15 special planes "
+                           "Aether #" + std::to_string(aetherPlaneId) +
+                           " / Creative #" + std::to_string(creativePlaneId) +
+                           " / Mining #" + std::to_string(miningPlaneId) +
+                           " / Twilight #" + std::to_string(twilightPlaneId) +
+                           " each reserved via their [world] *-plane-id key; "
+                           "custom worlds via /world create allocate IDs above the max reserved id");
 
         m_serverFd = socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;

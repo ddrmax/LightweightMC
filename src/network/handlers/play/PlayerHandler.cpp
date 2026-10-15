@@ -4,6 +4,7 @@
 #include "managers/PlayerManager.hpp"
 #include "network/AntiScan.hpp"
 #include "core/Logger.hpp"
+#include "core/ConfigManager.hpp"
 #include <sstream>
 #include <algorithm>
 #include <cmath>
@@ -211,6 +212,47 @@ namespace PlayerHandler
         if (packetId == 0x03 || packetId == 0x04 || packetId == 0x05 || packetId == 0x06)
         {
             session.onGround = (LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd) != 0);
+        }
+
+        // 0.0.15 Aether void-fall hook: if the player has dropped below the
+        // Aether plane's y=-16 sky-void (islands live at y=30..100 with a
+        // floating-island underside; anything under -16 has escaped the
+        // island chain and would otherwise fall through to the Overworld
+        // surface far below), teleport them back to the Overworld spawn
+        // rather than letting the client free-fall 100+ blocks. Non-Aether
+        // planes (Overworld / Nether / End / Creative / Mining / Twilight)
+        // keep vanilla gravity semantics -- the client drives y on its
+        // side, so we simply log a diagnostic and let the existing
+        // broadcastPacket(0x18) below carry the low y back to the client.
+        if (positionChanged && session.y <= -16.0)
+        {
+            const int32_t aetherPlaneId =
+                ConfigManager::getInstance().get<int32_t>("world", "aether-plane-id", 100);
+            if (session.worldId == aetherPlaneId)
+            {
+                LightweightMC::Core::Logger::info("[AetherVoid] " + session.username +
+                                                  " fell below y=-16 on plane id=" +
+                                                  std::to_string(session.worldId) +
+                                                  " (Aether); routing to Overworld spawn via setPlayerWorldId(0)");
+                net.setPlayerWorldId(session.username, 0);
+                // Reflect the plane switch on the session so subsequent
+                // chunk-streaming and the 0x18 broadcast below report the
+                // new context (the helper already updated WorldManager's
+                // spawn slot; we mirror the worldId on the session record
+                // so the next movement packet keeps the same view).
+                session.worldId = 0;
+                session.x = 0.0;
+                session.y = 64.0;
+                session.z = 0.0;
+                session.onGround = false;
+            }
+            else
+            {
+                LightweightMC::Core::Logger::info("[Fall] " + session.username +
+                                                  " below y=-16 on plane id=" +
+                                                  std::to_string(session.worldId) +
+                                                  "; letting vanilla gravity handle the descent");
+            }
         }
 
         // Mise à jour des chunks SEULEMENT si la position X/Z a réellement changé
