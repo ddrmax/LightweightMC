@@ -123,6 +123,17 @@ namespace LightweightMC
             void aetherChunk(int cx, int cz, std::uint64_t seed, std::uint16_t *blocks);
             void endChunk(int cx, int cz, std::uint64_t seed, std::uint16_t *blocks);
 
+            // ---- New embedded-world chunk generators (0.0.15) -----------------------
+            // Backing the three new reserved-band dimensions creative=99 /
+            // mining=98 / twilight=97. Each takes the same chunk-buffer
+            // contract as the existing plane generators (24 sections x 4096
+            // cells in the (absY - MIN_WORLD_Y) * 256 + z * 16 + x layout)
+            // and mixes `seed` into its LCG stream so a fixed world-seed
+            // replays identically across server restarts.
+            void creativeChunk(int cx, int cz, std::uint64_t seed, std::uint16_t *blocks);
+            void miningChunk(int cx, int cz, std::uint64_t seed, std::uint16_t *blocks);
+            void twilightChunk(int cx, int cz, std::uint64_t seed, std::uint16_t *blocks);
+
         } // namespace Gen
     } // namespace Storage
 } // namespace LightweightMC

@@ -58,10 +58,24 @@ namespace LightweightMC::Storage
         TEST_GRID,  // Deterministic block grid for protocol validation (see /testpackets)
         NETHER,     // Underworld: solid stone ceiling + carved caverns + lava.
         AETHER,     // Sky world: floating islands, slime-trunk trees, void gap.
-        END         // "The End" plane (pre-1.12 id = 1): obsidian monoliths
+        END,        // "The End" plane (pre-1.12 id = 1): obsidian monoliths
                     // over a bedrock floor, redstone-brick pillars, and a
                     // void ceiling -- the palette the client shows when the
                     // player crosses into the deepest vanilla dimension.
+        CREATIVE,   // Flat infinite canvas: solid dirt/grass column from y=0
+                    // up to y=127 with no ore, trees, or structures. Backs the
+                    // "creative" embedded world (id 99 in the reserved special-
+                    // dimension band).
+        MINING,     // Overworld-shaped heightmap pinned to a PLAINS surface
+                    // (grass over dirt over stone over bedrock) with 20× the
+                    // vanilla ore density and 10× cluster size; no trees, no
+                    // structures, no caves. Backs the "mining" embedded world
+                    // (id 98 in the reserved band).
+        TWILIGHT    // Twilight-forrest plane: forest-floor surface + 5×
+                    // plantGiantTree per column (10..50 tall, 4x4 trunks,
+                    // mixed WOOD/LEAVES/LEAVES2 species) with no ore,
+                    // no structures. Backs the "twilight" embedded world
+                    // (id 97 in the reserved band).
     };
 
 

@@ -116,6 +116,24 @@ namespace LightweightMC::Storage
                           reinterpret_cast<uint16_t *>(rawBuffer.data()));
             return;
         }
+        if (style == GenStyle::CREATIVE)
+        {
+            Gen::creativeChunk(chunkX, chunkZ, worldSeed,
+                               reinterpret_cast<uint16_t *>(rawBuffer.data()));
+            return;
+        }
+        if (style == GenStyle::MINING)
+        {
+            Gen::miningChunk(chunkX, chunkZ, worldSeed,
+                             reinterpret_cast<uint16_t *>(rawBuffer.data()));
+            return;
+        }
+        if (style == GenStyle::TWILIGHT)
+        {
+            Gen::twilightChunk(chunkX, chunkZ, worldSeed,
+                               reinterpret_cast<uint16_t *>(rawBuffer.data()));
+            return;
+        }
 
         uint16_t *blocksArray = reinterpret_cast<uint16_t *>(rawBuffer.data());
         // Maps an absolute world Y to the flat index inside the full-chunk buffer.

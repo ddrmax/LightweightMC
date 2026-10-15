@@ -74,6 +74,12 @@ namespace LightweightMC::Network
             return Storage::GenStyle::AETHER;
         if (s == "end")
             return Storage::GenStyle::END;
+        if (s == "creative")
+            return Storage::GenStyle::CREATIVE;
+        if (s == "mining")
+            return Storage::GenStyle::MINING;
+        if (s == "twilight")
+            return Storage::GenStyle::TWILIGHT;
         return Storage::GenStyle::OVERWORLD;
     }
 
