@@ -199,6 +199,32 @@ namespace LightweightMC::Player
         uint8_t deathCount{0}; // Death count (NBT: DeathCount)
         int64_t lastSeen{0};   // Unix timestamp of last activity (not in player.dat, DB only)
 
+        // -------------------------------------------------------------
+        // Phase 6 (0.0.15) vanilla-1.8 HP / damage / respawn state.
+        // These three fields are session-only: they reset on login and
+        // are NOT persisted to the SQLite player row. Persistent HP
+        // survives via the flat `health` column (see applyTo/loadFrom);
+        // these carry the volatile simulation state that gates damage
+        // and drives the death -> respawn transition.
+        //
+        //   alive        false once HP reaches 0 and the session is queued
+        //                for respawn (subsequent damage is a no-op while
+        //                the client is still playing the death animation).
+        //   lastHurtMs   wall-clock ms of the most recent HP-reducing event;
+        //                gates natural_health_regeneration (vanilla
+        //                requires ~5 s without damage before regen resumes)
+        //                and also gates PvP retaliation in the entity
+        //                subsystem.
+        //   respawnAtMs  wall-clock ms of the most recent death; combined
+        //                with the respawn_radius / immediate_respawn /
+        //                respawnwaves gamerules to decide when the client
+        //                may re-enter the world. Zero means "never died
+        //                since login".
+        // -------------------------------------------------------------
+        bool alive{true};
+        int64_t lastHurtMs{0};
+        int64_t respawnAtMs{0};
+
         std::vector<uint8_t> rxBuffer{};
         std::vector<uint8_t> sendBuffer{};
 
@@ -228,6 +254,56 @@ namespace LightweightMC::Player
 
         // Resets volatile state (position, health, food, status flags) to fresh-spawn defaults.
         void resetVolatileState();
+
+        // -------------------------------------------------------------
+        // Phase 6 (0.0.15) vanilla-1.8 HP / damage / respawn / XP API.
+        // Every method takes an explicit `nowMs` (wall-clock milliseconds
+        // pulled from std::chrono::steady_clock) so the simulation stays
+        // deterministic across the polling loop and any future tick loop.
+        //
+        //   applyDamage(amount, nowMs, damageTypeCode)
+        //     Reduces HP by `amount`. Returns true when damage was actually
+        //     applied (false when the session is already dead, HP is full
+        //     creative/adventure/spectator invulnerable, or amount <= 0).
+        //     `damageTypeCode` (0=melee, 1=fall, 2=drowning, 3=fire,
+        //     4=freeze) is only used for logging; the caller is expected
+        //     to already gate the call against the corresponding
+        //     GameRules entry (pvp / fall_damage / drowning_damage /
+        //     fire_damage / freeze_damage).
+        //     Sets lastHurtMs and, when HP hits 0, flips alive=false +
+        //     sets respawnAtMs via onDeath().
+        //
+        //   tickRegen(nowMs)
+        //     Applies vanilla-1.8 natural_health_regeneration: after 5 s
+        //     without damage and while foodLevel >= 9 (food saturation
+        //     > 0), HP regens 1 half-heart per 2 s elapsed. Cheap and
+        //     idempotent: only advances regen based on elapsed time.
+        //
+        //   onDeath(nowMs)
+        //     Flips alive=false, bumps deathCount, records respawnAtMs,
+        //     and (unless keep_inventory is on) will be paired with a
+        //     respawn() at the spawn point by the caller after respawnAtMs
+        //     becomes legal per respawn_radius / immediate_respawn /
+        //     respawnwaves.
+        //
+        //   respawn()
+        //     Moves the session to spawnX/Y/Z (bed spawn first if hasBed
+        //     Spawn, then world spawn), sets HP to 20.0f, clears fallDist
+        //     ance/fire/onGround, resets alive=true and clears lastHurt
+        //     Ms/respawnAtMs.
+        //
+        //   grantXp(amount)
+        //     Adds `amount` XP to totalExperience, updates
+        //     experienceLevel + experienceProgress using the vanilla-1.8
+        //     linear curve (1000 XP per level, level cap 15). Returns the
+        //     number of levels gained (0-15) so callers can emit show_adv
+        //     ancement_messages when > 0.
+        // -------------------------------------------------------------
+        bool applyDamage(float amount, int64_t nowMs, int damageTypeCode = 0);
+        bool tickRegen(int64_t nowMs);
+        void onDeath(int64_t nowMs);
+        void respawn();
+        int  grantXp(int32_t amount);
     };
 }
 using LightweightMC::Player::ChunkPos;

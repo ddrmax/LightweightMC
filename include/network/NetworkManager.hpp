@@ -196,6 +196,60 @@ namespace LightweightMC::Network
         // server currently serves chunks for.
         size_t worldCount() const { return m_worlds.size(); }
 
+        // ---- Phase 6 (0.0.15) vanilla-1.8 HP / XP / respawn / chat ------
+        // Every entry-point resolves a display name to a live PLAY session
+        // by username first (so damage/respawn reach the same PlayerSession
+        // the movement handlers are mutating); when the caller is offline
+        // we mutate only the SQLite row so the next login picks up the new
+        // state. Damage/respawn/XP emitters only fire for online sessions
+        // because the S2C packets have nowhere to go otherwise.
+
+        // Apply HP damage to a player. `damageTypeCode` (0=melee, 1=fall,
+        // 2=drowning, 3=fire, 4=freeze) is used only for logging; the
+        // caller is expected to have already gated the call through the
+        // matching GameRules entry (pvp / fall_damage / drowning_damage /
+        // fire_damage / freeze_damage). Returns true when damage was
+        // actually applied (i.e. the target exists AND was vulnerable).
+        // When damage kills the target, emits an S2C DeathCombatEvent
+        // (0x42) to that client; every non-fatal damage step emits Update
+        // Health (0x06).
+        bool applyDamageToPlayer(const std::string &playerName,
+                                 float amount,
+                                 int64_t nowMs,
+                                 int damageTypeCode = 0);
+
+        // Kill a player: applies enough HP damage to send them to zero
+        // unconditionally (bypasses creative/spectator invuln because the
+        // /kill command is explicit) so the target's next respawnAtMs
+        // window gates respawn. Returns true when the target exists.
+        bool killPlayer(const std::string &playerName, int64_t nowMs);
+
+        // Force-respawn a player immediately (bypasses respawn_radius /
+        // immediate_respawn gates): moves their session to spawnX/Y/Z,
+        // restores full HP, emits an S2C Position packet (0x08) so the
+        // client animates the jump. Returns true when the target exists.
+        bool respawnPlayer(const std::string &playerName);
+
+        // Grant XP to a player and emit Experience (0x1f) when online.
+        // Returns the number of levels gained (0-15) so the /experience
+        // command can decide whether to fire show_advancement_messages.
+        int grantPlayerXp(const std::string &playerName, int32_t amount);
+
+        // Convenience used by /respawnwaves: set the boolean rule globally
+        // via GameRules::setBool("respawnwaves", ...) so it persists to
+        // SQLite gamerules and every live session picks up the new wave
+        // semantics on the next applyDamageToPlayer / respawn pass.
+        bool setRespawnWaves(bool enabled);
+
+        // Snapshot of PLAY-state usernames, sorted for /list output. Returns
+        // an empty vector when nobody is online.
+        std::vector<std::string> listOnlinePlayers() const;
+
+        // /msg backend: encode a chat-only packet and dispatch it to the
+        // target's client. Returns false when the target is offline.
+        bool sendPrivateChat(const std::string &targetName,
+                             const std::string &message);
+
         // Change a live PLAY session's worldId, reset loadedChunks (so the
         // new plane's chunks are streamed to the client on next updateChunks
         // AroundPlayer), and drop the client at a legal surface on the new

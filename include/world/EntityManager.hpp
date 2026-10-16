@@ -53,6 +53,15 @@ namespace LightweightMC::World
             VILLAGER,
             VEHICLE,
             PROJECTILE,
+            // Phase 6 (0.0.15): ground item drops spawned when a mob is
+            // slain (mob_drops rule), when a block is destroyed (block_drops
+            // rule), or on explosion (block_explosion_drop_decay /
+            // mob_explosion_drop_decay / tnt_explosion_drop_decay decay
+            // rules). DROPPED_ITEM entities are non-AI: they don't tick,
+            // they don't wander, and NetworkManager emits them on the
+            // vanilla-1.8 wire as SpawnEntity (0x0E) with the item ID
+            // captured in the extra `itemId` field below.
+            DROPPED_ITEM,
             UNKNOWN
         };
 
@@ -78,6 +87,14 @@ namespace LightweightMC::World
             int64_t lifetimeMs{600000};
             bool follower{false};
             bool networkVisible{false};
+            // Phase 6 (0.0.15): the item type carried by a DROPPED_ITEM
+            // entity. Kept as int32_t so callers can pass either a numeric
+            // item ID (0..255) or a stable template string alias like
+            // "leather" resolved through lookupItemTemplate(). Zero means
+            // "no item bound" for non-DROPPED_ITEM records.
+            int32_t itemId{0};
+            int32_t stackCount{1};   // 1.8 caps ground stacks at 12; set
+                                     // by callers that need multi-drop.
         };
 
         static EntityManager &getInstance()
@@ -117,9 +134,36 @@ namespace LightweightMC::World
                   int64_t nowMs);
 
         // ---- Behaviour entry-points exposed for chat / commands -------------
-        bool applyPlayerAttack(int32_t entityId, int32_t attackerFd, int64_t nowMs);
+        // applyPlayerAttack damages the target and returns true when the
+        // mob's health reached zero (i.e. the caller should trigger the
+        // kill path: XP grant + optional DROPPED_ITEM drop + Entity
+        // Destroy emission). `damageAmount` defaults to 3 to match the
+        // vanilla-1.8 hand-to-hand combat damage of the earlier stub.
+        bool applyPlayerAttack(int32_t entityId, int32_t attackerFd,
+                                int64_t nowMs, int32_t damageAmount = 3);
         bool applyPlayerFollow(int32_t entityId, int32_t followerFd);
         bool applyPlayerUnfollow(int32_t entityId);
+
+        // Grant XP to the *session* identified by attackerFd. Returns the
+        // number of levels gained (0-15). Caller should honour show_adv
+        // ancement_messages before sending a chat notification.
+        int grantKillXpToSession(int32_t entityId,
+                                 LightweightMC::Player::PlayerSession &session,
+                                 int64_t nowMs);
+
+        // Spawn a ground item. `templateKey` maps through lookupItemTemplate
+        // ("leather", "meat_raw", "wolf_pelt", ...) to a numeric item ID;
+        // pass a numeric ID directly via the itemId argument if the caller
+        // already knows it. Returns the assigned entity ID on success (non-
+        // zero) or 0 when the entity cap is reached.
+        int32_t spawnItemDrop(const std::string &templateKey,
+                              double x, double y, double z,
+                              int32_t itemId = 0,
+                              int32_t stackCount = 1);
+
+        // Despawn (or "pick up") a DROPPED_ITEM by entity ID. Returns true
+        // when the entity was present and removed.
+        bool removeItemDrop(int32_t entityId);
 
         // Seed a small roster of mobs / villagers around a freshly-connected
         // player. The single-argument form keeps the previous "y = session.y"

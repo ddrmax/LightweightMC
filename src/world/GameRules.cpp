@@ -90,6 +90,13 @@ namespace LightweightMC::World
         regInt(m_rules, "players_sleeping_percentage", 100);
         regBool(m_rules, "pvp", true);
         regInt(m_rules, "respawn_radius", 10);
+        // Phase 6 (0.0.15): vanilla 1.8 /respawnwaves toggle. When true,
+        // respawn becomes wave-coordinated: a dying player is queued in
+        // PlayerSession::respawnAtMs and only respawns once every other
+        // still-alive player also dies (H1Z1 wave semantics). Default
+        // false so vanilla-1.8 clients see per-player respawn
+        // (immediate_respawn / respawn_radius govern instead).
+        regBool(m_rules, "respawnwaves", false);
         regBool(m_rules, "spectators_generate_chunks", true);
 
         // --- Spawning ---

@@ -104,6 +104,68 @@ namespace LightweightMC::World
         {
             return v.x * v.x + v.y * v.y + v.z * v.z;
         }
+
+        // Phase 6 (0.0.15) item / XP / loot tables. Kept in the anonymous
+        // namespace so applyPlayerAttack (which fires the drop path) and
+        // spawnItemDrop (which resolves template aliases to numeric IDs)
+        // can share them without cross-TU indirection.
+        struct ItemTemplateInfo
+        {
+            const char *name;
+            int32_t itemId;
+        };
+        static const ItemTemplateInfo kItemTemplates[] = {
+            {"leather",      0},
+            {"meat_raw",     1},
+            {"meat_cooked",  2},
+            {"wool",         3},
+            {"feather",      4},
+            {"wolf_pelt",    5},
+            {"pelt",         6},
+            {"brain",        7},
+            {"bone",         8},
+            {"hide",         9},
+            {"rabbit_foot", 10},
+        };
+        inline int32_t lookupItemTemplate(const std::string &name)
+        {
+            for (const auto &t : kItemTemplates)
+                if (name == t.name)
+                    return t.itemId;
+            return -1;
+        }
+        inline int xpForTemplate(const std::string &key)
+        {
+            static const std::pair<const char *, int> tbl[] = {
+                {"cow", 3}, {"sheep", 3}, {"pig", 3}, {"chicken", 1},
+                {"horse", 3}, {"deer", 3}, {"rabbit", 1}, {"llama", 3},
+                {"wolf", 5}, {"tiger", 5}, {"bear", 5},
+                {"zombie", 8}, {"bandit", 8}, {"hunter", 8}, {"spider", 8},
+                {"wandering_trader", 15}, {"patrol", 15},
+                {"warden", 15}, {"phantom", 15},
+            };
+            for (const auto &e : tbl)
+                if (key == e.first)
+                    return e.second;
+            return 2;
+        }
+        inline const char *pickDropForTemplate(const std::string &key)
+        {
+            static const std::pair<const char *, const char *> tbl[] = {
+                {"cow", "leather"}, {"sheep", "wool"}, {"pig", "meat_raw"},
+                {"chicken", "feather"}, {"horse", "hide"}, {"deer", "hide"},
+                {"rabbit", "rabbit_foot"}, {"llama", "wool"},
+                {"wolf", "wolf_pelt"}, {"tiger", "pelt"}, {"bear", "pelt"},
+                {"zombie", "brain"}, {"bandit", "pelt"}, {"hunter", "hide"},
+                {"spider", "bone"},
+                {"wandering_trader", "leather"}, {"patrol", "leather"},
+                {"warden", "leather"}, {"phantom", "hide"},
+            };
+            for (const auto &e : tbl)
+                if (key == e.first)
+                    return e.second;
+            return "leather";
+        }
     } // anonymous namespace
 
     // ---------------------------------------------------------------------
@@ -281,6 +343,8 @@ namespace LightweightMC::World
             return "vehicle";
         case EntityKind::PROJECTILE:
             return "projectile";
+        case EntityKind::DROPPED_ITEM:
+            return "dropped_item";
         case EntityKind::UNKNOWN:
             break;
         }
@@ -299,6 +363,17 @@ namespace LightweightMC::World
 
         for (auto &[id, rec] : m_entities)
         {
+            // DROPPED_ITEM entities have no AI: they sit on the ground and
+            // only ever despawn on lifetime expiry. Skipping the nearest-
+            // client scan keeps the per-tick cost flat when the world is
+            // rich in loot.
+            if (rec.kind == EntityKind::DROPPED_ITEM)
+            {
+                if (nowMs - rec.spawnMs > rec.lifetimeMs)
+                    toDestroy.push_back(rec.id);
+                continue;
+            }
+
             const int64_t lastTick = rec.lastTickMs;
             const double dtSec = clampd(static_cast<double>(nowMs - lastTick) / 1000.0, 0.0, 1.0);
             rec.lastTickMs = nowMs;
@@ -517,7 +592,8 @@ namespace LightweightMC::World
     // ---------------------------------------------------------------------
     // Player interaction hooks.
     // ---------------------------------------------------------------------
-    bool EntityManager::applyPlayerAttack(int32_t entityId, int32_t attackerFd, int64_t nowMs)
+    bool EntityManager::applyPlayerAttack(int32_t entityId, int32_t attackerFd,
+                                          int64_t nowMs, int32_t damageAmount)
     {
         auto it = m_entities.find(entityId);
         if (it == m_entities.end())
@@ -525,8 +601,9 @@ namespace LightweightMC::World
         auto &rec = it->second;
         (void)nowMs;
 
-        const int damage = 4;
-        rec.health = (rec.health > damage) ? static_cast<uint16_t>(rec.health - damage) : uint16_t{0};
+        const int damage = (damageAmount > 0) ? damageAmount : 3;
+        rec.health = (rec.health > damage) ? static_cast<uint16_t>(rec.health - damage)
+                                            : uint16_t{0};
         Core::Logger::debug("[Entity] id=" + std::to_string(entityId) +
                             " templateKey=" + rec.templateKey +
                             " hp=" + std::to_string(rec.health) + "/" +
@@ -536,7 +613,26 @@ namespace LightweightMC::World
         {
             Core::Logger::debug("[Entity] id=" + std::to_string(entityId) +
                                 " slain by fd=" + std::to_string(attackerFd));
+
+            // mob_drops gamerule gates whether the corpse yields loot.
+            // We snapshot the drop template BEFORE erasing so spawnItemDrop
+            // can key off the same name lookup.
+            const std::string dropKey = pickDropForTemplate(rec.templateKey);
+            const double dropX = rec.x;
+            const double dropY = rec.y;
+            const double dropZ = rec.z;
+            bool dropEnabled = true;
+            bool ruleVal = false;
+            if (World::GameRules::getInstance().getBool("mob_drops", ruleVal))
+                dropEnabled = ruleVal;
+
             despawn(entityId);
+
+            if (dropEnabled && rec.kind != EntityKind::DROPPED_ITEM)
+            {
+                const int32_t dropId = spawnItemDrop(dropKey, dropX, dropY, dropZ);
+                (void)dropId;
+            }
             return true;
         }
 
@@ -545,6 +641,97 @@ namespace LightweightMC::World
             rec.angry = true;
             rec.targetFd = attackerFd;
         }
+        return true;
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 6 (0.0.15) vanilla-1.8 XP-on-kill and mob loot tables.
+    //
+    // XP follows the vanilla 1.8 kill-XP table (a handful of canonical
+    // values). Villagers award a bigger chunk because they are rarer and
+    // the trader / warden quests reward a big XP burst.
+    //
+    // Loot is gated by the mob_drops gamerule; when the rule is disabled
+    // nothing is spawned. When the rule is enabled we always drop at least
+    // one thing per mob template. Explosions / fall damage do NOT trigger
+    // this path -- the mob_explosion_drop_decay / block_explosion_drop_decay
+    // rules are consulted separately at their own call sites.
+    // ---------------------------------------------------------------------
+    int EntityManager::grantKillXpToSession(int32_t entityId,
+                                            LightweightMC::Player::PlayerSession &session,
+                                            int64_t nowMs)
+    {
+        (void)nowMs;
+        auto it = m_entities.find(entityId);
+        if (it == m_entities.end())
+            return 0;
+        const int xp = xpForTemplate(it->second.templateKey);
+        const int gained = session.grantXp(xp);
+        Core::Logger::debug("[Entity XP] template=" + it->second.templateKey +
+                            " granted=" + std::to_string(xp) +
+                            " levels=" + std::to_string(gained));
+        return gained;
+    }
+
+    int32_t EntityManager::spawnItemDrop(const std::string &templateKey,
+                                          double x, double y, double z,
+                                          int32_t itemId, int32_t stackCount)
+    {
+        if ((int32_t)m_entities.size() >= m_maxTotal)
+            return 0;
+        int32_t id32 = itemId;
+        if (id32 <= 0)
+        {
+            const int32_t resolved = lookupItemTemplate(templateKey);
+            id32 = (resolved > 0) ? resolved : 0;
+        }
+        if (stackCount <= 0)
+            stackCount = 1;
+        if (stackCount > 12)
+            stackCount = 12;
+
+        EntityRecord rec;
+        rec.id = m_nextId++;
+        rec.kind = EntityKind::DROPPED_ITEM;
+        rec.templateKey = templateKey;
+        rec.x = x;
+        rec.y = y;
+        rec.z = z;
+        rec.homeX = x;
+        rec.homeY = y;
+        rec.homeZ = z;
+        rec.maxHealth = 1;
+        rec.health = 1;
+        rec.itemId = id32;
+        rec.stackCount = stackCount;
+        rec.speed = 0.0;
+        rec.aggroRange = 0.0;
+        rec.leashRange = 0.0;
+        rec.spawnMs = steadyNowMs();
+        rec.lastTickMs = rec.spawnMs;
+        // Ground items decay faster than mobs (5 min) so loot piles
+        // do not stay around forever.
+        rec.lifetimeMs = 300000;
+        m_entities.emplace(rec.id, rec);
+        Core::Logger::debug("[Entity] dropped item id=" + std::to_string(rec.id) +
+                            " template=" + templateKey +
+                            " itemId=" + std::to_string(id32) +
+                            " stack=" + std::to_string(stackCount) +
+                            " at (" + std::to_string(x) + "," +
+                            std::to_string(y) + "," + std::to_string(z) + ")");
+        return rec.id;
+    }
+
+    bool EntityManager::removeItemDrop(int32_t entityId)
+    {
+        auto it = m_entities.find(entityId);
+        if (it == m_entities.end())
+            return false;
+        if (it->second.kind != EntityKind::DROPPED_ITEM)
+            return false;
+        Core::Logger::debug("[Entity] picked up item id=" + std::to_string(entityId) +
+                            " template=" + it->second.templateKey);
+        m_entities.erase(it);
         return true;
     }
 

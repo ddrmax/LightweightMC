@@ -74,6 +74,15 @@ namespace LightweightMC::Player
         deathCount = data.deathCount;
         lastSeen = data.lastSeen;
 
+        // Phase 6: session-only alive/lastHurtMs/respawnAtMs always reset
+        // to a fresh-awake state on login. If a saved row carries health
+        // at 0 (e.g. the player logged out mid-death), we restore them
+        // alive with full HP rather than queuing a partial-death respawn,
+        // which matches vanilla 1.8's "log out then log back in" semantics.
+        alive = true;
+        lastHurtMs = 0;
+        respawnAtMs = 0;
+
         // Plane the previous session was on (0 by default for fresh rows or
         // rows migrated without the world_id column; pre-1.12 -1 for Nether,
         // 1 for End, 100 for the Aether special dimension, 101+ for `/world
@@ -173,6 +182,14 @@ namespace LightweightMC::Player
         flying = false;
         sprinting = false;
 
+        // Phase 6 (vanilla-1.8 HP / respawn): respawn state resets to
+        // alive on login. lastHurtMs / respawnAtMs are wall-clock ms and
+        // callers seed them on the first applyDamage/onDeath after this
+        // point, so zero is a legal "no damage yet" sentinel.
+        alive = true;
+        lastHurtMs = 0;
+        respawnAtMs = 0;
+
         // Clear transient per-session container windows: on reconnect a fresh
         // window is opened that re-populates its contents from the SQLite
         // block_entities row for the container's coord.
@@ -200,6 +217,136 @@ namespace LightweightMC::Player
         }
         yaw = 0.0f;
         pitch = 0.0f;
+    }
+
+    // ------------------------------------------------------------
+    // Phase 6 (0.0.15) vanilla-1.8 HP / damage / death / respawn / XP.
+    // The simulation is intentionally event-driven (see README: "Zero-T
+    // ick"): applyDamage / tickRegen callers pull wall-clock ms from
+    // std::chrono::steady_clock and pass it through so the state machine
+    // advances only when an actual game event fires (chat damage packet,
+    // UseEntity attack, movement delta, chat command). Idle sessions pay
+    // no CPU cost.
+    // ------------------------------------------------------------
+    bool PlayerSession::applyDamage(float amount, int64_t nowMs, int damageTypeCode)
+    {
+        // Damage is a no-op for a session already queued for respawn and
+        // for invulnerable game modes (creative/adventure/spectator).
+        // PvP / fall / drowning / fire / freeze gating is the caller's
+        // responsibility -- see NetworkManager::applyDamageToPlayer and
+        // EntityManager::tick which consult GameRules for each damage type.
+        if (!alive || amount <= 0.0f) return false;
+        if (gamemode == 1 || gamemode == 3) return false; // creative / spectator invuln
+
+        health -= amount;
+        lastHurtMs = nowMs;
+        if (health <= 0.0f)
+        {
+            health = 0.0f;
+            onDeath(nowMs);
+        }
+        (void)damageTypeCode;
+        return true;
+    }
+
+    // Vanilla 1.8 natural_health_regeneration rule: after 5 s without
+    // taking damage AND while foodLevel >= 9 (with foodSaturationLevel
+    // > 0 so the "starving" state disables regen), HP gains one half
+    // heart every 2 s of elapsed no-damage time. The state machine is
+    // lazy: on each tick we compute how many regen units have accrued
+    // since lastHurtMs and consume them. lastHurtMs then advances to
+    // `nowMs - (elapsed mod 2000)` so the 2 s step keeps its remainder
+    // across polls without double-counting.
+    bool PlayerSession::tickRegen(int64_t nowMs)
+    {
+        if (!alive) return false;
+        if (health >= 20.0f) return false;
+        if (foodLevel < 9) return false;
+        if (foodSaturationLevel <= 0.0f) return false;
+
+        // Skip regen while on fire or drowning. fire / air counters are
+        // maintained elsewhere (fire ticks decrement in a future PR;
+        // air decrement happens on movement).
+        if (onFire) return false;
+        if (air <= 0) return false;
+
+        const int64_t elapsed = nowMs - lastHurtMs;
+        if (elapsed < 5000) return false;
+        const int64_t regenWindow = elapsed - 5000;
+        const int64_t regenTicks = regenWindow / 2000;
+        if (regenTicks <= 0) return false;
+
+        const float before = health;
+        health += static_cast<float>(regenTicks);
+        if (health > 20.0f) health = 20.0f;
+        // Re-anchor lastHurtMs so the 2 s cadence carries across calls:
+        // 5 s delay consumed, then (regenTicks * 2000) ms of regen.
+        lastHurtMs += 5000 + regenTicks * 2000;
+        return health > before;
+    }
+
+    void PlayerSession::onDeath(int64_t nowMs)
+    {
+        alive = false;
+        respawnAtMs = nowMs;
+        if (deathCount < 255) ++deathCount;
+    }
+
+    void PlayerSession::respawn()
+    {
+        alive = true;
+        respawnAtMs = 0;
+        lastHurtMs = 0;
+        health = 20.0f;
+        foodLevel = 20;
+        foodSaturationLevel = 5.0f;
+        foodExhaustionLevel = 0.0f;
+        fallDistance = 0.0f;
+        air = 30;
+        onFire = false;
+        fire = 0;
+        onGround = false;
+        sleeping = false;
+        sleepTimer = 0;
+        flying = false;
+        sprinting = false;
+
+        // Same priority order as resetVolatileState: bed first, then world
+        // spawn, else literal (0.5, 7.0, 0.5).
+        if (hasBedSpawn)
+        {
+            x = static_cast<double>(bedX) + 0.5;
+            y = static_cast<double>(bedY);
+            z = static_cast<double>(bedZ) + 0.5;
+        }
+        else if (hasSpawn)
+        {
+            x = static_cast<double>(spawnX) + 0.5;
+            y = static_cast<double>(spawnY);
+            z = static_cast<double>(spawnZ) + 0.5;
+        }
+        else
+        {
+            x = 0.5;
+            y = 7.0;
+            z = 0.5;
+        }
+    }
+
+    // Vanilla Java Edition 1.8 XP curve (see minecraft.wiki /w/XP):
+    // linear 1000 XP per level up to level 15. Levels above 15 are not
+    // tracked; totalExperience still accumulates so /experience <set>
+    // can push arbitrary totals.
+    int PlayerSession::grantXp(int32_t amount)
+    {
+        if (amount == 0) return 0;
+        const int32_t prevLevel = experienceLevel;
+        totalExperience += amount;
+        if (totalExperience < 0) totalExperience = 0;
+        experienceLevel = std::min(15, totalExperience / 1000);
+        const int remainder = totalExperience - experienceLevel * 1000;
+        experienceProgress = static_cast<float>(remainder) / 1000.0f;
+        return experienceLevel - prevLevel;
     }
 
     // ------------------------------------------------------------
