@@ -165,4 +165,16 @@ namespace LightweightMC::Network
                             " skipped=" + std::to_string(skipped));
     }
 
+    // Number of sessions currently in ClientState::PLAY. Used by the
+    // server-browser status datagram so master-server listings report
+    // the same count the in-game tablist shows.
+    int NetworkManager::countOnline() const
+    {
+        int n = 0;
+        for (const auto &[fd, ses] : m_clients)
+            if (ses.state == ClientState::PLAY)
+                ++n;
+        return n;
+    }
+
 } // namespace LightweightMC::Network

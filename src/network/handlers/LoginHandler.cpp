@@ -3,14 +3,76 @@
 #include "core/Logger.hpp"
 #include "network/Packet.hpp"
 #include "world/EntityManager.hpp"
+#include "network/Authentication.hpp"
+#include "network/AesCfb.hpp"
+#include "network/protocol/ProtocolVersion.hpp"
 
 namespace LoginHandler
 {
 
+    // Vanilla 1.8 login sequence has two C2S packet shapes:
+    //   0x00 Login Start          -- plain username string (offline path)
+    //   0x01 Login (Access Token) -- byte tokenLength + tokenLength ASCII bytes
+    // Server replies 0x02 LoginSuccess (uuid + username), 0x03 CannotConnect,
+    // or 0x04 InvalidSessionToken. Community relays (auth-mode = token) send
+    // the 0x01 packet BEFORE 0x00 LoginStart; offline-mode clients skip it
+    // entirely. When a relay returns a session_key we arm an AES-128 CFB
+    // cipher for the session, but only for MODERN/LATEST eras -- LEGACY 1.8
+    // never encrypts the wire post-login and doing so would corrupt the
+    // byte-aligned client stream.
     void handle(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd,
                 int32_t packetId, ClientMap &clients, LightweightMC::World::WorldManager &worldManager,
                 LightweightMC::Storage::Database &database, LightweightMC::Network::NetworkManager &net)
     {
+        if (packetId == 0x01) // Login (Access Token) C2S
+        {
+            const int32_t tokenLength = LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd);
+            std::string token;
+            if (tokenLength > 0 &&
+                offset + static_cast<std::size_t>(tokenLength) <= packetEnd)
+            {
+                token.assign(reinterpret_cast<const char *>(data + offset),
+                             static_cast<std::size_t>(tokenLength));
+                offset += static_cast<std::size_t>(tokenLength);
+            }
+            LightweightMC::Core::Logger::info("Login (Access Token) received for client fd=" +
+                                              std::to_string(clientFd) + " tokenBytes=" + std::to_string(token.size()));
+
+            std::string username, uuid, sessionKey;
+            const bool ok = LightweightMC::Network::Auth::verifyToken(token, username, uuid, sessionKey);
+
+            if (ok)
+            {
+                session.username = username;
+                session.uuid = uuid;
+                session.authenticated = true;
+                session.authPending = false;
+
+                if (!sessionKey.empty() && session.adapter != nullptr &&
+                    session.adapter->era() != LightweightMC::Network::Protocol::Era::LEGACY)
+                {
+                    if (auto *c = LightweightMC::Network::Auth::lastCipher())
+                    {
+                        session.cipherS2C = c;
+                        session.cipherC2S = c;
+                    }
+                }
+
+                std::vector<uint8_t> loginSuccess;
+                LightweightMC::Network::Packet::writeString(loginSuccess, uuid);
+                LightweightMC::Network::Packet::writeString(loginSuccess, username);
+                net.sendPacket(clientFd, 0x02, loginSuccess);
+                return;
+            }
+
+            LightweightMC::Core::Logger::warn("Login (Access Token) verify chain failed for fd=" +
+                                              std::to_string(clientFd));
+            std::vector<uint8_t> cannot;
+            LightweightMC::Network::Packet::writeShort(cannot, 2);
+            net.sendPacket(clientFd, 0x03, cannot);
+            return;
+        }
+
         if (packetId == 0x00) // Login Start
         {
             session.username = LightweightMC::Network::Packet::readStringBounded(data, offset, packetEnd);

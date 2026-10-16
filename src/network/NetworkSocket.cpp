@@ -14,6 +14,7 @@
 #include "network/AntiScan.hpp"
 #include "commands/TestPacketsCommand.hpp"
 #include "network/protocol/ProtocolVersion.hpp"
+#include "network/Authentication.hpp"
 
 #include "storage/WorldStorage.hpp"
 #include "storage/Database.hpp"
@@ -43,6 +44,15 @@ namespace LightweightMC::Network
 
         const std::string url = ConfigManager::getInstance().getString("security", "blocklist-url");
         AntiScan::init(url);
+
+        // Vanilla-1.8 auth module init (Phase 5). Reads the [auth] section
+        // (auth-mode / auth-verify-url / auth-verify-backup-urls /
+        // auth-cache-ttl / auth-strict / aes-session-key-field /
+        // master-server-ping / master-server-urls). Default auth-mode is
+        // "offline" so the offline fast-path LoginStart -> LoginSuccess
+        // keeps working with zero config change; only flip auth-mode=token
+        // when the server actually has a community verify relay.
+        LightweightMC::Network::Auth::init();
 
         // Clients routinely write to a socket we already hung up on; without
         // this SIGPIPE kills the whole server. send() uses MSG_NOSIGNAL too,
@@ -392,6 +402,14 @@ namespace LightweightMC::Network
                 }
                 return std::nullopt;
             });
+
+        // Opt-in outbound master-server ping. Vanilla servers ping the
+        // master-listing service on config change; we default to OFF
+        // because the ping is a fire-and-forget HTTP call and running it
+        // at every boot generates outbound traffic the user did not
+        // opt into. Flip [auth] master-server-ping = true when the
+        // listing should know about this server.
+        LightweightMC::Network::Auth::pingMasterServers(port);
 
         return true;
     }

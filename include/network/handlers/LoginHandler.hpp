@@ -13,6 +13,7 @@
 #include "network/protocol/EraAdapter.hpp"
 #include "network/protocol/ProtocolVersion.hpp"
 #include "network/protocol/BaseProtocol.hpp"
+#include "network/Authentication.hpp"
 
 namespace LoginHandler
 {

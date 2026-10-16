@@ -66,6 +66,11 @@ namespace LightweightMC::Network
         void pollEvents(int timeoutMs);
         void stop();
 
+        // Number of sessions currently in ClientState::PLAY. Used by the
+        // server-browser ping response so master-server listings see the
+        // correct player count.
+        int countOnline() const;
+
         // Update a player's op level: update the live session (if online) and
         // persist to the database. Returns true if the player is online or
         // the data was persisted successfully.

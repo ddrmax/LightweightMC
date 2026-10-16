@@ -22,3 +22,5 @@ build_check
 bbbuild/
 wiki/
 build-san/
+phases.md
+build_*/

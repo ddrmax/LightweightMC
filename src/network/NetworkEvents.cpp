@@ -16,6 +16,7 @@
 #include "network/handlers/StatusHandler.hpp"
 #include "network/handlers/LoginHandler.hpp"
 #include "network/handlers/play/PlayHandler.hpp"
+#include "network/ServerBrowser.hpp"
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
@@ -125,6 +126,29 @@ namespace LightweightMC::Network
                                 " bytes), dropping client.");
             handleDisconnect(clientFd);
             return;
+        }
+
+        // Server-browser ping detection. Master-server listings (addserver.org,
+        // Bluetymaps, community relays) send a small HTTP GET to the game port
+        // and expect a raw 0xFE 0xFD status datagram back -- not a Minecraft
+        // varint-framed packet. The bytes reach us before any handshake has
+        // been parsed, so we intercept here rather than treating them as a
+        // corrupt frame that disconnects the client silently. Only check
+        // while the session is still HANDSHAKE -- real Minecraft clients
+        // will not have "GET " at byte 0.
+        if (session.state == ClientState::HANDSHAKE && session.rxBuffer.size() >= 8)
+        {
+            const uint8_t *p = session.rxBuffer.data();
+            if (p[0] == 'G' && p[1] == 'E' && p[2] == 'T' && p[3] == ' ')
+            {
+                Core::Logger::info("[NET BROWSER] fd=" + std::to_string(clientFd) +
+                                   " GET-prefix request, emitting server-info datagram");
+                ServerBrowser::handleFromBuffer(session.rxBuffer.data(),
+                                                session.rxBuffer.size(),
+                                                clientFd, *this);
+                handleDisconnect(clientFd);
+                return;
+            }
         }
 
         while (!session.rxBuffer.empty())

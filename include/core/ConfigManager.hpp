@@ -109,6 +109,58 @@ private:
         emit("security", "enable-antiscan", "true");
         emit("security", "blocklist-url", "https://raw.githubusercontent.com/pebblehost/hunter/master/ips.txt");
 
+        // [server]
+        // Display name in the server-browser / master-server status datagram.
+        // Falls back to the motd text when unset, so the vanilla default
+        // keeps the existing behaviour without a new required key.
+        emit("server", "server-name", "LightweightMC C++ Engine");
+
+        // [auth]
+        // Vanilla-1.8 auth module (Phase 5). Two modes:
+        //   auth-mode = offline   (default) -- LoginStart -> LoginSuccess
+        //                                        with a locally-minted UUID,
+        //                                        no HTTP. This is the "real
+        //                                        server, offline toggle"
+        //                                        behaviour: wire-format stays
+        //                                        vanilla-correct, only the
+        //                                        verify hop is skipped.
+        //   auth-mode = token     -- Login (Access Token) packet 0x01 arrives
+        //                                        first; server verifies via
+        //                                        auth-verify-url, then falls
+        //                                        back through auth-verify-
+        //                                        backup-urls when the primary
+        //                                        relay is down or returns
+        //                                        HTTP 500 / malformed JSON.
+        emit("auth", "auth-mode", "offline");
+        // Primary community verify relay. Empty means "do not attempt
+        // HTTP verify" (even if auth-mode=token, no HTTP).
+        emit("auth", "auth-verify-url", "");
+        // Comma-separated trusted backup relays (tried in order when the
+        // primary returns non-200 or malformed JSON). Community relay list
+        // from minecraft.wiki/Verifying_login_tokens.
+        emit("auth", "auth-verify-backup-urls",
+             "https://auth.qa.theserverpvp.com/api/verify?token=,"
+             "https://player-api.z0r3k4t.wtf/api/verify?token=,"
+             "https://session.forgecdn.net/api/verify?token=");
+        // Cache token -> (username, uuid) for auth-cache-ttl seconds
+        // (0 disables caching; default 24h).
+        emit("auth", "auth-cache-ttl", "86400");
+        // Reject login on total verify-chain failure. Default false
+        // accepts as an offline login (real-server offline fallback)
+        // so a transient relay outage does not kick players out.
+        emit("auth", "auth-strict", "false");
+        // JSON field name in a relay's verify response whose value is a
+        // 16-byte hex session key that arms an AES-128 CFB cipher for the
+        // session (only enabled for MODERN/LATEST eras).
+        emit("auth", "aes-session-key-field", "session_key");
+        // Fire-and-forget master-server ping on boot. Off by default so
+        // the server does not generate outbound listing traffic unless
+        // the user explicitly opts in.
+        emit("auth", "master-server-ping", "false");
+        // Master-server listing endpoints (comma-separated). Only used
+        // when master-server-ping = true.
+        emit("auth", "master-server-urls", "");
+
         // [world]
         // Generation preset selector: overworld / nether / aether / superflat / test-grid.
         emit("world", "gen-style", "overworld");

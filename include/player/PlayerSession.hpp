@@ -12,6 +12,13 @@ namespace LightweightMC::Network::Protocol
     class BaseProtocol; // Forward declaration (defined in network/protocol/BaseProtocol.hpp)
 }
 
+namespace LightweightMC::Network
+{
+    class AesCfb128;    // Forward declaration (defined in network/AesCfb.hpp) --
+                        // session cipher armed by Authentication.cpp when a
+                        // verify relay returns a session_key field.
+}
+
 namespace LightweightMC::Storage
 {
     struct PlayerData; // Forward declaration (defined in storage/Database.hpp)
@@ -82,6 +89,25 @@ namespace LightweightMC::Player
         ClientState state{ClientState::HANDSHAKE};
         std::string username{""};
         std::string uuid{""}; // Offline-mode UUID (deterministic from username), set at login.
+
+        // --- Auth state (Phase 5: Vanilla-1.8 Auth & Server-Browser) ---
+        // accessToken: raw token bytes from packet 0x01 Login (Access Token)
+        // C2S; empty when the client sent LoginStart (0x00) directly.
+        // authenticated: true once server-side verify (primary or a backup
+        // relay in the trusted chain) succeeded. Offline-mode login sets
+        // this true without any HTTP hop.
+        // authPending: true between Login (Access Token) receipt and the
+        // HTTP verify round-trip completing; used to gate other packets
+        // arriving while the verify worker runs.
+        // cipherS2C / cipherC2S: AES-128 CFB keystreams armed when a
+        // community verify relay returns a session_key field. Kept null
+        // for LEGACY-era sessions (MC 1.8 does not encrypt the wire
+        // post-login and byte-alignment is mandatory for vanilla clients).
+        std::string accessToken{};
+        bool authenticated{false};
+        bool authPending{false};
+        LightweightMC::Network::AesCfb128 *cipherS2C{nullptr};
+        LightweightMC::Network::AesCfb128 *cipherC2S{nullptr};
 
         double x{0.0}, y{7.0}, z{0.0};
         float yaw{0.0f}, pitch{0.0f};
