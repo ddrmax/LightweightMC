@@ -19,14 +19,19 @@
 // idle (no CPU cost) and only advances when NetworkManager is actively
 // polling - which matches the project's "Event-Driven & Zero-Tick" README.
 //
-// Wire protocol note: the manager can emit S2C packets for entity visibility
-// (NamedEntitySpawn 0x0C, EntityMoveLook 0x17, EntityDestroy 0x13) but does
-// so only when setNetworkSync(true) has been called by an admin / config
-// hook. Default is OFF because vanilla Java 1.8 clients may or may not
-// understand the H1Z1-style entity packet IDs; the flag lets admins opt in
-// once they have a client that parses them. The simulation state (HP, aggro,
-// wander, follow, pathfinding) runs unconditionally so admin commands and
-// UseEntity / EntityAction packet handlers see coherent answers regardless.
+// Wire protocol note (updated in Phase 7): the manager emits S2C entity
+// packets with the vanilla-1.8 Java Edition wire IDs (SpawnEntityLiving
+// 0x0f, DestroyEntity 0x10, EntityMovement 0x15, EntityAction 0x0c) by
+// default (era-appropriate sync -- see EntityManager.hpp m_networkSync
+// comment). NetworkFraming::sendPacket's s2cWireIdFromLegacy leaves those
+// IDs unmapped in the MODERN / LATEST reverse tables so MODERN / LATEST
+// clients see them as unknown packet IDs and drop them without crashing,
+// while vanilla 1.8 clients parse them correctly. setNetworkSync(false)
+// stays available for H1Z1 replay recording where the operator wants
+// byte-aligned wire with no S2C spawn / despawn at all. The simulation
+// state (HP, aggro, wander, follow, pathfinding) always runs
+// regardless so admin commands and UseEntity / EntityAction packet
+// handlers see coherent answers.
 // -----------------------------------------------------------------------------
 
 namespace LightweightMC::World
@@ -82,6 +87,93 @@ namespace LightweightMC::World
                 if (name == t.name)
                     return &t;
             return nullptr;
+        }
+
+        // -----------------------------------------------------------------
+        // Phase 7 (0.0.15) entity-roster alignment. Vanilla 1.8's Java
+        // Edition mob table (PrismarineJS protocol_1_8.yaml, minecraft.wiki
+        // Java Edition 1.8) covers {chicken, cow, pig, sheep} passive and
+        // {zombie, skeleton (skeleton_warrior + skeleton_archer on the wire),
+        // spider} aggressive; the wider H1Z1 roster (wolf/tiger/bear/hunter/
+        // bandit/rabbit/deer/llama/horse/wandering_trader/patrol/warden/
+        // phantom) is H1Z1-flavour-only and stays selectable separately.
+        // spawnForSession consults the world's GenStyle to pick the era-
+        // appropriate subset of templates per login seed, so a Twilight
+        // forest never spawns a warden and a Mining plane never spawns a
+        // chicken.
+        // -----------------------------------------------------------------
+        struct StyleRoster
+        {
+            // Each vector lists template names for that style in the same
+            // order they should be placed near the login point.
+            std::vector<std::string> passive;   // farmyard / animals
+            std::vector<std::string> aggressive; // monsters / beasts
+            std::vector<std::string> villagers; // traders / wardens / etc
+        };
+
+        StyleRoster rosterForStyle(Storage::GenStyle style)
+        {
+            using G = Storage::GenStyle;
+            switch (style)
+            {
+                case G::NETHER:
+                    // Nether is dark stone-cavern flavor: cave spiders
+                    // (H1Z1) + vanilla skeletons / zombie. No farmyard.
+                    return {
+                        {},
+                        {"spider", "skeleton", "zombie"},
+                        {"phantom"}};
+                case G::AETHER:
+                    // Sky islands + quartz temples: temple guardians (skeleton
+                    // + warden) and flying animals (llama/deer) as passive.
+                    return {
+                        {"llama", "deer"},
+                        {"skeleton"},
+                        {"warden"}};
+                case G::END:
+                    // "The End" obsidian plain: phantom/warden + skeleton
+                    // only, no farmyard.
+                    return {
+                        {},
+                        {"skeleton"},
+                        {"phantom", "warden"}};
+                case G::CREATIVE:
+                    // Flat creative canvas: farmyard only, no monsters, no
+                    // villagers (admin creative worlds are usually peaceful
+                    // sandboxes).
+                    return {
+                        {"cow", "sheep", "pig", "chicken"},
+                        {},
+                        {}};
+                case G::MINING:
+                    // Mining plane: cave fauna (rabbit/spider) + zombies.
+                    return {
+                        {"rabbit"},
+                        {"spider", "zombie"},
+                        {}};
+                case G::TWILIGHT:
+                    // Twilight forest: deer/rabbit + wolves, no farmyard.
+                    return {
+                        {"deer", "rabbit"},
+                        {"wolf"},
+                        {}};
+                case G::TEST_GRID:
+                    // Deterministic block grid for protocol validation: no
+                    // entities at all so packet golden-tests stay stable.
+                    return {{}, {}, {}};
+                case G::SUPERFLAT:
+                case G::OVERWORLD:
+                default:
+                    // Default (and vanilla 1.8 OVERWORLD) mixing so the
+                    // vanilla-1.8 roster is a subset of what the server
+                    // seeds, keeping H1Z1 flavour visible to existing
+                    // testing while vanilla 1.8 clients see the same wire
+                    // shape they expect.
+                    return {
+                        {"cow", "sheep", "pig", "chicken"},
+                        {"zombie", "skeleton", "wolf"},
+                        {"wandering_trader"}};
+            }
         }
 
         inline int64_t steadyNowMs()
@@ -895,8 +987,9 @@ namespace LightweightMC::World
     }
 
     // Same as the two-argument overload but also emits an S2C SpawnEntityLiving
-    // (packet 0x0f, per PrismarineJS protocol_1_8 Clientbound) to the given
-    // client when networkSyncEnabled() is true. Wire layout mirrors
+    // (wire ID 0x0f per PrismarineJS protocol_1_8 Clientbound) to the given
+    // client when networkSyncEnabled() is true (default ON since Phase 7
+    // era-appropriate sync). Wire layout mirrors
     // protocol_types.hpp's SpawnEntityLiving_d6229256: VarInt entity_id,
     // byte type, three int32 fixed-point coordinates scaled by 1000, three
     // int8 yaw/pitch/headPitch, then the vanilla 1.8 wire tail -- three
@@ -906,8 +999,11 @@ namespace LightweightMC::World
     // but vanilla 1.8's netty decoder reads the velocity slot as three
     // raw shorts followed by a one-byte metadata length, not as two
     // length-prefixed blobs).  Vanilla 1.8 clients that don't register
-    // 0x0f will silently ignore the packet -- enable is opt-in so a build
-    // that must stay byte-aligned keeps the flag OFF by default.
+    // 0x0f will silently ignore the packet -- enable defaults ON since
+    // Phase 7 era-appropriate sync (vanilla 1.8 is the target era); an
+    // admin who wants H1Z1 byte-aligned replay recording or who runs
+    // against MODERN / LATEST clients that mis-parse 0x0f as SpawnPaint
+    // calls setNetworkSync(false).
     void EntityManager::spawnForSession(const LightweightMC::Player::PlayerSession &session,
                                         Storage::WorldStorage &worldStorage,
                                         int clientFd, const Managers::PacketSender &sendPacket)
@@ -994,24 +1090,40 @@ namespace LightweightMC::World
             }
         };
 
-        if (m_spawnMobs)
+        // Phase 7 (0.0.15): era-appropriate mob roster. Consult the world's
+        // GenStyle so a Nether plane gets spiders/skeletons rather than the
+        // default farmyard, a Creative plane gets only animals, a TEST_GRID
+        // gets nothing. Gating is per-template via the same GameRules
+        // snapshot the mob/monster/trader/patrol/warden/phantom buckets
+        // already use (m_spawnMobs gates farmyard animals; m_spawnMonsters
+        // gates monsters; m_spawnTraders/Patrols/Wardens/Phantoms gate the
+        // matching villager templates), so admins can still toggle each
+        // bucket without editing the roster table.
+        const Storage::GenStyle plane = worldStorage.getGenerationStyle();
+        const StyleRoster roster = rosterForStyle(plane);
+        for (const auto &key : roster.passive)
         {
-            place("cow", EntityKind::PASSIVE);
-            place("sheep", EntityKind::PASSIVE);
+            if (!m_spawnMobs)
+                break;
+            place(key, EntityKind::PASSIVE);
         }
-        if (m_spawnMonsters)
+        for (const auto &key : roster.aggressive)
         {
-            place("wolf", EntityKind::AGGRESSIVE);
-            place("zombie", EntityKind::AGGRESSIVE);
+            if (!m_spawnMonsters)
+                break;
+            place(key, EntityKind::AGGRESSIVE);
         }
-        if (m_spawnTraders)
-            place("wandering_trader", EntityKind::VILLAGER);
-        if (m_spawnPatrols)
-            place("patrol", EntityKind::VILLAGER);
-        if (m_spawnWardens)
-            place("warden", EntityKind::VILLAGER);
-        if (m_spawnPhantoms)
-            place("phantom", EntityKind::VILLAGER);
+        for (const auto &key : roster.villagers)
+        {
+            if (key == "wandering_trader" && m_spawnTraders)
+                place(key, EntityKind::VILLAGER);
+            else if (key == "patrol" && m_spawnPatrols)
+                place(key, EntityKind::VILLAGER);
+            else if (key == "warden" && m_spawnWardens)
+                place(key, EntityKind::VILLAGER);
+            else if (key == "phantom" && m_spawnPhantoms)
+                place(key, EntityKind::VILLAGER);
+        }
 
         m_rng = rng;
         Core::Logger::debug("[Entity] seeded terrain-aware roster for " + session.username +

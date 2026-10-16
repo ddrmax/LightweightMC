@@ -93,8 +93,8 @@ namespace LightweightMC::World
             // "leather" resolved through lookupItemTemplate(). Zero means
             // "no item bound" for non-DROPPED_ITEM records.
             int32_t itemId{0};
-            int32_t stackCount{1};   // 1.8 caps ground stacks at 12; set
-                                     // by callers that need multi-drop.
+            int32_t stackCount{1}; // 1.8 caps ground stacks at 12; set
+                                   // by callers that need multi-drop.
         };
 
         static EntityManager &getInstance()
@@ -140,7 +140,7 @@ namespace LightweightMC::World
         // Destroy emission). `damageAmount` defaults to 3 to match the
         // vanilla-1.8 hand-to-hand combat damage of the earlier stub.
         bool applyPlayerAttack(int32_t entityId, int32_t attackerFd,
-                                int64_t nowMs, int32_t damageAmount = 3);
+                               int64_t nowMs, int32_t damageAmount = 3);
         bool applyPlayerFollow(int32_t entityId, int32_t followerFd);
         bool applyPlayerUnfollow(int32_t entityId);
 
@@ -175,8 +175,10 @@ namespace LightweightMC::World
         void spawnForSession(const LightweightMC::Player::PlayerSession &session);
         void spawnForSession(const LightweightMC::Player::PlayerSession &session,
                              Storage::WorldStorage &worldStorage);
-        // Overload that additionally emits one S2C SpawnEntityLiving (0x0f)
-        // per entity when setNetworkSync(true) has been enabled. Only the
+        // Overload that additionally emits one S2C SpawnEntityLiving (0x0f
+        // vanilla 1.8 / 0x09 NamedEntitySpawn after MODERN remap)
+        // per entity when networkSyncEnabled() is true (defaults ON --
+        // Phase 7 era-appropriate flip). Only the
         // specified client receives the packet (the mob roster is seeded per
         // login); future movement / despawn updates are broadcast by
         // EntityManager::tick when the client is already tracking them.
@@ -194,13 +196,24 @@ namespace LightweightMC::World
         bool networkSyncEnabled() const { return m_networkSync; }
 
         // ---- S2C emission helpers (only fire when networkSyncEnabled()) ------
-        // Payloads follow the protocol-47 wire format described in PacketCodec47
-        // and PrismarineJS protocol_types.hpp (NamedEntitySpawn for the initial
-        // visible spawn, EntityMoveLook for each movement update, EntityDestroy
-        // for despawn). Kept as template helpers so the caller can inject either
-        // NetworkManager::sendPacket or a broadcast variant. Reserved for a
-        // future PR that opts-in to on-wire entity sync; disabled by default so
-        // vanilla 1.8 clients stay byte-aligned.
+        // Phase 7 (0.0.15) entity-roster alignment. Wire IDs follow the
+        // vanilla-1.8 Java Edition 47 table (PrismarineJS protocol_types.hpp
+        // SpawnEntityLiving_d6229256 tail = VarInt entity_id, byte type,
+        // 3 int32 fixed-point coords scaled by 1000, 3 int8 yaw/pitch/head
+        // pitch, 3 int16 velocity scaled 5000, 1 byte metadata length):
+        //   0x0f SpawnEntityLiving -- initial visible spawn
+        //   0x10 DestroyEntity      -- per-despawn (entity_id VarInt)
+        //   0x15 EntityMovement    -- per-tick movement delta
+        //   0x0c EntityAction      -- per-attack / sound cue
+        // NetworkFraming::sendPacket runs s2cWireIdFromLegacy on the wire ID
+        // first; when that mapping returns -1 (unmapped in packet_ids.h's
+        // kS2CReverse_MODERN / _LATEST tables) the raw vanilla-1.8 ID
+        // passes through unchanged. LEGACY clients decode it as SpawnEntity
+        // Living; MODERN/LATEST clients treat the packet as unknown and
+        // drop it without crashing -- matching what a vanilla 1.8 client
+        // expects for a 1.8 server. Modern-only IDs (NamedEntitySpawn 0x09
+        // / EntityMoveLook 0x17 / EntityDestroy 0x13) remain available to
+        // callers that need MODERN/LATEST clients to see the mob.
         template <typename Sender>
         void emitSpawn(int clientFd, const EntityRecord &rec, const Sender &sendPacket) const;
         template <typename Sender>
@@ -242,10 +255,18 @@ namespace LightweightMC::World
         double m_leashRadius{24.0};
         int64_t m_attackCooldownMs{1200};
         int32_t m_maxTotal{96};
-        bool m_networkSync{false};
+        // Phase 7 (0.0.15): era-appropriate sync. Vanilla-1.8 (the target
+        // era for this build) expects S2C entity packets to be emitted so
+        // the client sees mobs; the wire IDs (0x0f / 0x10 / 0x15) pass
+        // through NetworkFraming's s2cWireIdFromLegacy unchanged because
+        // packet_ids.h leaves those raw IDs unmapped in the MODERN /
+        // LATEST reverse tables, so MODERN / LATEST clients treat them as
+        // unknown and drop the packet without crashing. setNetworkSync(false)
+        // is still available for H1Z1 network replay recording where the
+        // operator wants byte-aligned wire with no S2C spawn / despawn.
+        bool m_networkSync{true};
 
         std::mt19937 m_rng;
     };
 
 } // namespace LightweightMC::World
-

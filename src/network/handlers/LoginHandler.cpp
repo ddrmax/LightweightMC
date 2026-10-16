@@ -105,11 +105,13 @@ namespace LoginHandler
             // tick dispatch. Terrain-aware overload also enforces the
             // vanilla "solid below + 2 air above" spawn predicate on the
             // generated world so a mob never gets buried inside a hill or
-            // a player-built wall. Emission of S2C packets is opt-in via
-            // EntityManager::setNetworkSync(true) so a build that must stay
-            // byte-aligned with vanilla 1.8 clients can keep it OFF;
-            // NetworkManager::start currently enables it so the client can
-            // actually see the mobs during AI testing.
+            // a player-built wall. Emission of S2C packets defaults ON as
+            // of Phase 7 (era-appropriate sync: vanilla-1.8 wire IDs 0x0f
+            // Spawn / 0x10 Despawn / 0x15 Move pass through unchanged for
+            // LEGACY and are silently dropped by MODERN / LATEST clients
+            // that don't map them); an admin can still call
+            // EntityManager::setNetworkSync(false) to force byte-aligned
+            // wire for H1Z1 replay recording.
             LightweightMC::World::EntityManager::getInstance().spawnForSession(
                 session, worldManager.getWorldStorageFor(session.worldId), clientFd, packetSender);
         }
