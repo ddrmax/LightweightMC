@@ -35,6 +35,10 @@ public:
     std::string getUsage() const override { return "/damage <target> <amount> [damageType]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Mutates a player's HP on the wire, so console replies need to be
+    // broadcast back to every PLAY client (see CommandManager::executeCommand
+    // which sets CommandContext::broadcastThisReply from this flag).
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -43,7 +47,37 @@ public:
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Damage inflicted.");
+        float amount = 0.0f;
+        std::istringstream amountStream(args[1]);
+        if (!(amountStream >> amount) || amount < 0.0f)
+        {
+            ctx.reply("Damage amount \"" + args[1] + "\" must be a non-negative number. Usage: " + getUsage());
+            return;
+        }
+        int damageTypeCode = 0;
+        if (args.size() >= 3)
+        {
+            const std::string &damageType = args[2];
+            if (damageType == "melee") damageTypeCode = 0;
+            else if (damageType == "fall") damageTypeCode = 1;
+            else if (damageType == "drowning") damageTypeCode = 2;
+            else if (damageType == "fire") damageTypeCode = 3;
+            else if (damageType == "freeze") damageTypeCode = 4;
+            else
+            {
+                ctx.reply("Unknown damage type \"" + damageType + "\" (valid: melee|fall|drowning|fire|freeze). Usage: " + getUsage());
+                return;
+            }
+        }
+        if (ctx.applyDamageToPlayer(args[0], amount, damageTypeCode))
+        {
+            ctx.reply("Inflicted " + args[1] + " " + (args.size() >= 3 ? args[2] : std::string("melee")) +
+                      " damage on " + args[0] + ".");
+        }
+        else
+        {
+            ctx.reply("Damage update failed for " + args[0] + " (unknown player or invulnerable).");
+        }
     }
 };
 
@@ -56,11 +90,47 @@ public:
     std::string getUsage() const override { return "/kill [targets]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Kills a player on the wire -- always broadcast for console invocations.
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        (void)args;
-        ctx.reply("Entities killed.");
+        // Vanilla /kill can be typed bare (`/kill`) from a chat window to kill
+        // the caller; from the console we refuse because the caller is not a
+        // player on the wire. Multiple explicit targets are accepted so admins
+        // can clear a small list in one line.
+        std::vector<std::string> targets;
+        if (args.empty())
+        {
+            if (ctx.isConsole || ctx.sender.empty() || ctx.sender == "Console")
+            {
+                ctx.reply("Usage: /kill <target> [target ...] (console requires an explicit target)");
+                return;
+            }
+            targets.push_back(ctx.sender);
+        }
+        else
+        {
+            targets.assign(args.begin(), args.end());
+        }
+        int killed = 0;
+        for (const auto &t : targets)
+        {
+            if (ctx.killPlayer(t))
+                ++killed;
+        }
+        if (killed == 0)
+        {
+            ctx.reply("kill failed for every listed target (unknown or already-dead players).");
+        }
+        else if (targets.size() == 1 && killed == 1)
+        {
+            ctx.reply("Killed " + targets[0] + ".");
+        }
+        else
+        {
+            ctx.reply("Killed " + std::to_string(killed) + " of " + std::to_string(targets.size()) + " listed targets.");
+        }
     }
 };
 

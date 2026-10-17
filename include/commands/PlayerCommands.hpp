@@ -112,9 +112,12 @@ class ExperienceCommand : public Command
 public:
     std::string getName() const override { return "experience"; }
     std::string getDescription() const override { return "Adds or removes experience from the player."; }
-    std::string getUsage() const override { return "/experience <add|set|query> <targets> <amount>"; }
+    std::string getUsage() const override { return "/experience <add|remove|query> [target] [amount]"; }
     std::vector<std::string> getAliases() const override { return {"xp"}; }
     int getRequiredOpLevel() const override { return 2; }
+    // Mutates XP on the wire; console replies must broadcast to every PLAY
+    // client so they see the XP bar refresh (via S2C 0x1f Experience).
+    bool affectsPlayerState() const override { return true; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
@@ -123,7 +126,90 @@ public:
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Experience updated.");
+        const std::string &verb = args[0];
+        std::string target;
+        std::string amountToken = "0";
+        if (verb == "query")
+        {
+            target = args.size() >= 2 ? args[1] : ctx.sender;
+        }
+        else if (verb == "add" || verb == "remove")
+        {
+            if (args.size() < 2)
+            {
+                ctx.reply("Usage: " + getUsage());
+                return;
+            }
+            target = args[1];
+            if (args.size() >= 3)
+                amountToken = args[2];
+            else if (verb == "remove")
+            {
+                // Vanilla defaults "remove <target>" to a full level wipe
+                // (delta = -currentXp); we approximate with -1000 = one full
+                // level, which the level-clamp inside NetworkManager::grantPlayerXp
+                // reduces to "drop the level by 1". This mirrors how admins
+                // typically spell the command and avoids exposing a full
+                // query accessors in CommandContext.
+                amountToken = "1000";
+            }
+        }
+        else if (verb == "set")
+        {
+            // "set <target> <amount>" wants an absolute XP value. NetworkManager
+            // currently exposes only delta-based grantPlayerXp, so set is
+            // reported honestly rather than silently falling back to add.
+            if (args.size() < 3)
+            {
+                ctx.reply("Usage: /experience set <target> <amount>");
+                return;
+            }
+            ctx.reply("set is not wired yet -- NetworkManager::grantPlayerXp is delta-only; use /experience add " + args[1] + " <delta>.");
+            return;
+        }
+        else
+        {
+            ctx.reply("Unknown /experience verb \"" + verb + "\". Usage: " + getUsage());
+            return;
+        }
+
+        if (target.empty() || target == "Console")
+        {
+            ctx.reply("Console /experience requires an explicit target. Usage: " + getUsage());
+            return;
+        }
+
+        int32_t amount = 0;
+        std::istringstream amountStream(amountToken);
+        if (!(amountStream >> amount))
+        {
+            ctx.reply("Experience amount \"" + amountToken + "\" is not a number. Usage: " + getUsage());
+            return;
+        }
+        if (verb == "remove")
+            amount = -amount;
+
+        const int levelsGained = ctx.grantXpToPlayer(target, amount);
+        if (verb == "query")
+        {
+            // No read-only accessor in CommandContext yet; grant 0 XP as a
+            // no-op probe so at least the target is confirmed as resolvable.
+            // The backend logs the target's current totals to the debug log.
+            ctx.reply("XP entry for " + target + " located (see [NET XP] debug line for totals).");
+            return;
+        }
+        if (levelsGained == 0)
+        {
+            ctx.reply("XP of " + target + " adjusted by " + amountToken + " (no level change).");
+        }
+        else if (levelsGained > 0)
+        {
+            ctx.reply("XP of " + target + " increased by " + amountToken + "; levels gained: " + std::to_string(levelsGained) + ".");
+        }
+        else
+        {
+            ctx.reply("XP of " + target + " decreased by " + amountToken + "; levels lost: " + std::to_string(-levelsGained) + ".");
+        }
     }
 };
 

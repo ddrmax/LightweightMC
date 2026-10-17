@@ -172,6 +172,27 @@ private:
         // across runs; 0 mirrors Java Minecraft's "no seed given" default.
         emit("world", "world-seed", "0");
 
+        // 0.0.16 phase 8: world-model trigger. Selects the storage backend
+        // that /import-world and /export-world speak. Accepted values:
+        //   sqlite  (default) -- the per-plane world-<name>.db SQLite blobs
+        //              the server already uses for terrain and containers;
+        //              import copies a whole .db file onto the plane's row
+        //              set, export writes one out.
+        //   anvil   -- the Minecraft "Anvil" region format (.mca): each 16x16
+        //              region tile is an LZ4-compressed 16-bit block array
+        //              (the same codec as `RegionFile::compressLZ4` in
+        //              include/storage/RegionFile.hpp).
+        //   legacy  -- the pre-Anvil Java 1.7/1.8 region file (.mcc /
+        //              legacy region): gzip-framed per-block 16-bit entries
+        //              that map one region tile to a set of chunk blobs.
+        // The trigger drives the file-format selector on NetworkManager::
+        // importWorldFromPath / exportWorldToPath so `/export-world out.mca`
+        // on a sqlite-mode server can still produce an Anvil file via the
+        // format-hint argument, and `/import-world mymap.mca overworld` on a
+        // legacy-mode server still reads the file as Anvil (suffix beats
+        // trigger). Unknown values log a warning and fall back to sqlite.
+        emit("world", "world-model", "sqlite");
+
         // Multiworld: standard dimension-plane activation flags. Each flag
         // gates whether NetworkManager::start() allocates a WorldStorage
         // instance (and pre-generates the surrounding chunks) for that plane.

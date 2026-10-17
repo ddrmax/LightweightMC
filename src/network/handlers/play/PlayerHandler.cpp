@@ -148,6 +148,50 @@ namespace PlayerHandler
                 return net.updatePlayerSpawnByName(name, x, y, z);
             };
 
+            // Phase 6 gameplay backends -- the /damage, /kill and /experience
+            // chat stubs used to reply "Damage inflicted."/"Entities killed."/"
+            // Experience updated." without touching any state; wire them to
+            // NetworkGameplay.cpp's NetworkManager entry points so HP/XP
+            // mutations actually reach the target session and every non-fatal
+            // damage step emits an UpdateHealth (0x06), kills emit
+            // DeathCombatEvent (0x42), and XP grants emit Experience (0x1f).
+            // /respawn is wired too even though it wasn't registered yet --
+            // harmless and future-proof so admins can force a respawn via chat.
+            ctx.applyDamageToPlayer = [&net](const std::string &name, float amount, int damageTypeCode) -> bool
+            {
+                return net.applyDamageToPlayer(name, amount, damageTypeCode);
+            };
+            ctx.killPlayer = [&net](const std::string &name) -> bool
+            {
+                return net.killPlayer(name, 0);
+            };
+            ctx.respawnPlayer = [&net](const std::string &name) -> bool
+            {
+                return net.respawnPlayer(name);
+            };
+            ctx.grantXpToPlayer = [&net](const std::string &name, int32_t amount) -> int
+            {
+                return net.grantPlayerXp(name, amount);
+            };
+
+            // Phase 8 world-model backends -- /import-world and /export-world
+            // consult NetworkManager::m_worldModel (boot-selected via the
+            // `[world] world-model` key) to decide which file format to
+            // speak. `formatHint` lets the caller pin sqlite/anvil/legacy
+            // independent of the boot default.
+            ctx.importWorldFromPath = [&net](const std::string &path, const std::string &planeName, const std::string &formatHint) -> bool
+            {
+                return net.importWorldFromPath(path, planeName, formatHint);
+            };
+            ctx.exportWorldToPath = [&net](const std::string &path, const std::string &planeName, const std::string &formatHint) -> bool
+            {
+                return net.exportWorldToPath(path, planeName, formatHint);
+            };
+            ctx.worldModelName = [&net]() -> std::string
+            {
+                return net.worldModelName();
+            };
+
             CommandManager::getInstance().executeCommand(ctx, message);
             return;
         }

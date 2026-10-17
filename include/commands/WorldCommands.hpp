@@ -875,3 +875,128 @@ public:
         }
     }
 };
+
+// -----------------------------------------------------------------------------
+// Phase 8 (0.0.16) world-model trigger -- /import-world and /export-world.
+//
+// The CommandContext hooks (importWorldFromPath / exportWorldToPath / worldModelName)
+// already exist on the ctx struct; the two handlers here just forward the
+// args onto those closures and format a human-readable reply. Format resolution
+// lives inside NetworkManager::importWorldFromPath / exportWorldToPath so
+// the sqlite / anvil / legacy backends can consult m_worldModel -- the
+// command handler only needs to know whether to override that value with an
+// explicit third positional or with a filename-suffix guess (.mca = anvil,
+// .mce / .dat = legacy, .db = sqlite). When the caller passes no explicit
+// hint and no suffix matches, we pass "" so NetworkManager falls back to the
+// boot-selected world model.
+//
+// Op level 3 mirrors /world's -- these commands change server state, not one
+// player's state, so affectsPlayerState() returns false like WorldCommand.
+// -----------------------------------------------------------------------------
+class ImportWorldCommand : public Command
+{
+public:
+    std::string getName() const override { return "import-world"; }
+    std::string getDescription() const override
+    {
+        return "Load a world file into a registered plane using the current world-model backend.";
+    }
+    std::string getUsage() const override
+    {
+        return "/import-world <path> [plane-name] [format: sqlite|anvil|legacy]";
+    }
+    std::vector<std::string> getAliases() const override { return {}; }
+    int getRequiredOpLevel() const override { return 3; }
+    bool affectsPlayerState() const override { return false; }
+
+    void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
+    {
+        if (args.empty())
+        {
+            ctx.reply("Usage: " + getUsage());
+            return;
+        }
+        const std::string &path = args[0];
+        std::string planeName = "overworld";
+        if (args.size() >= 2)
+            planeName = args[1];
+        std::string hint;
+        if (args.size() >= 3)
+            hint = args[2];
+        else
+        {
+            // Best-effort suffix -> format inference so admins can type
+            // `/import-world plain.mca overworld` without repeating the tag.
+            const auto dot = path.rfind('.');
+            if (dot != std::string::npos)
+            {
+                std::string suffix = path.substr(dot + 1);
+                for (auto &c : suffix)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (suffix == "mca")       hint = "anvil";
+                else if (suffix == "mce")  hint = "legacy";
+                else if (suffix == "db")   hint = "sqlite";
+            }
+        }
+        if (!ctx.importWorldFromPath(path, planeName, hint))
+        {
+            ctx.reply("Could not import '" + path + "' into plane '" + planeName + "'.");
+            return;
+        }
+        ctx.reply("Imported '" + path + "' into plane '" + planeName +
+                  "' via world model '" + ctx.worldModelName() + "'");
+    }
+};
+
+class ExportWorldCommand : public Command
+{
+public:
+    std::string getName() const override { return "export-world"; }
+    std::string getDescription() const override
+    {
+        return "Copy a registered plane's world file to disk using the current world-model backend.";
+    }
+    std::string getUsage() const override
+    {
+        return "/export-world <path> [plane-name] [format: sqlite|anvil|legacy]";
+    }
+    std::vector<std::string> getAliases() const override { return {}; }
+    int getRequiredOpLevel() const override { return 3; }
+    bool affectsPlayerState() const override { return false; }
+
+    void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
+    {
+        if (args.empty())
+        {
+            ctx.reply("Usage: " + getUsage());
+            return;
+        }
+        const std::string &path = args[0];
+        std::string planeName = "overworld";
+        if (args.size() >= 2)
+            planeName = args[1];
+        std::string hint;
+        if (args.size() >= 3)
+            hint = args[2];
+        else
+        {
+            const auto dot = path.rfind('.');
+            if (dot != std::string::npos)
+            {
+                std::string suffix = path.substr(dot + 1);
+                for (auto &c : suffix)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (suffix == "mca")       hint = "anvil";
+                else if (suffix == "mce")  hint = "legacy";
+                else if (suffix == "db")   hint = "sqlite";
+            }
+        }
+        if (!ctx.exportWorldToPath(path, planeName, hint))
+        {
+            ctx.reply("Could not export plane '" + planeName + "' to '" + path + "'.");
+            return;
+        }
+        ctx.reply("Exported plane '" + planeName + "' to '" + path +
+                  "' via world model '" + ctx.worldModelName() + "'");
+    }
+};

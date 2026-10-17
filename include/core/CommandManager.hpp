@@ -196,6 +196,62 @@ struct CommandContext
     std::function<bool(const std::string &playerName, double x, double y, double z)> setPlayerSpawn =
         [](const std::string &, double, double, double) -> bool { return false; };
 
+    // ------------------------------------------------------------------------
+    // Phase 6 backends (implemented in src/network/NetworkGameplay.cpp). Before
+    // this hotfix the /damage, /kill and /experience commands on the Entity/
+    // Player header stubs only echoed "Damage inflicted."/"Entities killed."/"
+    // Experience updated." without touching any player. The backends already
+    // existed -- NetworkManager::applyDamageToPlayer / killPlayer / respawnPlayer
+    // / grantPlayerXp -- but the command layer never reached them. Add hooks so
+    // a chat or console invocation actually mutates the target's HP / XP, emits
+    // the S2C UpdateHealth (0x06) / DeathCombatEvent (0x42) / Experience (0x1f)
+    // / Position (0x08) packets, and persists the new state to SQLite.
+    //
+    // `damageTypeCode` mirrors the /damage optional damageType argument
+    // (0=melee, 1=fall, 2=drowning, 3=fire, 4=freeze) and is used only for
+    // logging; the caller is expected to have already gated the call through
+    // the matching GameRules entry.
+    // ------------------------------------------------------------------------
+    std::function<bool(const std::string &playerName, float amount, int damageTypeCode)> applyDamageToPlayer =
+        [](const std::string &, float, int) -> bool { return false; };
+    std::function<bool(const std::string &playerName)> killPlayer =
+        [](const std::string &) -> bool { return false; };
+    std::function<bool(const std::string &playerName)> respawnPlayer =
+        [](const std::string &) -> bool { return false; };
+    // grantXpToPlayer returns the number of levels gained (0-15) so the
+    // /experience command can decide whether to fire show_advancement_messages.
+    // Negative `amount` withdraws XP (removes levels when it crosses a boundary
+    // downward, so levels "lost" is reported as a negative count).
+    std::function<int(const std::string &playerName, int32_t amount)> grantXpToPlayer =
+        [](const std::string &, int32_t) -> int { return 0; };
+
+    // ------------------------------------------------------------------------
+    // Phase 8 world-model backends (implemented in NetworkWorlds.cpp). The
+    // server selects its world model at boot via the `[world] world-model`
+    // config key (values: "sqlite" the default .db plane files, "anvil"
+    // the .mca region format, "legacy" the pre-Anvil .mcc region format).
+    // /import-world and /export-world are op-level 4 system commands that
+    // consult that trigger: importWorldFromPath(path, planeName) loads a
+    // world file from `path` into the plane's live WorldStorage (overwriting
+    // the SQLite row set on the "sqlite" model or replacing the whole plane
+    // file on "anvil"/"legacy"), exportWorldToPath(path, planeName) writes
+    // the plane's chunks to `path` in the currently-selected format.
+    // Both return false on failure (missing plane, unreadable path, or
+    // world-model mismatch — import of an `.mca` file into a `sqlite`
+    // server requires the format hint, which the command derives from the
+    // path suffix).
+    // ------------------------------------------------------------------------
+    std::function<bool(const std::string &path, const std::string &planeName, const std::string &formatHint)> importWorldFromPath =
+        [](const std::string &, const std::string &, const std::string &) -> bool { return false; };
+    std::function<bool(const std::string &path, const std::string &planeName, const std::string &formatHint)> exportWorldToPath =
+        [](const std::string &, const std::string &, const std::string &) -> bool { return false; };
+    // Returns the currently-selected world model as a lowercase string so the
+    // /import-world and /export-world handlers can produce a helpful message
+    // ("Imported 12 chunks into overworld as sqlite..."). Defaults to "sqlite"
+    // so bare console runs still produce sensible output.
+    std::function<std::string()> worldModelName =
+        []() -> std::string { return "sqlite"; };
+
     // Command handlers for /setblock, /place and /setworldspawn need to
     // know which plane to write on when the invocation comes from a chat
     // context (the caller's live session knows its PlayerSession::worldId;

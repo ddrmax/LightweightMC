@@ -78,6 +78,61 @@ namespace LightweightMC::Storage
                     // (id 97 in the reserved band).
     };
 
+    // ---------------------------------------------------------------------
+    // Phase 8 world-model trigger. Selects the file-format backend that
+    // NetworkManager::importWorldFromPath / exportWorldToPath speak when
+    // the /import-world and /export-world commands run. The trigger lives
+    // in server.properties under `[world] world-model = sqlite|anvil|legacy`
+    // (default sqlite); per-invocation format-hint from the command can
+    // override it. Unknown values fall back to SQLITE at boot and log a
+    // warn so admins see the trigger actually reached the parser.
+    // ---------------------------------------------------------------------
+    enum class WorldModel
+    {
+        SQLITE,   // default -- the server's own per-plane SQLite .db files
+                  // (world.db, world-nether.db, world-<custom>.db). Import
+                  // copies an .db file over the plane's SQLite database;
+                  // export writes the plane's database to the requested
+                  // path. This is the only mode that round-trips every
+                  // subsystem (terrain, containers, entities) unchanged.
+        ANVIL,    // Anvil region format (.mca). A file-level container of
+                  // region tiles, each tile holding 16x16 chunk blobs
+                  // LZ4-compressed with the same codec as
+                  // RegionFile::compressLZ4. Import reads the region tiles
+                  // and seeds the plane's chunk blobs; export writes them
+                  // back out. Container/entity state is not carried across
+                  // the boundary because the Anvil format does not model
+                  // it -- terrain only.
+        LEGACY    // Pre-Anvil vanilla region format (.mcc / legacy region
+                  // file). Same shape as ANVIL in this build -- gzip framing
+                  // would require the header-only tiny-gzip we do not yet
+                  // depend on, so we reuse the LZ4 codec as a placeholder
+                  // and document the wire-format divergence in the log.
+    };
+
+    // Parses a config-string / command-string into a WorldModel. Returns
+    // SQLITE on empty or unknown values; callers log a warn when the
+    // fallback triggers.
+    inline WorldModel worldModelFromName(const std::string &name)
+    {
+        if (name == "anvil")  return WorldModel::ANVIL;
+        if (name == "legacy") return WorldModel::LEGACY;
+        return WorldModel::SQLITE;
+    }
+    // Reverse of worldModelFromName -- used by NetworkManager::worldModelName
+    // so the /import-world and /export-world commands can print the trigger
+    // value in their confirmation replies.
+    inline const char *worldModelToName(WorldModel m)
+    {
+        switch (m)
+        {
+            case WorldModel::ANVIL:  return "anvil";
+            case WorldModel::LEGACY: return "legacy";
+            case WorldModel::SQLITE:
+            default:                  return "sqlite";
+        }
+    }
+
 
     class WorldStorage
     {

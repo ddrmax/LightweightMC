@@ -115,6 +115,13 @@ namespace LightweightMC::Core
         // src/network/NetworkWorlds.cpp for the API backing these).
         cmdMgr.registerCommand(std::make_shared<GotorCommand>());
         cmdMgr.registerCommand(std::make_shared<WorldCommand>());
+        // Phase 8 (0.0.16) world-model trigger: /import-world and /export-
+        // world consult CommandContext::importWorldFromPath / exportWorldTo
+        //Path closures that Server.cpp wires to NetworkManager. See
+        //include/commands/WorldCommands.hpp for the two command classes and
+        //src/network/NetworkWorlds.cpp for the sqlite backend implementation.
+        cmdMgr.registerCommand(std::make_shared<ImportWorldCommand>());
+        cmdMgr.registerCommand(std::make_shared<ExportWorldCommand>());
 
         // --- Entities & Combat ---
         cmdMgr.registerCommand(std::make_shared<BossbarCommand>());
@@ -269,6 +276,45 @@ namespace LightweightMC::Core
         consoleCtx.setPlayerSpawn = [this](const std::string &name, double x, double y, double z) -> bool
         {
             return m_network.updatePlayerSpawnByName(name, x, y, z);
+        };
+
+        // Phase 6 backends: the /damage, /kill, /respawn and /experience
+        // headers now actually mutate the target via NetworkGameplay.cpp's
+        // NetworkManager entry points (see applyDamageToPlayer / killPlayer /
+        // respawnPlayer / grantPlayerXp). The damageTypeCode carries the /damage
+        // optional 3rd arg (0=melee/1=fall/2=drowning/3=fire/4=freeze) purely
+        // for logging; the caller has already gated the damage rule via
+        // GameRules.
+        consoleCtx.applyDamageToPlayer = [this](const std::string &name, float amount, int damageTypeCode) -> bool
+        {
+            return m_network.applyDamageToPlayer(name, amount, damageTypeCode);
+        };
+        consoleCtx.killPlayer = [this](const std::string &name) -> bool
+        {
+            return m_network.killPlayer(name, 0);
+        };
+        consoleCtx.respawnPlayer = [this](const std::string &name) -> bool
+        {
+            return m_network.respawnPlayer(name);
+        };
+        consoleCtx.grantXpToPlayer = [this](const std::string &name, int32_t amount) -> int
+        {
+            return m_network.grantPlayerXp(name, amount);
+        };
+
+        // Phase 8 world-model backends -- see the matching block in the
+        // threaded console loop for the full rationale.
+        consoleCtx.importWorldFromPath = [this](const std::string &path, const std::string &planeName, const std::string &formatHint) -> bool
+        {
+            return m_network.importWorldFromPath(path, planeName, formatHint);
+        };
+        consoleCtx.exportWorldToPath = [this](const std::string &path, const std::string &planeName, const std::string &formatHint) -> bool
+        {
+            return m_network.exportWorldToPath(path, planeName, formatHint);
+        };
+        consoleCtx.worldModelName = [this]() -> std::string
+        {
+            return m_network.worldModelName();
         };
 
         CommandManager::getInstance().executeCommand(consoleCtx, inputLine);
@@ -433,6 +479,48 @@ namespace LightweightMC::Core
             consoleCtx.setPlayerSpawn = [network](const std::string &name, double x, double y, double z) -> bool
             {
                 return network->updatePlayerSpawnByName(name, x, y, z);
+            };
+
+            // Phase 6 backends -- see the matching block in
+            // Server::processConsoleInput for the full rationale. The threaded
+            // console needs identical wiring so /damage, /kill, /respawn and
+            // /experience issued from the actual server thread mutate the live
+            // session (or fall back to the SQLite row when the target is
+            // offline) instead of just printing a generic ack.
+            consoleCtx.applyDamageToPlayer = [network](const std::string &name, float amount, int damageTypeCode) -> bool
+            {
+                return network->applyDamageToPlayer(name, amount, damageTypeCode);
+            };
+            consoleCtx.killPlayer = [network](const std::string &name) -> bool
+            {
+                return network->killPlayer(name, 0);
+            };
+            consoleCtx.respawnPlayer = [network](const std::string &name) -> bool
+            {
+                return network->respawnPlayer(name);
+            };
+            consoleCtx.grantXpToPlayer = [network](const std::string &name, int32_t amount) -> int
+            {
+                return network->grantPlayerXp(name, amount);
+            };
+
+            // Phase 8 world-model backends -- NetworkWorlds.cpp::importWorld/
+            // exportWorld consult NetworkManager::m_worldModel to pick the
+            // format ("sqlite" .db copy, "anvil" .mca region, "legacy" .mcc
+            // region). The 3rd argument is an optional format override from
+            // the /import-world <path> command line; empty means "use the
+            // boot-selected default".
+            consoleCtx.importWorldFromPath = [network](const std::string &path, const std::string &planeName, const std::string &formatHint) -> bool
+            {
+                return network->importWorldFromPath(path, planeName, formatHint);
+            };
+            consoleCtx.exportWorldToPath = [network](const std::string &path, const std::string &planeName, const std::string &formatHint) -> bool
+            {
+                return network->exportWorldToPath(path, planeName, formatHint);
+            };
+            consoleCtx.worldModelName = [network]() -> std::string
+            {
+                return network->worldModelName();
             };
 
             std::vector<std::string> history;

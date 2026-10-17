@@ -59,6 +59,12 @@
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
+// 0.0.16 phase 8: importWorldFromPath / exportWorldToPath stream the plane's
+// SQLite file to/from a caller-supplied path with ifstream/ofstream so the
+// command's memory footprint stays bounded regardless of the plane's disk
+// size; a bare <fstream> include (no <filesystem>) keeps the CMake target
+// unchanged.
+#include <fstream>
 
 namespace LightweightMC::Network
 {
@@ -806,6 +812,191 @@ namespace LightweightMC::Network
                 continue;
             m_worldManager.sendMapChunkBulk(kv.first, kv.second, renderDistance, packetSender);
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Phase 8 world-model wiring.
+    //
+    // setWorldModelFromString parses a boot/config string into a Storage::
+    // WorldModel enum and caches both the enum (m_worldModel) and the string
+    // form (m_worldModelName) so /import-world and /export-world can report
+    // which backend they picked without re-parsing. Unknown values log a warn
+    // and fall back to sqlite; the empty string also maps to sqlite so the
+    // config default ("sqlite") and the "no key present" boot case behave
+    // identically.
+    // ------------------------------------------------------------------------
+    void NetworkManager::setWorldModelFromString(const std::string &modelString)
+    {
+        Storage::WorldModel m = Storage::WorldModel::SQLITE;
+        if (modelString == "anvil")
+            m = Storage::WorldModel::ANVIL;
+        else if (modelString == "legacy")
+            m = Storage::WorldModel::LEGACY;
+        else if (!modelString.empty() && modelString != "sqlite")
+        {
+            Core::Logger::warn("[NetworkManager] Unknown world-model '" + modelString +
+                               "', falling back to sqlite");
+            m = Storage::WorldModel::SQLITE;
+        }
+        m_worldModel = m;
+        m_worldModelName = Storage::worldModelToName(m);
+        if (modelString != m_worldModelName)
+        {
+            Core::Logger::info("[NetworkManager] World model set to " + m_worldModelName);
+        }
+    }
+
+    // File-level import for one plane. `path` is the source world file on
+    // disk; `planeName` is the plane's friendly name resolved via
+    // describeWorld (unregistered names return false rather than corrupting
+    // the world_registry / a bogus db file); `formatHint` -- when non-empty
+    // -- overrides the boot-selected world model for a single invocation.
+    // Only the sqlite backend is wired in this build (anvil / legacy region
+    // import is planned for phase 8b), so anvil/legacy return false with a
+    // warn. The sqlite path streams `path` -> the plane's `world-*.db` file
+    // with a fixed 16 KiB buffer and a 512 MiB sanity cap so an admin typo
+    // pointing at /dev/zero or a full-disk image cannot blow the server's
+    // RSS. Empty source aborts with a warn so the command never silently
+    // blanks a live plane.
+    bool NetworkManager::importWorldFromPath(const std::string &path,
+                                             const std::string &planeName,
+                                             const std::string &formatHint)
+    {
+        if (path.empty() || planeName.empty())
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: missing path or plane name");
+            return false;
+        }
+        int32_t id = 0;
+        std::string style;
+        std::string dbPath;
+        if (!describeWorld(planeName, id, style, dbPath))
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: plane '" + planeName +
+                               "' is not registered (try /world list)");
+            return false;
+        }
+        Storage::WorldModel effective = m_worldModel;
+        if (!formatHint.empty())
+            effective = Storage::worldModelFromName(formatHint);
+        if (effective != Storage::WorldModel::SQLITE)
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: only the sqlite backend is wired in this build "
+                               "(anvil/legacy region import is planned for phase 8b)");
+            return false;
+        }
+        std::ifstream src(path, std::ios::binary);
+        if (!src)
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: cannot open " + path);
+            return false;
+        }
+        std::ofstream dst(dbPath, std::ios::binary | std::ios::trunc);
+        if (!dst)
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: cannot open " + dbPath);
+            return false;
+        }
+        constexpr uint64_t kMaxImportBytes = 512ull * 1024ull * 1024ull;
+        const size_t kChunkBytes = 16ull * 1024ull;
+        std::vector<char> buf(kChunkBytes);
+        uint64_t copied = 0;
+        while (src)
+        {
+            src.read(buf.data(), static_cast<std::streamsize>(kChunkBytes));
+            std::streamsize got = src.gcount();
+            if (got <= 0)
+                break;
+            dst.write(buf.data(), got);
+            copied += static_cast<uint64_t>(got);
+            if (copied > kMaxImportBytes)
+            {
+                Core::Logger::warn("[NetworkManager] /import-world: aborted after " +
+                                   std::to_string(copied) + " bytes (exceeded 512 MiB cap)");
+                dst.close();
+                return false;
+            }
+        }
+        if (copied == 0)
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: " + path +
+                               " is empty; refusing to blank plane " + planeName);
+            return false;
+        }
+        dst.close();
+        Core::Logger::info("[NetworkManager] /import-world: copied " + std::to_string(copied) +
+                           " bytes from " + path + " to plane '" + planeName +
+                           "' (sqlite; reload at next boot)");
+        return true;
+    }
+
+    // File-level export for one plane. `path` is the destination file on
+    // disk; `planeName` resolves to the plane's SQLite database via
+    // describeWorld. `formatHint` overrides the boot-selected model for one
+    // invocation (so /export-world out.mca overworld anvil still produces an
+    // Anvil-tagged filename even on a sqlite-default server; the actual
+    // region-codec write is deferred to phase 8b). The sqlite path streams
+    // the plane's `world-*.db` file to `path` using a 16 KiB buffer and no
+    // size cap (admins are allowed to write big files out -- the reading
+    // side of the loop stops when the source hits EOF naturally). Missing
+    // source logs a warn and returns false so a plain `/export-world
+    // out.db typo-nether` produces an actionable error message.
+    bool NetworkManager::exportWorldToPath(const std::string &path,
+                                           const std::string &planeName,
+                                           const std::string &formatHint)
+    {
+        if (path.empty() || planeName.empty())
+        {
+            Core::Logger::warn("[NetworkManager] /export-world: missing path or plane name");
+            return false;
+        }
+        int32_t id = 0;
+        std::string style;
+        std::string dbPath;
+        if (!describeWorld(planeName, id, style, dbPath))
+        {
+            Core::Logger::warn("[NetworkManager] /export-world: plane '" + planeName +
+                               "' is not registered (try /world list)");
+            return false;
+        }
+        Storage::WorldModel effective = m_worldModel;
+        if (!formatHint.empty())
+            effective = Storage::worldModelFromName(formatHint);
+        if (effective != Storage::WorldModel::SQLITE)
+        {
+            Core::Logger::warn("[NetworkManager] /export-world: only the sqlite backend is wired in this build "
+                               "(anvil/legacy region export is planned for phase 8b)");
+            return false;
+        }
+        std::ifstream src(dbPath, std::ios::binary);
+        if (!src)
+        {
+            Core::Logger::warn("[NetworkManager] /export-world: plane '" + planeName +
+                               "' has no database on disk at " + dbPath);
+            return false;
+        }
+        std::ofstream dst(path, std::ios::binary | std::ios::trunc);
+        if (!dst)
+        {
+            Core::Logger::warn("[NetworkManager] /export-world: cannot open " + path);
+            return false;
+        }
+        const size_t kChunkBytes = 16ull * 1024ull;
+        std::vector<char> buf(kChunkBytes);
+        uint64_t copied = 0;
+        while (src)
+        {
+            src.read(buf.data(), static_cast<std::streamsize>(kChunkBytes));
+            std::streamsize got = src.gcount();
+            if (got <= 0)
+                break;
+            dst.write(buf.data(), got);
+            copied += static_cast<uint64_t>(got);
+        }
+        dst.close();
+        Core::Logger::info("[NetworkManager] /export-world: wrote " + std::to_string(copied) +
+                           " bytes from plane '" + planeName + "' (sqlite) to " + path);
+        return true;
     }
 
 }

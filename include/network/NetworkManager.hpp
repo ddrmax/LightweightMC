@@ -47,6 +47,14 @@ namespace LightweightMC::Network
         std::unordered_map<int32_t, std::unique_ptr<Storage::WorldStorage>> m_worlds;
         LightweightMC::Storage::Database m_database{"server_data.db"};
         World::WorldManager m_worldManager{m_worlds};
+        // Phase 8 world-model trigger (Storage::WorldModel::SQLITE / ANVIL /
+        // LEGACY). Set at boot from `[world] world-model` in server.properties
+        // (parsed in NetworkSocket.cpp::NetworkManager::start) and consulted by
+        // NetworkWorlds.cpp's importWorldFromPath / exportWorldToPath to decide
+        // which file-format backend to speak. Defaults to SQLITE so a bare
+        // console run without a boot pass still produces sensible output.
+        Storage::WorldModel m_worldModel{Storage::WorldModel::SQLITE};
+        std::string m_worldModelName{"sqlite"}; // cached string form so CommandContext::worldModelName can be a plain getter.
         // Server-side entity model (mobs / aggressive mobs / villagers) is
         // accessed via World::EntityManager::getInstance(); no member needed
         // because the singleton is process-lifetime and NetworkManager is
@@ -291,6 +299,41 @@ namespace LightweightMC::Network
         // no WorldStorage). Used by /world list to produce a display list
         // without the caller having to know SQLite.
         std::vector<std::string> listWorldNames() const;
+
+        // Phase 8 world-model trigger accessors. worldModel() returns the
+        // Storage::WorldModel enum; worldModelName() returns the string form
+        // ("sqlite" / "anvil" / "legacy") so CommandContext::worldModelName
+        // is a plain getter for /import-world and /export-world to include
+        // in their confirmation replies.
+        Storage::WorldModel worldModel() const { return m_worldModel; }
+        std::string worldModelName() const { return m_worldModelName; }
+
+        // Boot-time / hot-swap setter for the world model trigger. Called
+        // from NetworkSocket.cpp::NetworkManager::start after parsing the
+        // `[world] world-model` config key and by any future admin command
+        // that decides to flip the trigger at runtime (currently we do not
+        // expose such a command; keeping the setter available makes it a
+        // one-line addition later).
+        void setWorldModelFromString(const std::string &modelString);
+
+        // ---- Phase 8 import / export backends -----------------------------
+        // Import or export a plane's chunks to/from `path` on disk. `planeName`
+        // is the friendly name (overworld / nether / end / aether / custom)
+        // resolved through the same world_registry lookup the /world and /gotor
+        // commands use, so an unregistered name returns false rather than
+        // writing garbage. `formatHint` overrides the boot-selected world-model
+        // trigger for a single invocation -- pass an empty string to use the
+        // trigger, or "sqlite"/"anvil"/"legacy" to pin the format. When
+        // formatHint is empty the command's handler usually already infers it
+        // from the path suffix (.db -> sqlite, .mca -> anvil, .mcc -> legacy),
+        // so both the trigger and the caller's suffix agree most of the time
+        // and disagreement just logs a warn.
+        bool importWorldFromPath(const std::string &path,
+                                 const std::string &planeName,
+                                 const std::string &formatHint);
+        bool exportWorldToPath(const std::string &path,
+                               const std::string &planeName,
+                               const std::string &formatHint);
 
         // ---- Async chunk-stream flush -----------------------------------------
         // Every game tick, iterate the live sessions and re-run WorldManager's

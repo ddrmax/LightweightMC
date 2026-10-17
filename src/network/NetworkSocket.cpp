@@ -282,6 +282,14 @@ namespace LightweightMC::Network
         const std::string genStyle = ConfigManager::getInstance().getString("world", "gen-style", "overworld");
         const std::uint64_t worldSeed = ConfigManager::getInstance().get<std::uint64_t>("world", "world-seed", 0ULL);
 
+        // 0.0.16 phase 8: world-model trigger. Boot-read the value and hand
+        // it to NetworkManager::setWorldModelFromString, which stores both
+        // the enum (m_worldModel) and the string form (m_worldModelName) so
+        // /import-world and /export-world can report which backend they
+        // picked. Unknown values log a warn and fall back to sqlite.
+        const std::string worldModelStr = ConfigManager::getInstance().getString("world", "world-model", "sqlite");
+        setWorldModelFromString(worldModelStr);
+
         Storage::GenStyle overworldStyle = Storage::GenStyle::OVERWORLD;
         if (genStyle == "superflat")
             overworldStyle = Storage::GenStyle::SUPERFLAT;
