@@ -1071,4 +1071,86 @@ namespace LightweightMC::Storage
         return -1;
     }
 
+    // ---- Phase 8b region-codec surface -------------------------------------
+    // See NetworkWorlds.cpp's /import-world and /export-world phase 8b
+    // branches: they call these two accessors to walk a plane's chunk rows
+    // for an Anvil (.mca) or Legacy (.mcc) container without exposing the
+    // private sqlite3* handle to NetworkManager.
+    bool WorldStorage::forEachChunk(ForEachChunkFn fn)
+    {
+        if (!m_db)
+            return false;
+        // Iteration must not disturb m_getChunkStmt (getChunkBlob may be
+        // running concurrently on the network send thread), so we prepare a
+        // separate statement for the walk. Row lifetime is inside this call
+        // only -- sqlite3_column_blob returns a pointer into stmt-owned
+        // memory that the next sqlite3_step invalidates.
+        sqlite3_stmt *stmt = nullptr;
+        const char *sql = "SELECT chunk_x, chunk_z, data_blob FROM chunks;";
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("WorldStorage: forEachChunk SELECT failed: " +
+                                std::string(sqlite3_errmsg(m_db)));
+            if (stmt)
+                sqlite3_finalize(stmt);
+            return false;
+        }
+        int rc = sqlite3_step(stmt);
+        while (rc == SQLITE_ROW)
+        {
+            const int cx = sqlite3_column_int(stmt, 0);
+            const int cz = sqlite3_column_int(stmt, 1);
+            const void *blob = sqlite3_column_blob(stmt, 2);
+            const int blobBytes = sqlite3_column_bytes(stmt, 2);
+            fn(cx, cz, static_cast<const uint8_t *>(blob),
+                static_cast<std::size_t>(blobBytes < 0 ? 0 : blobBytes));
+            rc = sqlite3_step(stmt);
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool WorldStorage::saveRawChunkBlob(int chunkX, int chunkZ,
+                                        const uint8_t *compressedBlob,
+                                        std::size_t blobBytes)
+    {
+        if (!m_db || !m_saveChunkStmt)
+            return false;
+        sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+        sqlite3_reset(m_saveChunkStmt);
+        sqlite3_clear_bindings(m_saveChunkStmt);
+        sqlite3_bind_int(m_saveChunkStmt, 1, chunkX);
+        sqlite3_bind_int(m_saveChunkStmt, 2, chunkZ);
+        sqlite3_bind_blob(m_saveChunkStmt, 3, compressedBlob,
+                          static_cast<int>(blobBytes), SQLITE_TRANSIENT);
+        // INSERT OR REPLACE statements produce no output rows, so sqlite3_step
+        // returns SQLITE_DONE (101) or the number of rows written (>=1) on
+        // success and a negative SQLite error code on failure.
+        const int stepRc = sqlite3_step(m_saveChunkStmt);
+        if (stepRc < 0)
+        {
+            sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            Core::Logger::warn("WorldStorage: saveRawChunkBlob at (" +
+                                std::to_string(chunkX) + "," +
+                                std::to_string(chunkZ) + ") failed: " +
+                                sqlite3_errmsg(m_db));
+            return false;
+        }
+        // Mark the plane's chunk as pre-generated so subsequent WorldStorage
+        // reads skip the on-demand generator (matching the "generated_chunks"
+        // bookkeeping used in generateChunk above).
+        const char *sqlMark =
+            "INSERT INTO generated_chunks (chunk_x, chunk_z) VALUES (?, ?);";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sqlMark, -1, &stmt, nullptr) == SQLITE_OK)
+        {
+            sqlite3_bind_int(stmt, 1, chunkX);
+            sqlite3_bind_int(stmt, 2, chunkZ);
+            sqlite3_step(stmt);
+        }
+        sqlite3_finalize(stmt);
+        sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+        return true;
+    }
+
 } // namespace LightweightMC::Storage

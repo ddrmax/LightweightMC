@@ -934,7 +934,7 @@ public:
                 for (auto &c : suffix)
                     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (suffix == "mca")       hint = "anvil";
-                else if (suffix == "mce")  hint = "legacy";
+                else if (suffix == "mce" || suffix == "dat") hint = "legacy";
                 else if (suffix == "db")   hint = "sqlite";
             }
         }
@@ -943,8 +943,14 @@ public:
             ctx.reply("Could not import '" + path + "' into plane '" + planeName + "'.");
             return;
         }
+        // The backend actually used for this call is `hint` when the
+        // caller supplied one, otherwise the boot-selected world-model.
+        // Reflect that in the reply so admins see which codec ran, not
+        // just the trigger default.
+        const std::string effective =
+            hint.empty() ? ctx.worldModelName() : hint;
         ctx.reply("Imported '" + path + "' into plane '" + planeName +
-                  "' via world model '" + ctx.worldModelName() + "'");
+                  "' via world model '" + effective + "'");
     }
 };
 
@@ -987,7 +993,7 @@ public:
                 for (auto &c : suffix)
                     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (suffix == "mca")       hint = "anvil";
-                else if (suffix == "mce")  hint = "legacy";
+                else if (suffix == "mce" || suffix == "dat") hint = "legacy";
                 else if (suffix == "db")   hint = "sqlite";
             }
         }
@@ -996,7 +1002,9 @@ public:
             ctx.reply("Could not export plane '" + planeName + "' to '" + path + "'.");
             return;
         }
+        const std::string effExport =
+            hint.empty() ? ctx.worldModelName() : hint;
         ctx.reply("Exported plane '" + planeName + "' to '" + path +
-                  "' via world model '" + ctx.worldModelName() + "'");
+                  "' via world model '" + effExport + "'");
     }
 };

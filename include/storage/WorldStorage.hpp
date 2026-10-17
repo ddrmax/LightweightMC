@@ -102,12 +102,20 @@ namespace LightweightMC::Storage
                   // and seeds the plane's chunk blobs; export writes them
                   // back out. Container/entity state is not carried across
                   // the boundary because the Anvil format does not model
-                  // it -- terrain only.
-        LEGACY    // Pre-Anvil vanilla region format (.mcc / legacy region
-                  // file). Same shape as ANVIL in this build -- gzip framing
-                  // would require the header-only tiny-gzip we do not yet
-                  // depend on, so we reuse the LZ4 codec as a placeholder
-                  // and document the wire-format divergence in the log.
+                  // it -- terrain only. Wired via NetworkWorlds.cpp::
+                  // importAnvilContainer / exportAnvilContainer since
+                  // 0.0.17 (phase 8b).
+        LEGACY    // Pre-Anvil vanilla region format (.mcc / .mce / legacy
+                  // region file). Same LZ4 payload as ANVIL in this build
+                  // -- gzip framing would require the header-only tiny-
+                  // gzip we do not yet depend on, so we reuse the LZ4
+                  // codec as a placeholder -- but framing diverges: LEGACY
+                  // is a flat chunk-count list with absolute chunk coords
+                  // while ANVIL groups into 16x16 region headers. The wire
+                  // divergence keeps both file extensions discoverable via
+                  // the 6-byte magic at file start. Import/export goes
+                  // through NetworkWorlds.cpp::importLegacyContainer /
+                  // exportLegacyContainer since 0.0.17 (phase 8b).
     };
 
     // Parses a config-string / command-string into a WorldModel. Returns
@@ -273,6 +281,33 @@ namespace LightweightMC::Storage
         // is preserved as section 0 (absY 0..15) and the remaining sections are zeroed.
         // Returns false if the chunk does not exist in the database.
         bool readChunkBlob(int chunkX, int chunkZ, std::vector<uint8_t> &outFull);
+
+    public:
+        // ---- Phase 8b region-codec surface ----------------------------------
+        // Expose the raw SQLite chunk rows so NetworkManager's /import-world
+        // and /export-world can round-trip an Anvil (.mca) or Legacy (.mcc)
+        // region container without touching WorldStorage's private sqlite3*
+        // handle directly. Blobs are LZ4-compressed as RegionFile::compressLZ4
+        // stores them; codec callers get the exact on-disk bytes so no
+        // re-compression or re-decompression is needed on export.
+        using ForEachChunkFn =
+            std::function<void(int, int, const uint8_t *, std::size_t)>;
+        // Iterate every row in this plane's `chunks` table in whatever order
+        // SQLite returns them. Callback receives (chunkX, chunkZ, blobPtr,
+        // blobBytes). Blob pointer is only valid for the callback duration --
+        // sqlite3_column_blob() owns it and it is invalidated on the next
+        // sqlite3_step. Callbacks that need to keep the bytes must copy them.
+        // Returns false when the SELECT failed or the sqlite3* handle is null.
+        bool forEachChunk(ForEachChunkFn fn);
+        // Write one already-compressed chunk blob back into the plane's
+        // `chunks` table via INSERT OR REPLACE (mirroring the WorldStorage::
+        // generateChunk save path). Used by /import-world when a container's
+        // chunk blob is being planted into the plane. Also marks the row in
+        // the `generated_chunks` table so the plane's runtime sees it as
+        // pre-generated on the next access. Returns false on a sqlite error.
+        bool saveRawChunkBlob(int chunkX, int chunkZ,
+                              const uint8_t *compressedBlob,
+                              std::size_t blobBytes);
     };
 
 } // namespace LightweightMC::Storage

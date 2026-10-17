@@ -64,10 +64,303 @@
 // command's memory footprint stays bounded regardless of the plane's disk
 // size; a bare <fstream> include (no <filesystem>) keeps the CMake target
 // unchanged.
+// 0.0.17 phase 8b: importAnvilContainer / importLegacyContainer /
+// exportAnvilContainer / exportLegacyContainer ride the same <fstream>
+// surface; WorldStorage gains public forEachChunk + saveRawChunkBlob so
+// the codec never has to touch the sqlite3* handle directly.
 #include <fstream>
+#include <functional>
+#include <tuple>
+#include <vector>
 
 namespace LightweightMC::Network
 {
+    // ---- Phase 8b region-container codec -----------------------------------
+    // Both container formats ride the plane's LZ4-compressed chunk blobs
+    // verbatim -- i.e. the same byte sequence WorldStorage stores in SQLite's
+    // `chunks` table (see WorldStorage.cpp::generateChunk). No transcoding
+    // happens between the container and the SQLite table, which keeps the
+    // import path's memory footprint bounded and prevents two-sided
+    // compress/decompress drift.
+    //
+    // ANVIL container (this build; .mca):
+    //   magic "ANVIL\0" (6 bytes) + version u8 (1) + flags u8 (0)  => 8 bytes
+    //   int32 BE regionCount
+    //   for each region:
+    //       int32 BE regionX, int32 BE regionZ, uint32 BE chunkCount
+    //       for each chunk:
+    //           u8 relX (0..15), u8 relZ (0..15)
+    //           uint32 BE blobBytes
+    //           blobBytes bytes: LZ4-compressed 131072-byte chunk blob
+    // LEGACY container (this build; .mcc / .dat):
+    //   magic "LEGACY" (6 bytes) + version u8 (1) + flags u8 (0)
+    //   uint32 BE chunkCount
+    //   for each chunk:
+    //       int32 BE chunkX, int32 BE chunkZ
+    //       uint32 BE blobBytes
+    //       blobBytes bytes: LZ4-compressed 131072-byte chunk blob
+    // The two containers share the same LZ4 payload for chunk blobs but
+    // differ in framing: ANVIL groups into 16x16 regions with per-region
+    // headers, LEGACY is a flat list with absolute chunk coords. The wire
+    // divergence is intentional so both file extensions remain
+    // discoverable via the 6-byte magic at file start.
+    static inline bool readBE32Into(std::istream &in, int32_t &out)
+    {
+        uint8_t b[4];
+        in.read(reinterpret_cast<char *>(b), 4);
+        if (in.gcount() < 4)
+            return false;
+        out = (static_cast<int32_t>(b[0]) << 24) |
+              (static_cast<int32_t>(b[1]) << 16) |
+              (static_cast<int32_t>(b[2]) << 8) |
+              (static_cast<int32_t>(b[3]));
+        return true;
+    }
+    static inline bool readBE32Into(std::istream &in, uint32_t &out)
+    {
+        int32_t tmp = 0;
+        if (!readBE32Into(in, tmp))
+            return false;
+        out = static_cast<uint32_t>(tmp);
+        return true;
+    }
+    static inline void writeBE32(std::ostream &out, uint32_t v)
+    {
+        uint8_t b[4] = {
+            static_cast<uint8_t>((v >> 24) & 0xff),
+            static_cast<uint8_t>((v >> 16) & 0xff),
+            static_cast<uint8_t>((v >> 8) & 0xff),
+            static_cast<uint8_t>(v & 0xff)};
+        out.write(reinterpret_cast<const char *>(b), 4);
+    }
+    static inline void writeBE32(std::ostream &out, int32_t v)
+    {
+        writeBE32(out, static_cast<uint32_t>(v));
+    }
+
+    // Anvil container reader: parse the region-framed byte stream from `in`
+    // and drop each chunk blob into `plane` via saveRawChunkBlob. Returns
+    // false on a malformed header / truncated stream so the caller logs the
+    // reason itself. `importedChunks` / `failedChunks` / `blobTotalBytes`
+    // are cumulative; caller logs them once.
+    static bool importAnvilContainer(std::istream &in,
+                                     Storage::WorldStorage &plane,
+                                     uint64_t &importedChunks,
+                                     uint64_t &failedChunks,
+                                     uint64_t &blobTotalBytes)
+    {
+        constexpr uint32_t kMaxRegions = 256u;
+        int32_t regionCount = 0;
+        if (!readBE32Into(in, regionCount) || regionCount < 0)
+            return false;
+        if (static_cast<uint32_t>(regionCount) > kMaxRegions)
+            return false;
+        for (int32_t r = 0; r < regionCount; ++r)
+        {
+            int32_t regionX = 0, regionZ = 0;
+            uint32_t chunkCount = 0;
+            if (!readBE32Into(in, regionX) || !readBE32Into(in, regionZ) ||
+                !readBE32Into(in, chunkCount))
+                return false;
+            if (chunkCount > 256u)
+                return false;
+            for (uint32_t c = 0; c < chunkCount; ++c)
+            {
+                uint8_t relX = 0, relZ = 0;
+                in.read(reinterpret_cast<char *>(&relX), 1);
+                in.read(reinterpret_cast<char *>(&relZ), 1);
+                if (!in)
+                    return false;
+                uint32_t blobBytes = 0;
+                if (!readBE32Into(in, blobBytes) || blobBytes == 0)
+                    return false;
+                std::vector<uint8_t> blob(blobBytes);
+                in.read(reinterpret_cast<char *>(blob.data()),
+                        static_cast<std::streamsize>(blobBytes));
+                if (static_cast<uint64_t>(in.gcount()) != blobBytes)
+                    return false;
+                const int chunkX = regionX * 16 + static_cast<int>(relX);
+                const int chunkZ = regionZ * 16 + static_cast<int>(relZ);
+                if (plane.saveRawChunkBlob(chunkX, chunkZ, blob.data(), blobBytes))
+                    ++importedChunks;
+                else
+                    ++failedChunks;
+                blobTotalBytes += blobBytes;
+            }
+        }
+        return true;
+    }
+
+    static bool importLegacyContainer(std::istream &in,
+                                      Storage::WorldStorage &plane,
+                                      uint64_t &importedChunks,
+                                      uint64_t &failedChunks,
+                                      uint64_t &blobTotalBytes)
+    {
+        constexpr uint32_t kMaxChunks = 4096u;
+        uint32_t chunkCount = 0;
+        if (!readBE32Into(in, chunkCount) || chunkCount > kMaxChunks)
+            return false;
+        for (uint32_t c = 0; c < chunkCount; ++c)
+        {
+            int32_t chunkX = 0, chunkZ = 0;
+            uint32_t blobBytes = 0;
+            if (!readBE32Into(in, chunkX) || !readBE32Into(in, chunkZ) ||
+                !readBE32Into(in, blobBytes) || blobBytes == 0)
+                return false;
+            std::vector<uint8_t> blob(blobBytes);
+            in.read(reinterpret_cast<char *>(blob.data()),
+                    static_cast<std::streamsize>(blobBytes));
+            if (static_cast<uint64_t>(in.gcount()) != blobBytes)
+                return false;
+            if (plane.saveRawChunkBlob(chunkX, chunkZ, blob.data(), blobBytes))
+                ++importedChunks;
+            else
+                ++failedChunks;
+            blobTotalBytes += blobBytes;
+        }
+        return true;
+    }
+
+    // Export helpers: walk the plane's SQLite chunk rows via forEachChunk,
+    // snapshot blobs into a vector because forEachChunk's blob pointer is
+    // valid only inside its callback, then emit the requested framing.
+    static bool collectPlaneChunks(Storage::WorldStorage &plane,
+                                   std::vector<std::tuple<int, int, std::vector<uint8_t>>> &rows)
+    {
+        rows.clear();
+        return plane.forEachChunk([&rows](int cx, int cz, const uint8_t *blob,
+                                          std::size_t blobBytes) {
+            std::vector<uint8_t> copy(blob, blob + blobBytes);
+            rows.emplace_back(cx, cz, std::move(copy));
+        });
+    }
+    static int floorDiv16(int v)
+    {
+        int q = v / 16;
+        int r = v - q * 16;
+        if (r < 0)
+        {
+            r += 16;
+            --q;
+        }
+        return q;
+    }
+    static bool exportLegacyContainer(std::ostream &out,
+                                      Storage::WorldStorage &plane)
+    {
+        std::vector<std::tuple<int, int, std::vector<uint8_t>>> rows;
+        if (!collectPlaneChunks(plane, rows))
+            return false;
+        std::sort(rows.begin(), rows.end(),
+                  [](const std::tuple<int, int, std::vector<uint8_t>> &a,
+                     const std::tuple<int, int, std::vector<uint8_t>> &b) {
+                      const int ax = std::get<0>(a), bx = std::get<0>(b);
+                      if (ax != bx)
+                          return ax < bx;
+                      return std::get<1>(a) < std::get<1>(b);
+                  });
+        out.put('L');
+        out.put('E');
+        out.put('G');
+        out.put('A');
+        out.put('C');
+        out.put('Y');
+        out.put('\1');
+        out.put('\0');
+        writeBE32(out, static_cast<uint32_t>(rows.size()));
+        for (auto &r : rows)
+        {
+            writeBE32(out, static_cast<int32_t>(std::get<0>(r)));
+            writeBE32(out, static_cast<int32_t>(std::get<1>(r)));
+            const std::vector<uint8_t> &blob = std::get<2>(r);
+            writeBE32(out, static_cast<uint32_t>(blob.size()));
+            out.write(reinterpret_cast<const char *>(blob.data()),
+                      static_cast<std::streamsize>(blob.size()));
+        }
+        return true;
+    }
+    static bool exportAnvilContainer(std::ostream &out,
+                                     Storage::WorldStorage &plane)
+    {
+        std::vector<std::tuple<int, int, std::vector<uint8_t>>> rows;
+        if (!collectPlaneChunks(plane, rows))
+            return false;
+        struct Key
+        {
+            int rX, rZ, relX, relZ;
+        };
+        std::vector<std::pair<Key, std::size_t>> idx;
+        idx.reserve(rows.size());
+        for (std::size_t i = 0; i < rows.size(); ++i)
+        {
+            const int cx = std::get<0>(rows[i]);
+            const int cz = std::get<1>(rows[i]);
+            const int rX = floorDiv16(cx);
+            const int rZ = floorDiv16(cz);
+            idx.emplace_back(
+                Key{rX, rZ, cx - rX * 16, cz - rZ * 16}, i);
+        }
+        std::sort(idx.begin(), idx.end(),
+                  [](const std::pair<Key, std::size_t> &a,
+                     const std::pair<Key, std::size_t> &b) {
+                      if (a.first.rX != b.first.rX)
+                          return a.first.rX < b.first.rX;
+                      if (a.first.rZ != b.first.rZ)
+                          return a.first.rZ < b.first.rZ;
+                      if (a.first.relX != b.first.relX)
+                          return a.first.relX < b.first.relX;
+                      return a.first.relZ < b.first.relZ;
+                  });
+        std::size_t regionCount = 0;
+        bool first = true;
+        int curRX = 0, curRZ = 0;
+        for (auto &e : idx)
+        {
+            if (first || e.first.rX != curRX || e.first.rZ != curRZ)
+            {
+                ++regionCount;
+                curRX = e.first.rX;
+                curRZ = e.first.rZ;
+                first = false;
+            }
+        }
+        out.put('A');
+        out.put('N');
+        out.put('V');
+        out.put('I');
+        out.put('L');
+        out.put('\0');
+        out.put('\1');
+        out.put('\0');
+        writeBE32(out, static_cast<int32_t>(regionCount));
+        std::size_t i = 0;
+        while (i < idx.size())
+        {
+            const int rX = idx[i].first.rX;
+            const int rZ = idx[i].first.rZ;
+            std::size_t j = i;
+            while (j < idx.size() && idx[j].first.rX == rX &&
+                   idx[j].first.rZ == rZ)
+                ++j;
+            writeBE32(out, static_cast<int32_t>(rX));
+            writeBE32(out, static_cast<int32_t>(rZ));
+            writeBE32(out, static_cast<uint32_t>(j - i));
+            for (std::size_t k = i; k < j; ++k)
+            {
+                out.put(static_cast<uint8_t>(idx[k].first.relX));
+                out.put(static_cast<uint8_t>(idx[k].first.relZ));
+                const std::vector<uint8_t> &blob =
+                    std::get<2>(rows[idx[k].second]);
+                writeBE32(out, static_cast<uint32_t>(blob.size()));
+                out.write(reinterpret_cast<const char *>(blob.data()),
+                          static_cast<std::streamsize>(blob.size()));
+            }
+            i = j;
+        }
+        return true;
+    }
+
     static Storage::GenStyle styleFromName(const std::string &s)
     {
         if (s == "superflat")
@@ -879,55 +1172,117 @@ namespace LightweightMC::Network
         Storage::WorldModel effective = m_worldModel;
         if (!formatHint.empty())
             effective = Storage::worldModelFromName(formatHint);
-        if (effective != Storage::WorldModel::SQLITE)
+        // ---- Phase 8b codec dispatch ---------------------------------------
+        // The sqlite branch stays the primary path (it round-trips every
+        // subsystem unchanged). Anvil and legacy ride the region-container
+        // codec documented at the top of this file. The codec imports
+        // directly into the plane's live WorldStorage SQLite handle via
+        // saveRawChunkBlob so no re-open race with the plane's live m_get/
+        // m_save stmts is possible.
+        if (effective == Storage::WorldModel::SQLITE)
         {
-            Core::Logger::warn("[NetworkManager] /import-world: only the sqlite backend is wired in this build "
-                               "(anvil/legacy region import is planned for phase 8b)");
-            return false;
+            std::ifstream src(path, std::ios::binary);
+            if (!src)
+            {
+                Core::Logger::warn("[NetworkManager] /import-world: cannot open " + path);
+                return false;
+            }
+            std::ofstream dst(dbPath, std::ios::binary | std::ios::trunc);
+            if (!dst)
+            {
+                Core::Logger::warn("[NetworkManager] /import-world: cannot open " + dbPath);
+                return false;
+            }
+            constexpr uint64_t kMaxImportBytes = 512ull * 1024ull * 1024ull;
+            const size_t kChunkBytes = 16ull * 1024ull;
+            std::vector<char> buf(kChunkBytes);
+            uint64_t copied = 0;
+            while (src)
+            {
+                src.read(buf.data(), static_cast<std::streamsize>(kChunkBytes));
+                std::streamsize got = src.gcount();
+                if (got <= 0)
+                    break;
+                dst.write(buf.data(), got);
+                copied += static_cast<uint64_t>(got);
+                if (copied > kMaxImportBytes)
+                {
+                    Core::Logger::warn("[NetworkManager] /import-world: aborted after " +
+                                       std::to_string(copied) + " bytes (exceeded 512 MiB cap)");
+                    dst.close();
+                    return false;
+                }
+            }
+            if (copied == 0)
+            {
+                Core::Logger::warn("[NetworkManager] /import-world: " + path +
+                                   " is empty; refusing to blank plane " + planeName);
+                return false;
+            }
+            dst.close();
+            Core::Logger::info("[NetworkManager] /import-world: copied " + std::to_string(copied) +
+                               " bytes from " + path + " to plane '" + planeName +
+                               "' (sqlite; reload at next boot)");
+            return true;
         }
+        // ---- Phase 8b: Anvil / Legacy container import --------------------
         std::ifstream src(path, std::ios::binary);
         if (!src)
         {
             Core::Logger::warn("[NetworkManager] /import-world: cannot open " + path);
             return false;
         }
-        std::ofstream dst(dbPath, std::ios::binary | std::ios::trunc);
-        if (!dst)
+        char magic[8] = {};
+        src.read(magic, 8);
+        if (src.gcount() < 8)
         {
-            Core::Logger::warn("[NetworkManager] /import-world: cannot open " + dbPath);
+            Core::Logger::warn("[NetworkManager] /import-world: file shorter than 8-byte header -- not a valid region container");
             return false;
         }
-        constexpr uint64_t kMaxImportBytes = 512ull * 1024ull * 1024ull;
-        const size_t kChunkBytes = 16ull * 1024ull;
-        std::vector<char> buf(kChunkBytes);
-        uint64_t copied = 0;
-        while (src)
-        {
-            src.read(buf.data(), static_cast<std::streamsize>(kChunkBytes));
-            std::streamsize got = src.gcount();
-            if (got <= 0)
-                break;
-            dst.write(buf.data(), got);
-            copied += static_cast<uint64_t>(got);
-            if (copied > kMaxImportBytes)
-            {
-                Core::Logger::warn("[NetworkManager] /import-world: aborted after " +
-                                   std::to_string(copied) + " bytes (exceeded 512 MiB cap)");
-                dst.close();
-                return false;
-            }
-        }
-        if (copied == 0)
+        const bool isAnvil = magic[0] == 'A' && magic[1] == 'N' && magic[2] == 'V' &&
+                             magic[3] == 'I' && magic[4] == 'L' && magic[5] == '\0';
+        const bool isLegacy = magic[0] == 'L' && magic[1] == 'E' && magic[2] == 'G' &&
+                              magic[3] == 'A' && magic[4] == 'C' && magic[5] == 'Y';
+        if (!isAnvil && !isLegacy)
         {
             Core::Logger::warn("[NetworkManager] /import-world: " + path +
-                               " is empty; refusing to blank plane " + planeName);
+                               " magic bytes do not match ANVIL or LEGACY framing");
             return false;
         }
-        dst.close();
-        Core::Logger::info("[NetworkManager] /import-world: copied " + std::to_string(copied) +
-                           " bytes from " + path + " to plane '" + planeName +
-                           "' (sqlite; reload at next boot)");
-        return true;
+        if (effective == Storage::WorldModel::ANVIL && !isAnvil)
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: " + path +
+                               " is LEGACY-framed but was requested as anvil; refusing to reinterpret");
+            return false;
+        }
+        if (effective == Storage::WorldModel::LEGACY && !isLegacy)
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: " + path +
+                               " is ANVIL-framed but was requested as legacy; refusing to reinterpret");
+            return false;
+        }
+        Storage::WorldStorage &plane = getWorldStorage(id);
+        uint64_t importedChunks = 0;
+        uint64_t failedChunks = 0;
+        uint64_t blobTotalBytes = 0;
+        const bool ok = isAnvil
+                            ? importAnvilContainer(src, plane, importedChunks, failedChunks, blobTotalBytes)
+                            : importLegacyContainer(src, plane, importedChunks, failedChunks, blobTotalBytes);
+        if (!ok)
+            return false;
+        if (importedChunks == 0)
+        {
+            Core::Logger::warn("[NetworkManager] /import-world: no chunks imported from " + path);
+            return false;
+        }
+        Core::Logger::info("[NetworkManager] /import-world: imported " +
+                           std::to_string(importedChunks) + " chunk(s) from " + path +
+                           " (" + std::to_string(blobTotalBytes) + " bytes of LZ4 payload)" +
+                           " into plane '" + planeName + "' via " +
+                           (isAnvil ? std::string("anvil") : std::string("legacy")) +
+                           " container; " + std::to_string(failedChunks) +
+                           " chunk(s) failed to attach");
+        return failedChunks == 0;
     }
 
     // File-level export for one plane. `path` is the destination file on
@@ -962,40 +1317,60 @@ namespace LightweightMC::Network
         Storage::WorldModel effective = m_worldModel;
         if (!formatHint.empty())
             effective = Storage::worldModelFromName(formatHint);
-        if (effective != Storage::WorldModel::SQLITE)
+        // ---- Phase 8b codec dispatch ---------------------------------------
+        if (effective == Storage::WorldModel::SQLITE)
         {
-            Core::Logger::warn("[NetworkManager] /export-world: only the sqlite backend is wired in this build "
-                               "(anvil/legacy region export is planned for phase 8b)");
-            return false;
+            std::ifstream src(dbPath, std::ios::binary);
+            if (!src)
+            {
+                Core::Logger::warn("[NetworkManager] /export-world: plane '" + planeName +
+                                   "' has no database on disk at " + dbPath);
+                return false;
+            }
+            std::ofstream dst(path, std::ios::binary | std::ios::trunc);
+            if (!dst)
+            {
+                Core::Logger::warn("[NetworkManager] /export-world: cannot open " + path);
+                return false;
+            }
+            const size_t kChunkBytes = 16ull * 1024ull;
+            std::vector<char> buf(kChunkBytes);
+            uint64_t copied = 0;
+            while (src)
+            {
+                src.read(buf.data(), static_cast<std::streamsize>(kChunkBytes));
+                std::streamsize got = src.gcount();
+                if (got <= 0)
+                    break;
+                dst.write(buf.data(), got);
+                copied += static_cast<uint64_t>(got);
+            }
+            dst.close();
+            Core::Logger::info("[NetworkManager] /export-world: wrote " + std::to_string(copied) +
+                               " bytes from plane '" + planeName + "' (sqlite) to " + path);
+            return true;
         }
-        std::ifstream src(dbPath, std::ios::binary);
-        if (!src)
-        {
-            Core::Logger::warn("[NetworkManager] /export-world: plane '" + planeName +
-                               "' has no database on disk at " + dbPath);
-            return false;
-        }
+        // ---- Phase 8b: Anvil / Legacy container export --------------------
+        Storage::WorldStorage &plane = getWorldStorage(id);
         std::ofstream dst(path, std::ios::binary | std::ios::trunc);
         if (!dst)
         {
             Core::Logger::warn("[NetworkManager] /export-world: cannot open " + path);
             return false;
         }
-        const size_t kChunkBytes = 16ull * 1024ull;
-        std::vector<char> buf(kChunkBytes);
-        uint64_t copied = 0;
-        while (src)
+        const bool wrote = effective == Storage::WorldModel::ANVIL
+                                ? exportAnvilContainer(dst, plane)
+                                : exportLegacyContainer(dst, plane);
+        if (!wrote)
         {
-            src.read(buf.data(), static_cast<std::streamsize>(kChunkBytes));
-            std::streamsize got = src.gcount();
-            if (got <= 0)
-                break;
-            dst.write(buf.data(), got);
-            copied += static_cast<uint64_t>(got);
+            Core::Logger::warn("[NetworkManager] /export-world: container write to " + path +
+                               " failed (plane '" + planeName + "')");
+            return false;
         }
         dst.close();
-        Core::Logger::info("[NetworkManager] /export-world: wrote " + std::to_string(copied) +
-                           " bytes from plane '" + planeName + "' (sqlite) to " + path);
+        Core::Logger::info("[NetworkManager] /export-world: wrote plane '" + planeName +
+                           "' as " + std::string(Storage::worldModelToName(effective)) +
+                           " container to " + path);
         return true;
     }
 

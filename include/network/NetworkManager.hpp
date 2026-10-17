@@ -325,9 +325,9 @@ namespace LightweightMC::Network
         // trigger for a single invocation -- pass an empty string to use the
         // trigger, or "sqlite"/"anvil"/"legacy" to pin the format. When
         // formatHint is empty the command's handler usually already infers it
-        // from the path suffix (.db -> sqlite, .mca -> anvil, .mcc -> legacy),
-        // so both the trigger and the caller's suffix agree most of the time
-        // and disagreement just logs a warn.
+        // from the path suffix (.db -> sqlite, .mca -> anvil, .mce / .dat ->
+        // legacy), so both the trigger and the caller's suffix agree most of
+        // the time and disagreement just logs a warn.
         bool importWorldFromPath(const std::string &path,
                                  const std::string &planeName,
                                  const std::string &formatHint);
