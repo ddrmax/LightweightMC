@@ -5,6 +5,15 @@ All notable changes made to the project **LightweightMC** are documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project respects [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.0.16] - 2026-10-18
+
+### Added
+
+- **Natural health regeneration sweep on the fixed 20 Hz tick loop** (`NetworkManager::tickRegeneration(int64_t nowMs)`): iterates live PLAY sessions, defers the vanilla `natural_health_regeneration` gamerule gate to a `GameRules::getBool` read once per pass, and lets each session run `PlayerSession::tickRegen(nowMs)` (5 s no-damage delay, foodLevel ≥ 9 + saturation > 0, half-heart every 2 s — see the state machine already living in `src/player/PlayerSession.cpp`). Every healed session gets a fresh S2C Update Health (`0x06`) written with the same big-endian `writeUpdateHealthPayload` helper used by the damage path so idle players get their HP bar back without waiting on the next damage packet. Wired from the accumulator loop in `Server::start()` right after `m_chunkManager.tickActiveChunks(nowMs)` — no second timer.
+- **Held-item melee damage + knockback for mob UseEntity attacks** (`src/network/handlers/play/EntityHandler.cpp` `heldCombatFor(itemId)` map, `EntityManager::applyPlayerAttack(..., meleeDamage, knockbackStrength)`): the attacker's currently selected hotbar slot (`PlayerSession::selectedSlot`, hotbar slots live at `session.inventory[36..44]` exactly like `InventoryHandler::handleHeldItemChange` reads them) resolves through a vanilla-1.8 half-heart table (bare fist=1, sword 77=4 / dagger 78=3 / axe 83=6 / hoe-shovel-fork family ≈2 ...) and a four-bucket knockback enum (`EntityManager.hpp` `KnockbackStrength` NONE/WEAK/NORMAL/RANGED — strength buckets follow the held item TYPE rather than raw damage, cross-cited against the minecraft wiki Melee-combat rows + java mcsources-1.8 CombatHandler templates). The resolved pair now feeds the XP-on-kill + mob-drop path instead of the stub's flat 3 half-hearts; `EntityRecord` carries `knockbackStrength`/`knockbackMs` in-memory only (not persisted to SQLite yet — a knock impulse applied to next-tick velocity is still TODO, see "PvP/PvE hit detection and knockback").
+- **Source consulted for the melee/knockback packet semantics** while wiring `UseEntity`: curated protocol seed (`tools/protocol_seed/packet_ids_1.8.json`, `include/network/protocol/PacketKind.hpp`) + `wiki/Protocol-and-Clients.md` cross-references; no Collect-Item (`0x0D`) wire handler exists in the 1.8 C2S dispatch of `PlayHandler.cpp`, so pickup semantics stay entity-side only this batch.
+
+---
 ## [0.0.15] - 2026-10-13
 
 ### Added

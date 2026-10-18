@@ -129,7 +129,10 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [ ] Server-side movement verification (`0x04 Player Position`) to prevent noclip/speed exploits.
   - [ ] Gravity calculation and fall damage tracking.
 - [ ] **Health & Combat System**
-  - [ ] Health, food, and saturation packet handling (`0x06 Update Health`).
+  - [x] Health, food, and saturation packet handling (`0x06 Update Health`).
+    - damage path emits S2C Update Health + Death Combat via NetworkGameplay::applyDamageToPlayer;
+    - natural regen sweep (tickRegeneration emitting S2C Update Health per healed PLAY session) is now
+      driven from Server.cpp's fixed 20 Hz tick loop, gated by the natural_health_regeneration gamerule.
   - [ ] PvP and PvE hit detection and knockback calculation.
   - [ ] Player respawn flow (`0x07 Respawn`).
 - [ ] **Administration Commands**

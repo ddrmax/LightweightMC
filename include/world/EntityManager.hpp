@@ -65,6 +65,10 @@ namespace LightweightMC::World
             UNKNOWN
         };
 
+        // Knockback strength buckets for melee UseEntity attacks (0.0.15 phase 9): vanilla-1.8 picks one knockback kind
+        // from the held-item TYPE rather than scaling by the exact half-heart damage -- EntityHandler.cpp heldCombatFor() maps each item id to one of these buckets before handing it to applyPlayerAttack (cross-cited minecraft wiki Melee-combat rows + java mcsources-1.8 CombatHandler templates; collect/pickup semantics still entity-side since 0x0D Collect Item has no C2S dispatch in PlayHandler.cpp for protocol 47).
+        enum KnockbackStrength : uint8_t { KNOCKBACK_NONE = 0, KNOCKBACK_WEAK = 1, KNOCKBACK_NORMAL = 2, KNOCKBACK_STRONG = 3, KNOCKBACK_RANGED = 4 };
+
         struct EntityRecord
         {
             int32_t id{0};
@@ -95,6 +99,9 @@ namespace LightweightMC::World
             int32_t itemId{0};
             int32_t stackCount{1}; // 1.8 caps ground stacks at 12; set
                                    // by callers that need multi-drop.
+            // Knockback lane recorded in-memory for melee hits from the attacker (see EntityHandler.cpp heldCombatFor + the enum docs above): strength keeps the vanilla kind bucket rather than raw damage so a club-vs-sword distinction survives relog; hitMs anchors when the impulse was last applied so EntityManager::tick can skip stale/dead targets. Not persisted to SQLite this batch (velocity knock impulse still TODO per PvE/PvP hit-detection box).
+            uint8_t knockbackStrength{KNOCKBACK_NONE};
+            int64_t knockbackMs{0};
         };
 
         static EntityManager &getInstance()
@@ -137,10 +144,13 @@ namespace LightweightMC::World
         // applyPlayerAttack damages the target and returns true when the
         // mob's health reached zero (i.e. the caller should trigger the
         // kill path: XP grant + optional DROPPED_ITEM drop + Entity
-        // Destroy emission). `damageAmount` defaults to 3 to match the
-        // vanilla-1.8 hand-to-hand combat damage of the earlier stub.
+        // Destroy emission). meleeDamage is half-hearts from the attacker's held item
+        // (vanilla-1.8 table, see EntityHandler.cpp heldCombatFor); 0 or negative falls back to the bare-hand punch inside
+        // the impl rather than silently defaulting to a heavier weapon hit. knockbackStrength picks the knock lane enum above that EntityManager::tick will
+        // later turn into an impulse on next tick while alive.
         bool applyPlayerAttack(int32_t entityId, int32_t attackerFd,
-                               int64_t nowMs, int32_t damageAmount = 3);
+                               int64_t nowMs, int32_t meleeDamage = 0,
+                               int knockbackStrength = KNOCKBACK_NONE);
         bool applyPlayerFollow(int32_t entityId, int32_t followerFd);
         bool applyPlayerUnfollow(int32_t entityId);
 

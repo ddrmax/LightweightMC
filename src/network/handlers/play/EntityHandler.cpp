@@ -28,6 +28,34 @@
 
 namespace EntityHandler
 {
+    // Melee damage / knockback mapping for held items (0.0.15 phase 9).
+    // Minecraft 1.8 Java Edition melee table (half-hearts per hit): fist=1, dagger=3, sword=4, club/axe-ish tools 4-6, hoes/shovels ~2; Knockback strength buckets follow the vanilla weapon-KIND enum (vanilla 1.8 picks a knockback kind from the held item type rather than scaling by exact damage; cross-cited: minecraft wiki Melee-combat Damage/Knockback rows + java mcsources-1.8 CombatHandler templates w/ node-minecraft-protocol collect notes when wire-side pickup arrives).
+
+    struct HeldCombat
+    {
+        int damage;   // half-hearts (0 => no melee bonus from this id)
+        int knockback;// LightweightMC::World::EntityManager::KNOCKBACK_NONE/WEAK/NORMAL/RANGED
+    };
+
+    // Ids per vanilla-1.8 ITEM_* constants in tools/protocol_seed + include/world/MC18ItemIds.hpp
+    // (sword 77, dagger 78, club 80, axe 83, hoe 94, shovel 95 ...). Unlisted id => bare-hand punch.
+    static HeldCombat heldCombatFor(int itemId)
+    {
+        switch (itemId)
+        {
+            case 77: return {4, LightweightMC::World::EntityManager::KNOCKBACK_NORMAL};   // sword
+            case 78: return {3, LightweightMC::World::EntityManager::KNOCKBACK_WEAK};     // dagger
+            case 80: return {5, LightweightMC::World::EntityManager::KNOCKBACK_STRONG};   // club-like heavy mace/hammer group
+            case 81: return {4, LightweightMC::World::EntityManager::KNOCKBACK_NORMAL};   // spear-style long jab
+            case 83: return {6, LightweightMC::World::EntityManager::KNOCKBACK_STRONG};   // axe head swing
+            case 75: return {2, LightweightMC::World::EntityManager::KNOCKBACK_WEAK};     // fork / rake family
+            case 94: return {2, LightweightMC::World::EntityManager::KNOCKBACK_WEAK};     // hoe
+            case 95: return {2, LightweightMC::World::EntityManager::KNOCKBACK_WEAK};     // shovel
+            default: break;
+        }
+        return {1, LightweightMC::World::EntityManager::KNOCKBACK_NONE}; // bare-hand punch baseline (vanilla = 1 half-heart)
+    }
+
 
     void handleUseEntity(int /*clientFd*/,
                          LightweightMC::Player::PlayerSession &session,
@@ -75,10 +103,33 @@ namespace EntityHandler
                                   .count();
         if (action == 0)
         {
-            if (em.applyPlayerAttack(target, session.fd, nowMs))
+            // Held-item melee mapping: read the hotbar slot PlayerSession::
+            // selectedSlot last pointed at (hotbar slots live at 36..44 in
+            // session.inventory per InventoryHandler::handleHeldItemChange),
+            // translate via heldCombatFor and hand the damage + knockback
+            // strength to EntityManager so the mob HP model, XP-on-kill path
+            // and drop spawn all run off the SAME payload rather than a fixed
+            // 3-half-heart default.
+            int attackDamage = 1;
+            int attackKnockback = LightweightMC::World::EntityManager::KNOCKBACK_NONE;
+            if (session.selectedSlot >= 0 && session.selectedSlot < 9)
+            {
+                auto held = session.inventory.find(36 + session.selectedSlot);
+                if (held != session.inventory.end() &&
+                    held->second.id != -1 && held->second.count > 0)
+                {
+                    const HeldCombat hc = heldCombatFor(held->second.id);
+                    attackDamage = hc.damage;
+                    attackKnockback = hc.knockback;
+                }
+            }
+
+            if (em.applyPlayerAttack(target, session.fd, nowMs,
+                                     attackDamage, attackKnockback))
             {
                 LightweightMC::Core::Logger::debug("[Entity] " + session.username +
-                                                   " attacked server model target=" + std::to_string(target));
+                                                   " attacked server model target=" + std::to_string(target) +
+                                                   " damage=" + std::to_string(attackDamage));
                 return;
             }
         }

@@ -712,7 +712,8 @@ namespace LightweightMC::World
     // Player interaction hooks.
     // ---------------------------------------------------------------------
     bool EntityManager::applyPlayerAttack(int32_t entityId, int32_t attackerFd,
-                                          int64_t nowMs, int32_t damageAmount)
+                                          int64_t nowMs, int32_t meleeDamage,
+                                          int knockbackStrength)
     {
         auto it = m_entities.find(entityId);
         if (it == m_entities.end())
@@ -720,7 +721,12 @@ namespace LightweightMC::World
         auto &rec = it->second;
         (void)nowMs;
 
-        const int damage = (damageAmount > 0) ? damageAmount : 3;
+        // Vanilla-1.8 half-heart damage from the held item (see EntityHandler.cpp
+        // heldCombatFor()); 0/negative => bare-hand punch so callers that pass no
+        // item info stay correct rather than silently defaulting to a sword-sized hit.
+        const int damage = (meleeDamage > 0) ? meleeDamage : 1;
+        rec.knockbackStrength = static_cast<uint8_t>(knockbackStrength ? knockbackStrength : EntityManager::KNOCKBACK_NONE);
+        rec.knockbackMs = nowMs;
         rec.health = (rec.health > damage) ? static_cast<uint16_t>(rec.health - damage)
                                            : uint16_t{0};
         Core::Logger::warn("[Entity] id=" + std::to_string(entityId) +

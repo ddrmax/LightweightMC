@@ -271,6 +271,12 @@ namespace LightweightMC::Network
         // command can decide whether to fire show_advancement_messages.
         int grantPlayerXp(const std::string &playerName, int32_t amount);
 
+        // Natural-HP sweep driven from Server.cpp's fixed 20 Hz tick loop.
+        // Consults natural_health_regeneration gamerule (skip when false); per-session PlayerSession::tickRegen gates the vanilla
+        // 5 s no-damage window + food gate internally, and each healed session gets a fresh S2C Update Health (0x06) refresh
+        // so idle/stopped players get their HP bar back without waiting on a damage packet.
+        void tickRegeneration(int64_t nowMs);
+
         // Convenience used by /respawnwaves: set the boolean rule globally
         // via GameRules::setBool("respawnwaves", ...) so it persists to
         // SQLite gamerules and every live session picks up the new wave

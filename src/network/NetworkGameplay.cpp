@@ -236,6 +236,34 @@ namespace LightweightMC::Network
         return newLevel - prevLevel;
     }
 
+void NetworkManager::tickRegeneration(int64_t nowMs)
+{
+    // Vanilla-1.8 natural_health_regeneration gamerule gates the sweep; PlayerSession::tickRegen
+    // then applies the 5 s no-damage window + foodLevel >= 9 food-gate + full-HP short-circuit internally.
+    bool regenEnabled = true;
+    World::GameRules::getInstance().getBool("natural_health_regeneration", regenEnabled);
+    if (!regenEnabled)
+        return;
+
+    for (auto &[fd, ses] : m_clients)
+    {
+        if (ses.state != ClientState::PLAY || !ses.alive)
+            continue;
+        const float before = ses.health;
+        if (!ses.tickRegen(nowMs))
+            continue;
+        std::vector<uint8_t> hp;
+        writeUpdateHealthPayload(hp, ses.health,
+                                 static_cast<int32_t>(ses.foodLevel),
+                                 ses.foodSaturationLevel);
+        sendPacket(fd, 0x06, hp);
+        Core::Logger::debug("[NET REGEN] player=" + ses.username +
+                            " fd=" + std::to_string(fd) +
+                            " hpBefore=" + std::to_string(before) +
+                            " hpAfter=" + std::to_string(ses.health));
+    }
+}
+
     bool NetworkManager::setRespawnWaves(bool enabled)
     {
         auto &gr = World::GameRules::getInstance();

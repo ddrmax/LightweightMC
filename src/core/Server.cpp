@@ -758,6 +758,10 @@ namespace LightweightMC::Core
                     m_chunkManager.registerPlane(pid, &m_network.getWorldStorage(pid));
 
                 m_chunkManager.tickActiveChunks(nowMs);
+
+                // Natural-HP regeneration sweep (0x06 refresh per healed session).
+                // Fixed at the same 20 Hz cadence as the world tick so regen timing stays close to vanilla without a second accumulator.
+                m_network.tickRegeneration(nowMs);
                 // Periodic 1.8+ chunk-stream flush. Fires at 5 Hz (throttle
                 // by running every 4th 50ms tick) so the async WorldStorage
                 // generation worker's outputs reach idle or slow-moving
