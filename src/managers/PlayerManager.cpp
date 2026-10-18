@@ -163,10 +163,41 @@ namespace LightweightMC::Player
             // per-command gate rejects /gamemode, /gamerule, /op, etc.
             currentSession.opLevel = playerData.opLevel;
             deserializeInventory(playerData.inventoryData, currentSession.inventory);
+            // Persisted survival stats must also be restored so a re-joining
+            // player's HUD matches the DB row: HP bar, food (both the vanilla
+            // 1.8 "hunger" level and the saturation/exhaustion floats that
+            // drive natural_health_regeneration) and XP level/progress/total.
+            // Without these fields the PlayerSession ctor defaults (health=20
+            // / foodLevel=20 / experienceLevel=0) shadow whatever
+            // PlayerManager::savePlayerState wrote on the previous logout, so
+            // "my XP is gone on reconnect" and "health bar resets" both happen
+            // every time a client reconnects.
+            //
+            // If the previous session died (health=0 / alive=false) we respawn
+            // the player at full HP -- same rule PlayerSession::loadFrom uses
+            // and the same rule NetworkGameplay::applyDamageToPlayer's offline
+            // branch enforces (data.health<=0 -> next login sees 20 HP).
+            currentSession.health = playerData.health;
+            currentSession.foodLevel = playerData.foodLevel;
+            currentSession.foodSaturationLevel = playerData.foodSaturationLevel;
+            currentSession.foodExhaustionLevel = playerData.foodExhaustionLevel;
+            currentSession.experienceLevel = playerData.experienceLevel;
+            currentSession.experienceProgress = playerData.experienceProgress;
+            currentSession.totalExperience = playerData.totalExperience;
+            currentSession.alive = currentSession.health > 0.0f;
+            if (!currentSession.alive)
+            {
+                currentSession.health = 20.0f;
+                currentSession.alive = true;
+            }
             Core::Logger::info("Restored player state for UUID [" + playerUuid + "] (" + username + ") at (" +
                                std::to_string(currentSession.x) + ", " + std::to_string(currentSession.y) + ", " + std::to_string(currentSession.z) + ") with " +
                                std::to_string(currentSession.inventory.size()) + " saved items on plane worldId=" +
-                               std::to_string(currentSession.worldId) + ".");
+                               std::to_string(currentSession.worldId) +
+                               " hp=" + std::to_string(currentSession.health) +
+                               " food=" + std::to_string(currentSession.foodLevel) +
+                               " xp_level=" + std::to_string(currentSession.experienceLevel) +
+                               " xp_total=" + std::to_string(currentSession.totalExperience) + ".");
         }
         else
         {
@@ -264,6 +295,30 @@ namespace LightweightMC::Player
         Network::Packet::writeFloat(posLook, currentSession.pitch);
         posLook.push_back(0x00); // Flags (0 = Absolute coordinates)
         sendPacket(clientFd, 0x08, posLook);
+
+        // 4b. Health + Experience HUD refresh so the client's HP bar and
+        // XP bar start at the DB-loaded values rather than at the client's
+        // own hard-coded "full health / level 1" defaults. Without this
+        // pair a reconnecting player sees 20 HP / level 1 briefly even
+        // when the restored session only had 4 HP or had leveled to 5,
+        // and any damage/XP command that fires after login then paints a
+        // totally unrelated bar value. Era mapping (0x06/0x1f wire ids) is
+        // handled inside NetworkFraming::sendPacket via
+        // ProtocolVersion::s2cWireIdFromLegacy, so we use vanilla-1.8
+        // packet ids unconditionally here.
+        {
+            std::vector<uint8_t> hpPayload;
+            Network::Packet::writeFloat(hpPayload, currentSession.health);
+            Network::Packet::writeVarInt(hpPayload, static_cast<int32_t>(currentSession.foodLevel));
+            Network::Packet::writeFloat(hpPayload, currentSession.foodSaturationLevel);
+            sendPacket(clientFd, 0x06, hpPayload);
+
+            std::vector<uint8_t> xpPayload;
+            Network::Packet::writeFloat(xpPayload, currentSession.experienceProgress);
+            Network::Packet::writeVarInt(xpPayload, static_cast<int32_t>(currentSession.experienceLevel));
+            Network::Packet::writeVarInt(xpPayload, currentSession.totalExperience);
+            sendPacket(clientFd, 0x1f, xpPayload);
+        }
 
         // 5. Synchronize inventory to client screen via Window Items (Packet 0x30)
         std::vector<uint8_t> windowItems;

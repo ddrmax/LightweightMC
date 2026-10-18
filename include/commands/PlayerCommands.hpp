@@ -169,8 +169,16 @@ public:
         }
         else
         {
-            ctx.reply("Unknown /experience verb \"" + verb + "\". Usage: " + getUsage());
-            return;
+            // Implicit-add path. Vanilla's /xp and /experience accept both
+            // "add <target> <amount>" AND "<target> <amount>" (bare target
+            // with no verb). Previously this branch replied "Unknown verb
+            // \"<target>\"" for the bare form, which is what admins meant by
+            // "add/remove is not added". Fall back to add: target = args[0],
+            // amount = args[1] (default 0 so a bare /xp <target> is a no-op
+            // that just refreshes the XP HUD and confirms the target exists).
+            target = verb;
+            if (args.size() >= 2)
+                amountToken = args[1];
         }
 
         if (target.empty() || target == "Console")

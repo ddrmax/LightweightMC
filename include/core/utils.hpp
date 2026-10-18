@@ -14,6 +14,57 @@
 
 namespace LightweightMC::Core
 {
+    // JSON-escape a string so it can be safely embedded inside a Chat 0x02
+    // (S2C 0x02) packet whose payload is
+    //   {"text": <escaped-string>, <flag-byte>}
+    // The vanilla-1.8 chat packet is a JSON document that Minecraft's client
+    // parses strictly: any unescaped `"` or `\` inside the message text
+    // truncates the JSON and the client throws an "Error while receiving
+    // packet: Chat" and disconnects. Commands such as /damage's "Unknown
+    // damage type \"zombie\" (valid: ...)" reply and /experience's "Unknown
+    // /experience verb \"...\"" reply naturally include quotes; without this
+    // escape the payload is malformed.
+    //
+    // Beyond `"` and `\` we also strip ASCII control bytes (0x00-0x1F and
+    // 0x7F) because Minecraft's chat parser rejects raw control codes, and
+    // we translate the section-sign U+00A7 (which the wiki calls a "Minecraft
+    // format code") into its JSON \u00a7 escape form so formatting survives
+    // but the client's parser still accepts the JSON.
+    static inline std::string escapeChatJson(const std::string &input)
+    {
+        std::string out;
+        out.reserve(input.size() + 8);
+        for (unsigned char c : input)
+        {
+            switch (c)
+            {
+            case '"':  out += R"(\")"; break;
+            case '\\': out += R"(\\)"; break;
+            case '\b': out += R"(\b)"; break;
+            case '\f': out += R"(\f)"; break;
+            case '\n': out += R"(\n)"; break;
+            case '\r': out += R"(\r)"; break;
+            case '\t': out += R"(\t)"; break;
+            default:
+                if (c < 0x20 || c == 0x7F)
+                {
+                    static const char *hex = "0123456789abcdef";
+                    out += R"(\u)";
+                    out += '0';
+                    out += '0';
+                    out += hex[(c >> 4) & 0xF];
+                    out += hex[c & 0xF];
+                }
+                else
+                {
+                    out.push_back(static_cast<char>(c));
+                }
+                break;
+            }
+        }
+        return out;
+    }
+
     // Helper to retrieve RAM consumed by the process (in MB)
     static inline double getProcessRAM()
     {

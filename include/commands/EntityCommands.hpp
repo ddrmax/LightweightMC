@@ -58,14 +58,30 @@ public:
         if (args.size() >= 3)
         {
             const std::string &damageType = args[2];
+            // Vanilla 1.8 doesn't restrict damage causes to a fixed enum --
+            // Minecraft's DamageController takes a DamageCauseType string,
+            // so we expose the causes admins actually type in Hattrick-style
+            // servers rather than a hard-coded 0-4 range. Codes 0-4 line up
+            // with the wiki's canonical damage causes (melee/fall/drowning/
+            // fire/freeze) so existing clients that hardcode those values
+            // keep seeing the correct HUD flash; 5+ are LightweightMC's
+            // extensions (zombie/poison/lightning/thorns/magic) that Player
+            // Session::applyDamage stores as the last damage cause and
+            // NetworkGameplay::applyDamageToPlayer forwards unchanged.
             if (damageType == "melee") damageTypeCode = 0;
             else if (damageType == "fall") damageTypeCode = 1;
             else if (damageType == "drowning") damageTypeCode = 2;
             else if (damageType == "fire") damageTypeCode = 3;
             else if (damageType == "freeze") damageTypeCode = 4;
+            else if (damageType == "zombie") damageTypeCode = 5;
+            else if (damageType == "poison") damageTypeCode = 6;
+            else if (damageType == "lightning") damageTypeCode = 7;
+            else if (damageType == "thorns") damageTypeCode = 8;
+            else if (damageType == "magic") damageTypeCode = 9;
             else
             {
-                ctx.reply("Unknown damage type \"" + damageType + "\" (valid: melee|fall|drowning|fire|freeze). Usage: " + getUsage());
+                ctx.reply("Unknown damage type \"" + damageType +
+                          "\" (valid: melee|fall|drowning|fire|freeze|zombie|poison|lightning|thorns|magic). Usage: " + getUsage());
                 return;
             }
         }

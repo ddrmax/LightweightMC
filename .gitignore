@@ -24,3 +24,4 @@ wiki/
 build-san/
 phases.md
 build_*/
+.continue/

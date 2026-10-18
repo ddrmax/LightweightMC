@@ -24,6 +24,7 @@
 #include "managers/PlayerManager.hpp"
 #include "storage/Database.hpp"
 #include "world/GameRules.hpp"
+#include "core/utils.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -265,7 +266,7 @@ namespace LightweightMC::Network
             if (ses.state != ClientState::PLAY || ses.username != targetName)
                 continue;
             std::vector<uint8_t> chatMsg;
-            Packet::writeString(chatMsg, R"({"text":")" + message + R"("})");
+            Packet::writeString(chatMsg, R"({"text":")" + Core::escapeChatJson(message) + R"("})");
             chatMsg.push_back(1);
             sendPacket(fd, 0x02, chatMsg);
             return true;
