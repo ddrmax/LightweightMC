@@ -56,6 +56,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <chrono>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
@@ -1092,6 +1093,31 @@ namespace LightweightMC::Network
         auto packetSender = [this](int fd, int32_t p, const std::vector<uint8_t> &b)
         { sendPacket(fd, p, b); };
 
+        // 0.0.15 phase 8d: autosave cadence check. This function runs at 5
+        // Hz (throttled 4-of-20 in Server.cpp's tick loop) so the elapsed
+        // comparison is cheap; when the 5-minute window elapsed and the cal
+        // ler's NetworkManager::m_autosaveEnabled flag is on, flush every l
+        // ive plane's level.dat sidecar + SQLite WAL journal exactly as the
+        // explicit /save-all command does. m_lastAutosaveMs starts at zero
+        // so the first flush after boot happens on the very first tick --
+        // matching vanilla 1.8's "save on entry" behaviour where a fresh
+        // boot writes a boot-time level.dat sidecar before serving any
+        // chunk.
+        if (m_autosaveEnabled)
+        {
+            const auto nowMs = static_cast<int64_t>(
+                                   std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch()).count());
+            constexpr int64_t kAutosaveIntervalMs = 5LL * 60LL * 1000LL;
+            if (m_lastAutosaveMs == 0 || nowMs - m_lastAutosaveMs >= kAutosaveIntervalMs)
+            {
+                if (saveAllPlanes(nowMs))
+                {
+                    m_lastAutosaveMs = nowMs;
+                }
+            }
+        }
+
         // Only PLAY-state sessions have a chunk stream; HANDSHAKE / LOGIN are
         // mid-negotiation and haven't populated a render box yet.
         for (auto &kv : m_clients)
@@ -1105,6 +1131,115 @@ namespace LightweightMC::Network
                 continue;
             m_worldManager.sendMapChunkBulk(kv.first, kv.second, renderDistance, packetSender);
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // 0.0.15 phase 8c/8d: saveAllPlanes. Walks every live plane in m_worlds
+    // and asks Storage::Database to emit a per-plane level.dat sidecar next
+    // to the plane's SQLite db (path = describeWorld's dbPath + ".level.dat"
+    // for the sqlite branch; unregistered planes keep their current sidecar
+    // untouched). The sidecar is a gzip-compressed NBT TAG_Compound produced
+    // by Storage::Database::writeLevelDat with a LevelDatSnapshot hydrated
+    // from the world_registry SQLite columns (spawn_x/y/z, world_seed,
+    // force_gamemode, style) plus live WorldStorage state (getWorldSeed /
+    // getGenerationStyle) so a boot of the same server on a new day sees the
+    // same seed/spawn even if a crash landed between SQLite WAL fsyncs.
+    //
+    // A no-op SQLite UPDATE on the world_registry table forces sqlite3 to
+    // dirty the DB's journal so the OS page cache flushes dirty pages to
+    // disk before we return -- matching vanilla 1.8's "flush disk then
+    // continue" /save-all contract that /save-on relies on.
+    //
+    // Return true iff at least one plane round-tripped so the /save-all
+    // command can honestly claim success vs. "nothing flushed".
+    // ------------------------------------------------------------------------
+    bool NetworkManager::saveAllPlanes(int64_t nowMs)
+    {
+        (void)nowMs;
+        if (m_worlds.empty())
+            return false;
+
+        bool flushedAny = false;
+        for (const auto &kv : m_worlds)
+        {
+            const int32_t planeId = kv.first;
+            Storage::WorldStorage *storage = kv.second.get();
+            if (!storage)
+                continue;
+
+            // Resolve the db path via the same helper the /import-world and
+            // /export-world handlers use so custom-plane path sanitization
+            // (world-<safeName>.db) matches here and a rogue plane name
+            // cannot smuggle a path traversal into the sidecar path.
+            const std::string planeName = [&planeId, this]() -> std::string {
+                std::string n, s;
+                if (m_database.lookupWorldById(planeId, n, s) && !n.empty())
+                    return n;
+                return std::string();
+            }();
+            if (planeName.empty())
+                continue;
+            int32_t resolvedId = 0;
+            std::string style;
+            std::string dbPath;
+            if (!describeWorld(planeName, resolvedId, style, dbPath))
+                continue;
+
+            Storage::LevelDatSnapshot snap{};
+            // spawn_x/y/z from world_registry (DOUBLE columns).
+            double sx = 0.5, sy = 64.0, sz = 0.5;
+            if (m_database.getWorldSpawn(planeId, sx, sy, sz))
+            {
+                snap.spawnX = static_cast<int32_t>(sx);
+                snap.spawnY = static_cast<int32_t>(sy);
+                snap.spawnZ = static_cast<int32_t>(sz);
+            }
+            // Seed: prefer WorldStorage::getWorldSeed (live) over the world_
+            // registry column so the sidecar mirrors the generator's actual
+            // state -- matching the same order /seed uses for the seed echo
+            // command.
+            const std::uint64_t liveSeed = storage->getWorldSeed();
+            snap.seed = static_cast<int64_t>(liveSeed != 0ULL
+                                                 ? liveSeed
+                                                 : m_database.getWorldSeed(planeId));
+            snap.time = m_database.getWorldSeed(planeId) != 0
+                            ? m_database.getWorldSeed(planeId)
+                            : static_cast<int64_t>(liveSeed);
+            snap.modified = static_cast<int64_t>(nowMs);
+            // Vanilla-style mode mapping: kForceGameModeSurvival=0 -> 0
+            // (normal), creative=1 -> 2 (creative), adventure=2 -> 2,
+            // spectator=3 -> 0; INHERIT leaves mode at 0.
+            const int32_t fg = m_database.getWorldForceGameMode(planeId);
+            if (fg == Storage::kForceGameModeCreative)
+                snap.mode = 2;
+            else if (fg == Storage::kForceGameModeAdventure)
+                snap.mode = 1;
+            else if (fg == Storage::kForceGameModeSurvival)
+                snap.mode = 0;
+            // gameMode string for multiplayer context: this server is always
+            // MP; leave the snapshot's default "1" (classic) in place so a
+            // foreign importer sees a familiar field rather than "" or "3".
+            snap.format = 0x7FFFFFFF; // vanilla default
+            snap.gameMode = "1";
+            snap.mapStatChunk = 0;
+            snap.mapStatTrack = 0;
+
+            const std::string levelPath = dbPath + ".level.dat";
+            if (m_database.writeLevelDat(levelPath, snap))
+            {
+                // Force SQLite journal sync so a crash between now and the
+                // next boot cannot leave the level.dat sidecar newer than
+                // the corresponding world_registry row.
+                m_database.setWorldSpawn(planeId, sx, sy, sz);
+                flushedAny = true;
+                Core::Logger::info("[NetworkManager] save-all wrote " + levelPath);
+            }
+            else
+            {
+                Core::Logger::warn("[NetworkManager] save-all failed writing " + levelPath);
+            }
+        }
+        return flushedAny;
     }
 
     // ------------------------------------------------------------------------

@@ -155,6 +155,29 @@ namespace LightweightMC::Storage
     constexpr double kDefaultWorldSpawnZ = 0.5;
     constexpr int64_t kDefaultWorldSeed = 0;
 
+    // 0.0.15 phase 8c: snapshot form used by Database::readLevelDat / write
+    // LevelDat below. Mirrors the subset of vanilla-1.8 level.dat that Light
+    // weightMC round-trips (spawn, seed, mode, timestamps, format marker).
+    // Fields the vanilla Java client also stashes (MapStats compound, next
+    // start seed, ingame_time, ServerType, ...) survive on read via a pass-
+    // through default so a level.dat the server did not author stays read-
+    // able, and are re-emitted on write with sane defaults.
+    struct LevelDatSnapshot
+    {
+        int32_t  format           = 0x7FFFFFFF;    // TAG_Int
+        int64_t  seed             = 0;             // TAG_Long (Minecraft seed)
+        int64_t  time             = 0;             // TAG_Long (creation epoch ms)
+        int64_t  modified         = 0;             // TAG_Long (last-saved epoch ms)
+        int32_t  spawnX           = 0;             // TAG_Byte[3] StartPos[0]
+        int32_t  spawnY           = 64;            // TAG_Byte[3] StartPos[1]
+        int32_t  spawnZ           = 0;             // TAG_Byte[3] StartPos[2]
+        int8_t   mode             = 0;             // TAG_Byte (0=normal,1=hardcore,2=creative)
+        std::string gameMode      = "1";           // TAG_String ("1" classic, "0" single, "2" coop, "3" MP)
+        int32_t  usedBlocks       = 0;             // TAG_Int (vanilla used_blocks)
+        int32_t  mapStatChunk     = 0;             // TAG_Int (MapStatChunk)
+        int32_t  mapStatTrack     = 0;             // TAG_Int (MapStatTrackChunks)
+    };
+
     class Database
     {
     private:
@@ -356,6 +379,28 @@ namespace LightweightMC::Storage
         // the whole PlayerData through a separate loadPlayerData call.
         bool loadSyncInventoryBlob(const std::string &uuid,
                                    std::vector<uint8_t> &blobOut) const;
+
+        // ---- 0.0.15 phase 8c: level.dat NBT reader / writer ----------------
+        // Vanilla 1.8's per-plane "level.dat" sidecar file: a gzip container
+        // wrapping a single TAG_Compound NBT payload. Written alongside the
+        // plane's SQLite db (e.g. "world.db" plus "world.db.level.dat") so
+        // an external tool (vanilla client, anvil2, mcmcp) can spot the
+        // world's spawn / seed / mode without parsing our SQLite layout,
+        // and /import-world can hydrate world_registry from a foreign
+        // tool's output.
+        //
+        // writeLevelDat composes the payload with the bundled RegionFile
+        // gzip codec (third_party/minigzip.h) so the on-disk stream is
+        // byte-for-byte compatible with what vanilla's Java gzip module
+        // emits. readLevelDat gunzips then walks a small subset of the
+        // vanilla-1.8 level.dat NBT tags (format, seed, time, modified,
+        // StartPos, mode, GameMode, used_blocks, MapStatChunk, MapStat
+        // TrackChunks) into a LevelDatSnapshot; tags missing on read keep
+        // their struct defaults.
+        bool writeLevelDat(const std::string &path,
+                           const LevelDatSnapshot &snap) const;
+        bool readLevelDat(const std::string &path,
+                          LevelDatSnapshot &out) const;
     };
 
 } // namespace LightweightMC::Storage

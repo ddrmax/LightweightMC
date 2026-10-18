@@ -55,6 +55,14 @@ namespace LightweightMC::Network
         // console run without a boot pass still produces sensible output.
         Storage::WorldModel m_worldModel{Storage::WorldModel::SQLITE};
         std::string m_worldModelName{"sqlite"}; // cached string form so CommandContext::worldModelName can be a plain getter.
+        // save-on / save-off toggle for the vanilla 1.8 autosave cadence.
+        // Defaults to true so a bare console run flushes level.dat sidecars
+        // every 5 minutes; /save-off flips it off.
+        bool m_autosaveEnabled{true};
+        // Wall-clock milliseconds since epoch of the last saveAllPlanes call
+        // made by tickChunkStreaming; 0 means "never yet", and the first
+        // autosave check after boot fires immediately.
+        int64_t m_lastAutosaveMs{0};
         // Server-side entity model (mobs / aggressive mobs / villagers) is
         // accessed via World::EntityManager::getInstance(); no member needed
         // because the singleton is process-lifetime and NetworkManager is
@@ -212,11 +220,17 @@ namespace LightweightMC::Network
         // state. Damage/respawn/XP emitters only fire for online sessions
         // because the S2C packets have nowhere to go otherwise.
 
-        // Apply HP damage to a player. `damageTypeCode` (0=melee, 1=fall,
-        // 2=drowning, 3=fire, 4=freeze) is used only for logging; the
-        // caller is expected to have already gated the call through the
-        // matching GameRules entry (pvp / fall_damage / drowning_damage /
-        // fire_damage / freeze_damage). Returns true when damage was
+        // Apply HP damage to a player. `damageTypeCode` maps a damage-cause
+        // label to a numeric code that PlayerSession::applyDamage stores for
+        // diagnostics (0=melee, 1=fall, 2=drowning, 3=fire, 4=freeze, 5=zombie
+        // contact, 6=poison, 7=lightning, 8=thorns, 9=magic -- see DamageCommand
+        // in commands/EntityCommands.hpp which is what parses the admin-facing
+        // damageType token). Codes 0-4 mirror vanilla's canonical causes so
+        // external tooling that hardcodes those numbers keeps working; 5+ are
+        // LightweightMC extensions. The caller is expected to have already
+        // gated the call through the matching GameRules entry (pvp / fall_damage
+        // / drowning_damage / fire_damage / freeze_damage) -- damageTypeCode
+        // itself is used only for logging. Returns true when damage was
         // actually applied (i.e. the target exists AND was vulnerable).
         // When damage kills the target, emits an S2C DeathCombatEvent
         // (0x42) to that client; every non-fatal damage step emits Update
@@ -334,6 +348,23 @@ namespace LightweightMC::Network
         bool exportWorldToPath(const std::string &path,
                                const std::string &planeName,
                                const std::string &formatHint);
+
+        // ---- 0.0.15 phase 8d: save-all / save-on / save-off -------------------
+        // Vanilla-1.8's server-side "flush disk then continue" pattern. save
+        // AllPlanes walks every live plane in m_worlds, writes a per-plane
+        // level.dat sidecar (Database::writeLevelDat) capturing spawn/seed/
+        // mode/timestamps hydrated from world_registry + WorldManager, and
+        // issues a no-op SQLite transaction so any OS-side dirty pages get
+        // forced. It returns true when at least one plane round-tripped.
+        //
+        // setAutosaveEnabled/autosaveEnabled drive the save-on/save-off half
+        // of the vanilla trio: when on, tickChunkStreaming re-checks elapsed
+        // ms since the last flush and calls saveAllPlanes on a fixed cadence
+        // (5 minutes) so a long-running session stays crash-safe without
+        // every /save-all.
+        bool saveAllPlanes(int64_t nowMs);
+        void setAutosaveEnabled(bool enabled) { m_autosaveEnabled = enabled; }
+        bool autosaveEnabled() const { return m_autosaveEnabled; }
 
         // ---- Async chunk-stream flush -----------------------------------------
         // Every game tick, iterate the live sessions and re-run WorldManager's

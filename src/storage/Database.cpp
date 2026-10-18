@@ -1,6 +1,10 @@
 #include "storage/Database.hpp"
 #include "core/Logger.hpp"
+#include "storage/RegionFile.hpp"
 #include <ctime>
+#include <cstring>
+#include <fstream>
+#include <sstream>
 
 namespace LightweightMC::Storage
 {
@@ -1275,6 +1279,11 @@ namespace LightweightMC::Storage
         return found;
     }
 
+// Restore deletePlayerPosition and add the level.dat NBT reader/writer
+// below it. The block below is intentionally compact: the NBT helpers
+// only cover what vanilla-1.8's level.dat actually needs, so reusing
+// them for arbitrary NBT trees is out of scope today.
+
     bool Database::deletePlayerPosition(const std::string &uuid, int32_t worldId)
     {
         if (!m_db || uuid.empty())
@@ -1294,6 +1303,245 @@ namespace LightweightMC::Storage
         const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
         sqlite3_finalize(stmt);
         return ok;
+    } // deletePlayerPosition
+
+    // -------------------------------------------------------------------
+    // 0.0.15 phase 8c: NBT helpers for vanilla-1.8 level.dat.
+    //
+    // Vanilla tag IDs (see Minecraft TAG_* and https://en.wikipedia.org/
+    // wiki/NBT): 0 End, 1 Byte, 2 ByteArray, 3 Short, 4 Int, 5 Long, 6
+    // Float, 7 Double, 8 String, 9 List, 10 Compound. Helpers live in an
+    // anonymous namespace so the Database class header stays clean and
+    // other consumers don't get NBT tag names in their scope.
+    // -------------------------------------------------------------------
+    namespace
+    {
+        enum NbtTagId : uint8_t
+        {
+            TAG_End = 0, TAG_Byte = 1, TAG_ByteArray = 2, TAG_Short = 3,
+            TAG_Int = 4, TAG_Long = 5, TAG_Float = 6, TAG_Double = 7,
+            TAG_String = 8, TAG_List = 9, TAG_Compound = 10,
+        };
+        inline void pushBe16(std::vector<uint8_t> &o, uint16_t v)
+        { o.push_back(static_cast<uint8_t>((v >> 8) & 0xFF)); o.push_back(static_cast<uint8_t>( v & 0xFF)); }
+        inline void pushBe32(std::vector<uint8_t> &o, uint32_t v)
+        { for (int i = 3; i >= 0; --i) o.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF)); }
+        inline void pushBe64(std::vector<uint8_t> &o, uint64_t v)
+        { for (int i = 7; i >= 0; --i) o.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF)); }
+        inline uint16_t rdBe16(const uint8_t *p) { return (static_cast<uint16_t>(p[0]) << 8) | p[1]; }
+        inline int32_t  rdBe32(const uint8_t *p) { return (static_cast<int32_t>(p[0]) << 24) | (static_cast<int32_t>(p[1]) << 16) | (static_cast<int32_t>(p[2]) << 8) | static_cast<int32_t>(p[3]); }
+        inline int64_t  rdBe64(const uint8_t *p) { int64_t v = 0; for (int i = 0; i < 8; ++i) v = (v << 8) | static_cast<int64_t>(p[i]); return v; }
+        inline void wTag(std::vector<uint8_t> &o, uint8_t id, const std::string &name)
+        { o.push_back(id); pushBe16(o, static_cast<uint16_t>(name.size())); o.insert(o.end(), name.begin(), name.end()); }
+        inline void wByte (std::vector<uint8_t> &o, const std::string &n, int8_t  v) { wTag(o, TAG_Byte, n); o.push_back(static_cast<uint8_t>(v)); }
+        inline void wInt  (std::vector<uint8_t> &o, const std::string &n, int32_t v) { wTag(o, TAG_Int,  n); pushBe32(o, static_cast<uint32_t>(v)); }
+        inline void wLong (std::vector<uint8_t> &o, const std::string &n, int64_t v) { wTag(o, TAG_Long, n); pushBe64(o, static_cast<uint64_t>(v)); }
+        inline void wStr  (std::vector<uint8_t> &o, const std::string &n, const std::string &v)
+        { wTag(o, TAG_String, n); pushBe16(o, static_cast<uint16_t>(v.size())); o.insert(o.end(), v.begin(), v.end()); }
+    } // anonymous NBT namespace
+
+    // -------------------------------------------------------------------
+    // writeLevelDat: build a vanilla-1.8 TAG_Compound payload using the
+    // helpers above, then gzip it with the bundled minigzip codec and
+    // spill to `path`. Order of tags mirrors vanilla's Java client so a
+    // vanilla tool can parse the result.
+    // -------------------------------------------------------------------
+    bool Database::writeLevelDat(const std::string &path,
+                                 const LevelDatSnapshot &snap) const
+    {
+        if (path.empty())
+            return false;
+
+        std::vector<uint8_t> payload;
+        payload.reserve(512);
+        wTag(payload, TAG_Compound, std::string());
+        wInt (payload, "format",         snap.format);
+        wLong(payload, "seed",           snap.seed);
+        wLong(payload, "time",           snap.time);
+        wLong(payload, "modified",       snap.modified);
+        wInt (payload, "used_blocks",    snap.usedBlocks);
+        // StartPos: TAG_Byte[3] = TAG_ByteArray header + int32 length + 3 bytes.
+        wTag(payload, TAG_ByteArray, "StartPos");
+        pushBe32(payload, 3);
+        auto clampByte = [](int32_t v) -> uint8_t
+        {
+            if (v < -128) v = -128;
+            if (v >  127) v =  127;
+            return static_cast<uint8_t>(static_cast<int8_t>(v));
+        };
+        payload.push_back(clampByte(snap.spawnX));
+        payload.push_back(clampByte(snap.spawnY));
+        payload.push_back(clampByte(snap.spawnZ));
+        wInt (payload, "MapStatChunk",      snap.mapStatChunk);
+        wInt (payload, "MapStatTrackChunks", snap.mapStatTrack);
+        wByte(payload, "mode",              snap.mode);
+        wStr (payload, "GameMode",          snap.gameMode);
+        payload.push_back(TAG_End);
+
+        const std::vector<uint8_t> gzipped =
+            RegionFile::compressGzip(payload.data(),
+                                     static_cast<int>(payload.size()));
+        if (gzipped.empty())
+        {
+            Core::Logger::error("Database::writeLevelDat: gzip compress failed for " + path);
+            return false;
+        }
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out)
+        {
+            Core::Logger::error("Database::writeLevelDat: cannot open " + path);
+            return false;
+        }
+        out.write(reinterpret_cast<const char *>(gzipped.data()),
+                  static_cast<std::streamsize>(gzipped.size()));
+        out.flush();
+        return static_cast<bool>(out);
+    }
+
+    bool Database::readLevelDat(const std::string &path,
+                                LevelDatSnapshot &out) const
+    {
+        if (path.empty())
+            return false;
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+        {
+            Core::Logger::warn("Database::readLevelDat: cannot open " + path);
+            return false;
+        }
+        const std::vector<uint8_t> gz((std::istreambuf_iterator<char>(in)),
+                                       std::istreambuf_iterator<char>());
+        if (gz.empty())
+            return false;
+        const std::vector<uint8_t> nbt =
+            RegionFile::decompressGzip(gz.data(), static_cast<int>(gz.size()));
+        if (nbt.empty())
+        {
+            Core::Logger::warn("Database::readLevelDat: gzip decompress failed for " + path);
+            return false;
+        }
+        std::size_t pos = 0;
+        // Skip walker for tags we don't model (unknown additions, MapStats
+        // compound, next_start_seed long, ServerType byte, etc.). Kept as
+        // a self-passing lambda so no separate symbol is exposed to the
+        // linker.
+        auto skipTag = [&](auto self, std::size_t &p, uint8_t tagId) -> bool
+        {
+            const std::size_t n = nbt.size();
+            if (tagId == TAG_Byte)   { if (p + 1 > n) return false; p += 1; return true; }
+            if (tagId == TAG_Short)  { if (p + 2 > n) return false; p += 2; return true; }
+            if (tagId == TAG_Int || tagId == TAG_Float) { if (p + 4 > n) return false; p += 4; return true; }
+            if (tagId == TAG_Long || tagId == TAG_Double) { if (p + 8 > n) return false; p += 8; return true; }
+            if (tagId == TAG_String) {
+                if (p + 2 > n) return false;
+                const uint16_t len = rdBe16(&nbt[p]); p += 2 + len; return p <= n;
+            }
+            if (tagId == TAG_ByteArray) {
+                if (p + 4 > n) return false;
+                const int32_t len = rdBe32(&nbt[p]); p += 4 + (len < 0 ? 0 : len); return p <= n;
+            }
+            if (tagId == TAG_List) {
+                if (p + 5 > n) return false;
+                const uint8_t inner = nbt[p];
+                const int32_t len = rdBe32(&nbt[p + 1]);
+                p += 5;
+                for (int i = 0; i < len; ++i) if (!self(self, p, inner)) return false;
+                return true;
+            }
+            if (tagId == TAG_Compound) {
+                while (true)
+                {
+                    if (p >= n) return false;
+                    const uint8_t child = nbt[p++];
+                    if (child == TAG_End) return true;
+                    if (p + 2 > n) return false;
+                    const uint16_t nl = rdBe16(&nbt[p]); p += 2 + nl;
+                    if (!self(self, p, child)) return false;
+                }
+            }
+            return false;
+        };
+
+        if (pos >= nbt.size() || nbt[pos] != TAG_Compound)
+            return false;
+        ++pos;
+        if (pos + 2 > nbt.size())
+            return false;
+        const uint16_t rootNameLen = rdBe16(&nbt[pos]); pos += 2 + rootNameLen;
+
+        while (pos < nbt.size())
+        {
+            const uint8_t tagId = nbt[pos];
+            if (tagId == TAG_End)
+                return true;
+            ++pos;
+            if (pos + 2 > nbt.size())
+                return false;
+            const uint16_t nameLen = rdBe16(&nbt[pos]); pos += 2;
+            if (pos + nameLen > nbt.size())
+                return false;
+            const std::string name(reinterpret_cast<const char *>(&nbt[pos]),
+                                   static_cast<std::size_t>(nameLen));
+            pos += nameLen;
+
+            if (tagId == TAG_Int && name == "format")
+            {
+                if (pos + 4 > nbt.size()) return false;
+                out.format = rdBe32(&nbt[pos]); pos += 4;
+            }
+            else if (tagId == TAG_Long && (name == "seed" || name == "time" || name == "modified"))
+            {
+                if (pos + 8 > nbt.size()) return false;
+                const int64_t v = rdBe64(&nbt[pos]); pos += 8;
+                if (name == "seed") out.seed = v;
+                else if (name == "time") out.time = v;
+                else out.modified = v;
+            }
+            else if (tagId == TAG_Int && name == "used_blocks")
+            {
+                if (pos + 4 > nbt.size()) return false;
+                out.usedBlocks = rdBe32(&nbt[pos]); pos += 4;
+            }
+            else if (tagId == TAG_Int && (name == "MapStatChunk" || name == "MapStatTrackChunks"))
+            {
+                if (pos + 4 > nbt.size()) return false;
+                const int32_t v = rdBe32(&nbt[pos]); pos += 4;
+                if (name == "MapStatChunk") out.mapStatChunk = v;
+                else out.mapStatTrack = v;
+            }
+            else if (tagId == TAG_Byte && name == "mode")
+            {
+                if (pos + 1 > nbt.size()) return false;
+                out.mode = static_cast<int8_t>(nbt[pos]); pos += 1;
+            }
+            else if (tagId == TAG_String && name == "GameMode")
+            {
+                if (pos + 2 > nbt.size()) return false;
+                const uint16_t len = rdBe16(&nbt[pos]); pos += 2;
+                if (pos + len > nbt.size()) return false;
+                out.gameMode = std::string(reinterpret_cast<const char *>(&nbt[pos]),
+                                            static_cast<std::size_t>(len));
+                pos += len;
+            }
+            else if (tagId == TAG_ByteArray && name == "StartPos")
+            {
+                if (pos + 4 > nbt.size()) return false;
+                const int32_t len = rdBe32(&nbt[pos]); pos += 4;
+                if (len >= 3 && pos + static_cast<std::size_t>(len) <= nbt.size())
+                {
+                    out.spawnX = static_cast<int8_t>(nbt[pos + 0]);
+                    out.spawnY = static_cast<int8_t>(nbt[pos + 1]);
+                    out.spawnZ = static_cast<int8_t>(nbt[pos + 2]);
+                }
+                pos += static_cast<std::size_t>(len < 0 ? 0 : len);
+            }
+            else
+            {
+                if (!skipTag(skipTag, pos, tagId))
+                    return false;
+            }
+        }
+        return true;
     }
 
 } // namespace LightweightMC::Storage

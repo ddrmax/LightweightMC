@@ -15,6 +15,7 @@
 #include "commands/ScriptingCommands.hpp"
 #include "commands/TestPacketsCommand.hpp"
 #include "network/Packet.hpp"
+#include "core/utils.hpp"
 #include <termios.h>
 #include <unistd.h>
 #include <vector>
@@ -195,7 +196,7 @@ namespace LightweightMC::Core
         {
             std::vector<uint8_t> chatPayload;
             LightweightMC::Network::Packet::writeString(chatPayload,
-                                                        R"({"text":")" + msg + R"("})");
+                                                        R"({"text":")" + LightweightMC::Core::escapeChatJson(msg) + R"("})");
             chatPayload.push_back(1); // chat-visible flag
             m_network.broadcastPacket(0x02, chatPayload, -1);
         };
@@ -316,6 +317,26 @@ namespace LightweightMC::Core
         {
             return m_network.worldModelName();
         };
+        // 0.0.15 phase 8d: /save-all, /save-on, /save-off hooks for the con
+        // sole command context. saveAllPlanes supplies the current wall-c
+        // lock ms so Database::writeLevelDat stamps modified=now in the NBT
+        // sidecar; setAutosaveEnabled/getAutosaveEnabled toggle and echo th
+        // e NetworkManager::m_autosaveEnabled flag tickChunkStreaming consu
+        // lts on its 5-minute cadence.
+        consoleCtx.saveAllPlanes = [this]() -> bool
+        {
+            const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            return m_network.saveAllPlanes(nowMs);
+        };
+        consoleCtx.setAutosaveEnabled = [this](bool enabled) -> void
+        {
+            m_network.setAutosaveEnabled(enabled);
+        };
+        consoleCtx.getAutosaveEnabled = [this]() -> bool
+        {
+            return m_network.autosaveEnabled();
+        };
 
         CommandManager::getInstance().executeCommand(consoleCtx, inputLine);
     }
@@ -433,7 +454,7 @@ namespace LightweightMC::Core
             {
                 std::vector<uint8_t> chatPayload;
                 LightweightMC::Network::Packet::writeString(chatPayload,
-                                                            R"({"text":")" + msg + R"("})");
+                                                            R"({"text":")" + LightweightMC::Core::escapeChatJson(msg) + R"("})");
                 chatPayload.push_back(1); // chat-visible flag
                 network->broadcastPacket(0x02, chatPayload, -1);
             };
@@ -521,6 +542,25 @@ namespace LightweightMC::Core
             consoleCtx.worldModelName = [network]() -> std::string
             {
                 return network->worldModelName();
+            };
+            // 0.0.15 phase 8d: /save-all /save-on /save-off wiring for the
+            // threaded console loop -- same pattern as the single-threaded
+            // block above. The steady_clock reference in this function's
+            // outer scope already lives in the same compilation unit so
+            // std::chrono::steady_clock is unambiguously visible here.
+            consoleCtx.saveAllPlanes = [network]() -> bool
+            {
+                const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                return network->saveAllPlanes(nowMs);
+            };
+            consoleCtx.setAutosaveEnabled = [network](bool enabled) -> void
+            {
+                network->setAutosaveEnabled(enabled);
+            };
+            consoleCtx.getAutosaveEnabled = [network]() -> bool
+            {
+                return network->autosaveEnabled();
             };
 
             std::vector<std::string> history;

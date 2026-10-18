@@ -599,8 +599,26 @@ public:
         (void)args;
         LightweightMC::Core::Logger::info("World backup requested by " + ctx.sender);
 
-        // TODO: WorldStorage::getInstance().flush() or synchronization of the SQLite database
-        ctx.reply("World backup completed successfully.");
+        // 0.0.15 phase 8d: the flush is now real. saveAllPlanes walks every
+        // live plane in NetworkManager::m_worlds, writes a level.dat sidecar
+        // (Database::writeLevelDat via the bundled minigzip codec) that
+        // captures spawn/seed/mode/timestamps for each plane hydrated from
+        // world_registry + WorldManager, and issues a no-op SQLite
+        // transaction so any OS-side dirty pages get forced. The hook
+        // returns false when there are zero live planes (a bare console
+        // run before NetworkManager::start opens the SQLite dbs), so the
+        // command reports honestly rather than falsely claiming "completed
+        // successfully".
+        if (ctx.saveAllPlanes && ctx.saveAllPlanes())
+        {
+            LightweightMC::Core::Logger::info("World backup: every live plane flushed to disk");
+            ctx.reply("World backup completed successfully.");
+        }
+        else
+        {
+            LightweightMC::Core::Logger::warn("World backup: no live planes were flushed");
+            ctx.reply("World backup skipped (no live planes to flush).");
+        }
     }
 };
 
@@ -855,7 +873,14 @@ public:
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
         (void)args;
-        ctx.reply("Autosave disabled.");
+        // 0.0.15 phase 8d: push the toggle into NetworkManager so tick
+        // ChunkStreaming stops calling saveAllPlanes on its 5-minute
+        // cadence; level.dat sidecars then only refresh on explicit /
+        // save-all.
+        if (ctx.setAutosaveEnabled) ctx.setAutosaveEnabled(false);
+        const bool now = ctx.getAutosaveEnabled ? ctx.getAutosaveEnabled() : false;
+        LightweightMC::Core::Logger::info("Autosave mode: " + std::string(now ? "on" : "off"));
+        ctx.reply("Autosave " + std::string(now ? "still on (already)" : "disabled") + ".");
     }
 };
 
@@ -871,7 +896,14 @@ public:
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
         (void)args;
-        ctx.reply("Autosave enabled.");
+        // 0.0.15 phase 8d: tickChunkStreaming re-checks its 5-minute
+        // autosave cadence against NetworkManager::m_autosaveEnabled; a
+        // save-on call re-enables that path so level.dat sidecars refresh
+        // without any further /save-all typing.
+        if (ctx.setAutosaveEnabled) ctx.setAutosaveEnabled(true);
+        const bool now = ctx.getAutosaveEnabled ? ctx.getAutosaveEnabled() : true;
+        LightweightMC::Core::Logger::info("Autosave mode: " + std::string(now ? "on" : "off"));
+        ctx.reply("Autosave " + std::string(now ? "enabled" : "still off (already)") + ".");
     }
 };
 

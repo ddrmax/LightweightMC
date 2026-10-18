@@ -9,615 +9,102 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 ### Added
 
-- **Per-plane inventory policy (world_registry extension + `player_inventories`
-  SQLite table).** Vanilla Minecraft carries one shared inventory across
-  dimension planes; the server keeps that behaviour for the standard chain
-  (Overworld #0 / Nether #-1 / End #1 / Aether #100 by default / mining
-  worlds) but 0.0.15 lets special planes break it in two documented ways:
-  - **SEPARATE (1)** — per-plane blob keyed on `(uuid, world_id)` in the
-    new `player_inventories` SQLite table, intended for flat / creative
-    sandbox planes (flat world, overworld height, no structures/ores/
-    villages/trees) whose loot never leaks back to the mining chain and
-    vice-versa. Almost always paired with `force_gamemode = 1 CREATIVE`
-    so the plane pins creative on entry even when the player was on
-    survival elsewhere.
-  - **RESTRICTED (2)** — same storage as SEPARATE but treated as one-way:
-    arriving on the plane from any other plane never inherits the source's
-    inventory (loads empty / that plane's own blob if the player was
-    training there earlier), and leaving never carries items back.
-    Intended for PVP / PVE training maps.
-  - **SYNC (0)** — the default (and pre-0.0.15 behaviour for every plane):
-    one blob persisted on the flat `players.inventory_blob` column so
-    items transfer across planes transparently (standard Minecraft).
+- **Per-plane inventory policy** (`world_registry` `inventory_policy` + `force_gamemode` columns, new `player_inventories` SQLite table). SYNC (shared blob, default) / SEPARATE (per-plane blob) / RESTRICTED (one-way). `force_gamemode` pins a plane's game mode on entry. See wiki "Plane inventory policy".
+- **`Storage::Database` plane-scoped inventory API** (`setWorldInventoryPolicy`/`getWorldInventoryPolicy`, `setWorldForceGameMode`/`getWorldForceGameMode`, `initPlayerInventoriesTable`, `savePlayerInventory`, `loadPlayerInventory`, `loadSyncInventoryBlob`).
+- **`WorldManager` policy mirrors** (`m_inventoryPolicy`, `m_forceGameModeOnEntry`) seeded at boot from `[world] aether-inventory-policy` / `[world] aether-force-gamemode`; policy-aware transfer in `setPlayerWorldAt`, restore in `loadPlayerData`, save in `savePlayerState`.
+- **`server.properties` auto-backfill** for the two new `[world]` keys via `ConfigManager::forEachCanonicalDefault` (covers fresh + legacy-schema files).
 
-- **`world_registry` extension columns (`inventory_policy INTEGER DEFAULT 0`
-  and `force_gamemode INTEGER DEFAULT -1`).** `force_gamemode` is
-  orthogonal and lets the plane pin a game mode on entry (`-1 INHERIT`
-  keeps whatever mode the player carried in; `0 SURVIVAL`, `1 CREATIVE`,
-  `2 ADVENTURE`, `3 SPECTATOR` override `session.gamemode` on arrival).
-  `Database::initWorldRegistry` adds them to the CREATE TABLE and also
-  runs ALTER TABLE migrations with a pragma_table_info probe so existing
-  0.0.14 server_data.db rows pick them up transparently. Encoding lives
-  in `include/storage/Database.hpp` as `Storage::kInventoryPolicy*` and
-  `Storage::kForceGameMode*` constexpr ints so callers write
-  `Storage::kInventoryPolicySeparate` instead of a magic `1`.
-
-- **New `Storage::Database` API for the plane-scoped inventory chain:**
-  `setWorldInventoryPolicy` / `getWorldInventoryPolicy`,
-  `setWorldForceGameMode` / `getWorldForceGameMode`,
-  `initPlayerInventoriesTable` (CREATE TABLE with PRIMARY KEY `(uuid,
-  world_id)`), `savePlayerInventory(uuid, worldId, blob)`,
-  `loadPlayerInventory(uuid, worldId, blobOut, hasRowOut)`, and
-  `loadSyncInventoryBlob(uuid, blobOut)` (reads ONLY the flat
-  `players.inventory_blob` column so SEPARATE / RESTRICTED save paths can
-  preserve the shared SYNC slot rather than overwrite it with a plane
-  blob).
-
-- **`WorldManager` policy maps + hot-path accessors**
-  (`m_inventoryPolicy` and `m_forceGameModeOnEntry` keyed by planeId with
-  `setInventoryPolicy` / `getInventoryPolicy` and
-  `setForceGameModeOnEntry` / `getForceGameModeOnEntry`). Both default to
-  the standard-Minecraft values (`SYNC` / `INHERIT`) when a plane is not
-  in the cache so unregistered custom planes and legacy DBs keep working.
-  `NetworkManager::start` seeds the Aether entries at boot by reading
-  `[world] aether-inventory-policy` (`standard`/`separate`/`restricted`)
-  and `[world] aether-force-gamemode` (`none`/`survival`/`creative`/
-  `adventure`/`spectator`) from `server.properties`, persisting them to
-  SQLite via `Database::setWorldInventoryPolicy` / `setWorldForceGameMode`
-  and mirroring them onto `WorldManager` for the hot path. Vanilla
-  Overworld / Nether / End stay on their CREATE defaults.
-- **`ConfigManager::forEachCanonicalDefault()` extended with the two new
-  `server.properties` keys.** Because the reconciliation pass
-  (`ConfigManager::load` → `reconcileDefaultsUnlocked` → `m_parser.save`)
-  shares that canonical list between the "fresh file" path
-  (`setDefaultsUnlocked`) and the "backfill missing keys from an older
-  file" path, adding
-  `emit("world", "aether-inventory-policy", "standard")` and
-  `emit("world", "aether-force-gamemode", "none")` makes both a fresh
-  boot and a legacy 0.0.14 `server.properties` pick the keys up
-  automatically — no `if (missing) write` site in `NetworkSocket.cpp`
-  is needed. Boot log confirms this on legacy DBs with
-  `[ConfigManager] Upgraded server.properties from an older schema to
-  the current one (2 key(s) added).`
-
-- **Plane-scoped inventory transfer inside
-  `NetworkManager::setPlayerWorldAt`** runs BEFORE any wire packet
-  (0x07 Respawn / drop-point chunk / 0x08 Position / rest-of-box chunks)
-  so the client's inventory view and game mode already match what the
-  server will persist on the next save flush. Departure blob is written
-  to the departure's slot (SEPARATE / RESTRICTED go to
-  `player_inventories(uuid, oldWorldId)`; SYNC blobs stay on the flat
-  column and are flushed by the periodic `savePlayerState`), the arrival
-  blob is read from the arrival's slot (SYNC via
-  `Database::loadSyncInventoryBlob`; SEPARATE / RESTRICTED via
-  `Database::loadPlayerInventory(uuid, newWorldId, blob, hasRow)`), and
-  `session.inventory` is cleared then re-hydrated from the arrival blob.
-  `session.gamemode` is also pinned from
-  `WorldManager::getForceGameModeOnEntry(newWorldId)` before the 0x07
-  Respawn's gamemode byte is written, so the wire byte and the session's
-  next save mirror agree (creative sandbox planes pin CREATIVE even
-  when the player was on SURVIVAL elsewhere).
-
-- **`Database::loadPlayerData` plane-scoped inventory restore.** After
-  reading `world_id` (column 34) from the flat players row, the login
-  path consults the plane's `inventory_policy` on `world_registry` and,
-  when SEPARATE / RESTRICTED, replaces `PlayerData::inventoryData` with
-  the plane-scoped blob on `player_inventories(uuid, world_id)` so
-  `PlayerManager`'s login handler restores the plane's own inventory
-  instead of the shared SYNC chain. Missing plane row (first visit)
-  yields an empty blob, matching the intended "fresh creative sandbox /
-  fresh training map" state and preventing items from a SYNC chain from
-  leaking into a RESTRICTED plane on arrival.
-
-- **`PlayerManager::savePlayerState` policy-aware save.** Consults
-  `Database::getWorldInventoryPolicy(session.worldId)` for the plane the
-  session is currently on; SYNC planes keep using the flat
-  `players.inventory_blob` column, and SEPARATE / RESTRICTED planes route
-  the current session blob to `savePlayerInventory(uuid, worldId, blob)`
-  and re-read the existing flat SYNC blob into `data.inventoryData`
-  (via `loadSyncInventoryBlob`) so the INSERT-OR-REPLACE that
-  `Database::savePlayerData` runs preserves the shared SYNC chain rather
-  than overwriting it with a plane-scoped blob.
-
-- **Wiki: Multiworld-and-Dimensions "Plane inventory policy" section**
-  documenting the SYNC / SEPARATE / RESTRICTED table, the `force_gamemode`
-  encoding, the `[world] aether-inventory-policy` / `[world] aether-force-
-  gamemode` config keys, and the three server-side entry points that
-  consult the policy (`setPlayerWorldAt`, `loadPlayerData`,
-  `savePlayerState`).
-
-### Added (world-control follow-up — 2026-10-14)
-
-- **World-control command set wired end-to-end (`/seed`, `/setworldspawn`,
-  `/setblock`, `/place`, `/spawnpoint`).** Five previously stub-only
-  commands in `include/commands/WorldCommands.hpp` used to echo a canned
-  "done" reply without touching world state; they now parse arguments,
-  resolve the target plane (via `world_registry` lookups) and dispatch
-  through `NetworkManager`'s new live-state API so the changes persist to
-  SQLite + WorldStorage and are picked up by the login path on the next
-  `/gotor` / portal transition.
-  - **`/seed [planeName] [<value>]`** reads the plane's runtime `WorldSto
-  rage::getWorldSeed()` (boot-seeded from `[world] world-seed` in
-  `server.properties`) and, with a numeric argument, writes both the
-  `world_registry` world_seed INTEGER column AND the live `WorldStor
-  age::setWorldSeed()` so future chunk regenerations on that plane pick
-  up the new value. Already-generated chunks stay unchanged.
-  - **`/setworldspawn [x] [y] [z] [planeName]`** writes the plane's
-    spawn triple to the `world_registry` `spawn_x` / `spawn_y` /
-    `spawn_z` DOUBLE columns (default 0.5 / 64.0 / 0.5) and mirrors it
-    into `WorldManager::m_worldSpawn` so
-    `NetworkManager::setPlayerWorldAt` and future portal authors pick
-    the new spawn up on the next plane switch. Called with no args it
-    queries the Overworld spawn.
-  - **`/setblock <x> <y> <z> <blockName>`** writes a single block on the
-    caller's plane (chat contexts use `PlayerSession::worldId`; console
-    defaults to Overworld id 0) via `WorldStorage::saveBlockChange`
-    (which lazily generates the target chunk when it isn't yet on disk).
-    Block names resolve through a table built from
-    `include/world/MC17BlockIds.hpp` so a `grass_block` / `dirt` /
-    `stone` / `sandstone` / `bedrock` / `snow` / `log` / `leaves` /
-    `water` / `lava` / `torch` / `furnace` / `lit_furnace` / `bookshelf`
-    / `chest` / `crafting_table` / `brick` / `iron_ore` / `diamond_ore`
-    / etc. all work.
-  - **`/place <block> <x1> <y1> <z1> <x2> <y2> <z2>`** fills a cuboid
-    on the same plane, capped at 4096 blocks so a rogue invocation
-    cannot loop over the whole plane height range.
-  - **`/spawnpoint [player] [x] [y] [z]`** updates the caller's (or
-    named player's) row `spawn_x` / `spawn_y` / `spawn_z` columns via
-    the new `Database::updatePlayerSpawn` targeted UPDATE (never
-    touches inventory / coordinates / world_id / gamemode, unlike
-    `savePlayerData`'s INSERT-OR-REPLACE). Console invocations broadcast
-    via `Command::affectsPlayerState()` so the connected client sees
-    the change.
-
-- **`world_registry` extension: `spawn_x` / `spawn_y` / `spawn_z` DOUBLE
-  + `world_seed` INTEGER columns (CREATE defaults 0.5 / 64.0 / 0.5 / 0).**
-  Fresh CREATE tables carry them; legacy 0.0.14 / 0.0.15 `server_data.db`
-  rows pick them up via the same `pragma_table_info` probe + ALTER
-  TABLE migration pattern already used for `inventory_policy` /
-  `force_gamemode` from 0.0.15. Verified after boot: the four fixed
-  planes (Overworld / Nether / End / Aether) all carry the vanilla
-  (0.5, 64, 0.5) spawn and `world_seed=0`.
-
-- **New `Storage::Database` API for the 0.0.15 world-control follow-up:**
-  `setWorldSpawn(id, x, y, z)` / `getWorldSpawn(id, &x, &y, &z)` /
-  `setWorldSeed(id, seed)` / `getWorldSeed(id)` / `updatePlayerSpawn(
-  uuid, x, y, z)` (targeted UPDATE + probe so an unknown uuid returns
-  false instead of writing garbage).
-
-- **`WorldManager` hot-path mirrors `m_worldSpawn` (planeId →
-  `std::array<double, 3>`) and `m_worldSeed` (planeId →
-  `int64_t`)** with `setWorldSpawn` / `getWorldSpawn` / `setWorldSeed`
-  / `getWorldSeed` so `NetworkManager::setPlayerWorldAt` and the login
-  path read the current spawn / seed without another SQLite walk.
-
-- **`NetworkManager` new world-control backend methods:** `setWorldSpaw
-  nByName`, `getWorldSpawnByName`, `setWorldSeedByName`, `getWorldSeed
-  ByName`, `setBlockAtPlane(planeId, wx, wy, wz, combined)`,
-  `updatePlayerSpawnByName(name, x, y, z)`. All resolve the plane name
-  through `world_registry` (via `lookupWorldId`) so `overworld` /
-  `nether` / `end` / `aether` and any custom `/world create` name
-  target correctly.
-
-- **New `CommandContext` hooks + `senderWorldId` field:** `setWorldSpawn`
-  / `getWorldSpawn` / `getWorldSeed` / `setWorldSeed` / `setBlockAtPlane`
-  / `setPlayerSpawn` (defaults to no-op) and `senderWorldId` (populated
-  from `PlayerSession::worldId` in the chat path so `/setblock` and
-  `/place` write on the caller's current plane rather than always Overw
-  orld). Wired in `Server::processConsoleInput`, `Server::startConsoleT
-  hread` (threaded console path) and `PlayerHandler.cpp` (in-game chat).
-
-- **All 5 regression tests still pass at exit=0** (chest / reorg / probe
-  / spawn / bot) and the boot log has zero `ERR]` messages after the
-  `world_registry` ALTER migration ran on the pre-0.0.15 `server_data.db`
-  on disk.
-
-- **No changes needed in `ConfigManager::forEachCanonicalDefault`:** the
-  0.0.15 world-control follow-up columns are written via commands, not via
-  `server.properties`, so the 0.0.15 auto-backfill reconciliation path
-  is untouched.
+- **World-control commands wired end-to-end** (`/seed`, `/setworldspawn`, `/setblock`, `/place`, `/spawnpoint`): parse args, resolve plane via `world_registry`, persist to SQLite + WorldStorage.
+- **`world_registry` world-control columns** (`spawn_x`/`spawn_y`/`spawn_z` DOUBLE, `world_seed` INTEGER, ALTER-TABLE migration for legacy DBs); `WorldManager` hot-path mirrors (`m_worldSpawn`, `m_worldSeed`).
+- **`Storage::Database` world-control API** (`setWorldSpawn`/`getWorldSpawn`/`setWorldSeed`/`getWorldSeed`/`updatePlayerSpawn`) and **`NetworkManager` backend** (`setWorldSpawnByName`/`getWorldSpawnByName`/`setWorldSeedByName`/`getWorldSeedByName`/`setBlockAtPlane`/`updatePlayerSpawnByName`) + new `CommandContext` hooks and `senderWorldId`.
+- **`/world create` flags** `--inventory <standard|separate|restricted>`, `--force-gamemode <mode>`, `--seed <int>`; widened `createWorld` signatures (trailing defaults preserve older two-arg call sites).
+- **`flat` style alias** for `Storage::GenStyle::CREATIVE` in `styleFromName` (no new `FlatGen.cpp` / CMake target needed).
+- **gzip-backed world loading (Phase 8C):** legacy `.mcc`/`.dat` region reader uses gzip framing for Minecraft world import.
+- **Phase 8c/8d — NBT `level.dat` sidecar + save-all / save-on / save-off:** new `Storage::LevelDatSnapshot` POD on `Database.hpp` models vanilla 1.8's `level.dat` fields (format / seed / time / modified / StartPos / mode / GameMode / used_blocks / MapStatChunk / MapStatTrackChunks). `Database::writeLevelDat` composes the compound payload in the vanilla tag order (Int, Long, Long, Long, Int, ByteArray, Int, Int, Byte, String) via an anonymous-namespace big-endian writer helper and pipes it through `RegionFile::compressGzip`, producing a standard gzip-compressed NBT file readable by any vanilla 1.8 tool. `Database::readLevelDat` gunzips via `RegionFile::decompressGzip` and walks the tag stream with a recursive skip-tag lambda so foreign / external `level.dat` files (which include tags this engine does not model) stay parseable — unmodelled fields retain struct defaults.
+- **`NetworkManager::saveAllPlanes(int64_t nowMs)`:** iterates every live plane in `m_worlds`, resolves its db path via `describeWorld` (same sanitizer used by /import-world and /export-world so custom planes cannot smuggle path traversal), hydrates a `LevelDatSnapshot` from `world_registry` (spawn_x/y/z, world_seed, force_gamemode) plus live `WorldStorage::getWorldSeed` state, then writes `<dbPath>.level.dat`. Returns true iff at least one plane round-tripped so /save-all can honestly distinguish "saved" from "no live planes".
+- **Autosave cadence:** `tickChunkStreaming` now checks elapsed wall-clock ms on a 5-minute window; when the elapsed threshold passes and `m_autosaveEnabled` is true, saveAllPlanes fires on boot + every 5 min so a crash between SQLite WAL fsyncs cannot lose the level.dat sidecar's spawn/seed/modification timestamps.
+- **`/save-all`, `/save-on`, `/save-off` command wiring:** new `CommandContext` `std::function` hooks (`saveAllPlanes`, `setAutosaveEnabled`, `getAutosaveEnabled`); wired in both Server.cpp console contexts (`this`-capture and `network`-capture threaded loop) plus PlayerHandler.cpp chat context. `/save-all` prints `[Saved world to disk.]` on success and `World backup skipped (no live planes to flush).` otherwise; `/save-on` / `/save-off` toggle NetworkManager::`m_autosaveEnabled` and echo the post-toggle state.
 
 ### Notes
 
-- **Existing 0.0.14 server_data.db continues to work.** The two new
-  `world_registry` columns come from CREATE TABLE (fresh DBs) or ALTER
-  TABLE migrations (legacy DBs); `player_inventories` is a brand-new
-  CREATE TABLE that pre-0.0.14 DBs get empty. Vanilla planes stay on
-  their SYNC / INHERIT defaults so the 4-packet plane-switch sequence
-  added in 0.0.14 (0x07 → 0x26 → 0x08 → rest-chunks) is unchanged on
-  the wire.
-- **First fix for 0.0.15.** Later 0.0.15 work will extend `/world
-  create` with `--inventory <standard|separate|restricted>` and
-  `--force-gamemode <mode>` flags and add a `GenStyle::FLAT` style so
-  a "flat world with overworld height, no structures / ores / villages /
-  trees, creative mode" plane can be described end-to-end in one command.
-  The DB-level setters and the in-memory `WorldManager` mirrors are
-  already in place, so the CLI follow-up only needs to route the flags
-  through them.
-
-### Added (world-control phase 4 — 2026-10-15)
-
-- **`/world create` CLI flags for per-plane policy, mode and seed.**
-  Extends `/world create <name> <style>` with three optional flags that
-  opt an individual custom plane into the same 0.0.15 inventory-policy
-  / force-gamemode / world-seed columns phase 2/3 wired at boot time:
-  - `--inventory <standard|separate|restricted>` routes the plane's
-    `inventory_policy` column via `Database::setWorldInventoryPolicy`
-    and mirrors into `WorldManager::setInventoryPolicy` so
-    `setPlayerWorldAt` / `loadPlayerData` / `savePlayerState` pick the
-    right inventory blob slot on the very next portal transition.
-  - `--force-gamemode <survival|creative|adventure|spectator|none>`
-    writes the plane's `force_gamemode` column via
-    `Database::setWorldForceGameMode` and mirrors into
-    `WorldManager::setForceGameModeOnEntry` so entering the plane snaps
-    `PlayerSession::gamemode` to the pinned value.
-  - `--seed <int>` writes the plane's `world_seed` column via
-    `Database::setWorldSeed` and pins the fresh `WorldStorage::
-    setWorldSeed` to the caller's value instead of inheriting the
-    Overworld's LCG stream.
-  Omitting any flag preserves the pre-phase-4 defaults (SYNC / INHERIT /
-  inherit-from-Overworld) so the row layout stays byte-identical to the
-  phase 3 form; only rows whose caller passed a non-default value pick
-  up the extra writes.
-
-- **`flat` style alias for `Storage::GenStyle::CREATIVE`** in
-  `NetworkWorlds.cpp::styleFromName` — an infinite flat canvas: solid
-  dirt/grass column, no ore, trees or structures (the intended
-  "sandbox" plane shape admins actually want to spell when pairing a
-  `--inventory separate` / `--force-gamemode creative` combo). The
-  alias keeps `Storage::GenStyle` untouched so no new `FlatGen.cpp` /
-  CMake target is required; `styleFromName("flat") ==
-  styleFromName("creative")`.
-
-- **Widened `NetworkManager::createWorld` + `CommandContext::createWorld`
-  signatures** to carry `(worldName, style, inventoryPolicy, forceGameMode,
-  seed)`. `NetworkManager.hpp` declares the three trailing defaults
-  (`Storage::kInventoryPolicySync`, `Storage::kForceGameModeInherit`,
-  `Storage::kDefaultWorldSeed`) so the widened impl in
-  `NetworkWorlds.cpp` keeps the older two-argument call-site shape
-  compiling; `CommandContext::createWorld` is a `std::function<>` with
-  no default arguments, so the three wiring sites
-  (`src/core/Server.cpp:232` console boot closure, `Server.cpp:369`
-  console-thread closure, `src/network/handlers/play/PlayerHandler.cpp:106`
-  in-game admin chat closure) forward all five arguments straight through.
+- Existing 0.0.14 `server_data.db` keeps working via CREATE/ALTER migrations; vanilla planes stay on SYNC/INHERIT so the 0.0.14 4-packet plane-switch wire sequence is unchanged.
+- All 5 regression tests (chest/reorg/probe/spawn/bot) pass at exit=0 with zero `ERR]` boot-log messages.
+- Roadmap and phase tracking live in `phases.md`; full design detail is on the wiki.
 
 ---
 ## [0.0.14] - 2026-10-13
 
 ### Added
 
-- **`Storage::PlayerData::worldId`** field (mirrors `PlayerSession::worldId`)
-  persisted in the `players` SQLite table as `world_id INTEGER DEFAULT 0`.
-  Round-trips through both halves of the login flow:
-  `Database::loadPlayerData` reads column 34 (world_id) and the login handler in
-  `PlayerManager.cpp` copies it onto `session.worldId` before the first
-  `getWorldStorageFor(session.worldId)` call in `sendPlayPackets`.
-  `Database::savePlayerData` and `PlayerSession::applyTo` also write the field
-  back on every save, so a live `/gotor` switch persists across relogins even
-  without the `Database::setPlayerWorldIdByName` path firing.
-
-- **Per-plane player coordinates (`Storage::Database::player_positions` SQLite
-  table + `Storage::PlayerData::hasPositionData`).** New SQLite table
-  keyed on `(uuid, world_id)` records `x`, `y`, `z`, `yaw`, `pitch` and an
-  `updated_at` timestamp for every plane a player has occupied, so a
-  player who used `/gotor` or (later) a portal no longer inherits their
-  source-plane coordinates on the destination plane. Three write paths
-  feed the table: (1) the periodic `savePlayerData` mirror — guarded by
-  the new `PlayerData::hasPositionData` bool which defaults to `false`
-  and is flipped to `true` inside `PlayerSession::applyTo`, the *only*
-  entry point reached by live per-plane saves, so partial-write callers
-  that construct a fresh `PlayerData` with placeholder coords
-  (`setPlayerOpLevel`, `setPlayerGameMode`) never clobber the real
-  per-plane values; (2) the new `NetworkManager::setPlayerWorldAt(player
-  Name, newWorldId, x, y, z, hasExplicitPosition)` which saves the
-  departure-plane coords and either loads the previously-stored arrival
-  coords or falls back to the plane's default spawn on first visit
-  (`hasExplicitPosition=false`), or else writes the caller-provided
-  `(x,y,z)` verbatim as the arrival point (`hasExplicitPosition=true`,
-  which is the primitive a future portal system will call to pin the
-  exit on the destination plane); and (3) the login path — `Database::
-  loadPlayerData` now calls `Database::loadPlayerPosition(uuid, worldId,
-  ...)` for the plane the flat `world_id` column says the player is on
-  and, if an entry exists, overrides the flat `lastX/lastY/lastZ/yaw/
-  pitch` fields with the per-plane row. `setPlayerWorldId` becomes a
-  thin wrapper delegating to `setPlayerWorldAt(..., 0.0, 0.0, 0.0, false)`
-  so the existing `/gotor` console path inherits the new behaviour
-  without any call-site change. `setPlayerWorldAt` also resolves the
-  uuid via `PlayerManager::getInstance().getPlayerUuid(playerName)` as a
-  fallback when `session.uuid` is empty (mid-login players), keeping
-  both coordinate-save paths keyed on the same identifier.
-
-- **`WorldManager::setSkyDimension` + `WorldManager::skyDimensionFor` sky-render
-  trick for non-vanilla planes.** Vanilla 1.8 clients only know three sky
-  renders keyed by the `dimension` field of the S2C `JoinGame` (0x01) login
-  byte and S2C `Respawn` (0x07) plane-switch int32 — `0` (Overworld blue),
-  `1` (End / Star Keep purple), `-1` (Nether dark grey). Any server plane
-  with a non-vanilla id (Aether at 100 by default, `/world create` custom
-  ids 101+, and the planes landing in 0.0.15) has no sky of its own;
-  without the trick the client kept the previous plane's sky across the
-  switch and defaulted to Overworld on reconnect. `WorldManager::skyDimensionFor(planeId)`
-  returns the planeId itself for `{0, 1, -1}` and otherwise returns whatever
-  `WorldManager::setSkyDimension(planeId, hint)` registered, defaulting to
-  0 (Overworld sky). `NetworkManager::setPlayerWorldAt` now writes that
-  hint into the 0x07 `dimension` int32 (instead of the raw newWorldId) and
-  `PlayerManager::sendPlayPackets` writes `static_cast<uint8_t>(static_cast<int8_t>(...))`
-  into the 0x01 `dimension` byte at login (so Nether's -1 becomes the expected
-  `0xFF` on the wire); server-side state (`session.worldId`, `m_worlds`
-  keys, `player_positions` rows) keeps the true plane id so storage lookups,
-  chunk streaming and persistence paths are unaffected. Callers added in 0.0.15
-  (`/world create --sky <overworld|nether|end>` and the new dimension
-  registry) will call `setSkyDimension` to opt each new plane into the sky it
-  wants; `setSkyDimension` silently ignores hints outside `{0, 1, -1}`.
-- **Wiki: Multiworld-and-Dimensions "Sky render trick for non-standard planes"
-  section** documenting the 0/1/-1 sky table, the two entry points that
-  consume `skyDimensionFor`, and the persistence caveat (server-side keys
-  stay on the true plane id, only the wire value is remapped).
+- **`PlayerData::worldId`** persisted as `world_id INTEGER DEFAULT 0` in the `players` table; round-trips through login load + save so a `/gotor` switch survives relogin.
+- **Per-plane coordinates** via new `player_positions` SQLite table keyed `(uuid, world_id)` (`x,y,z,yaw,pitch,updated_at`); `NetworkManager::setPlayerWorldAt` saves departure coords and loads arrival coords (or plane default spawn on first visit); `setPlayerWorldId` is now a wrapper over it. Guarded by `PlayerData::hasPositionData` so partial-write callers never clobber real values.
+- **Sky-render trick for non-vanilla planes** (`WorldManager::setSkyDimension`/`skyDimensionFor`): remaps the wire `dimension` value to one of the three vanilla skies (`0`/`1`/`-1`) while server-side keys stay on the true plane id.
+- **Wiki:** Multiworld-and-Dimensions "Sky render trick for non-standard planes" section.
 
 
 ### Fixed
 
-- **Relogin after `/gotor <plane>` returned to Overworld.**
-  `Database::loadPlayerData`'s SELECT list previously stopped at `op_level`, and
-  the login handler in `src/managers/PlayerManager.cpp` never wrote
-  `session.worldId` from the loaded `PlayerData` — so a player who used `/gotor
-  nether` or `/world create` and then reconnected was put back in plane 0
-  (Overworld) even though the SQLite `world_id` column said plane −1. The SELECT
-  now includes `world_id` and the login handler restores
-  `currentSession.worldId = playerData.worldId` before the first chunk-streaming
-  call. Verified by pre-seeding `world_id = -1` in `server_data.db`, booting the
-  server, logging in a fresh client, and observing the log line
-  `Restored player state for UUID [...] (...) ... on plane worldId=-1.`
-- **`aether-special-dimension` (bool, written but never read) → `aether-plane-id`
-  (int, default 100, actually read at boot).** The config key emitted by
-  `ConfigManager::forEachCanonicalDefault` in `include/core/ConfigManager.hpp`
-  was documented as "written only, never read"; plane id 100 was hard-coded in
-  `NetworkSocket.cpp::NetworkManager::start` (in both `kStandardPlanes` and
-  `planeSpecs`), in `NetworkWorlds.cpp::describeWorld`'s `switch (outId)`, and in
-  the `NetworkWorlds.cpp` file-header comment. The key is now an int
-  (`[world] aether-plane-id = 100` by default), read once at boot, threaded into
-  both `Database::setWorldById` (registry row) and the `m_worlds` map key
-  (`planeSpecs[3] = {aetherPlaneId, "world-aether.db", AETHER, aetherActive}`),
-  with a boot-time validation rejecting collisions with the vanilla pre-1.12
-  slots (0 / −1 / 1). `describeWorld`'s per-plane SQLite file lookup was switched
-  to match by **name** rather than by numeric id so re-homing the reserved slot
-  keeps the correct `world-aether.db` filename mapping. `Database::registerWorld`'s
-  `max(world_registry.id) + 1` allocator already reserved the configured slot
-  automatically, so custom `/world create` planes can never collide with the
-  configurable Aether id.
+- **Relogin after `/gotor` returned to Overworld:** `loadPlayerData` SELECT now includes `world_id`; login handler restores `session.worldId` before first chunk-stream.
+- **`aether-special-dimension` (bool, never read) → `aether-plane-id` (int, default 100, read at boot):** threaded into registry row + `m_worlds` key with boot-time collision check vs vanilla slots (0/-1/1); `describeWorld` matches by name so re-homing keeps `world-aether.db`.
 
-- **Vanilla clients never closed the "loading world" screen on `/gotor` or a
-  future portal plane-switch.** Pre-fix `NetworkManager::setPlayerWorldAt`
-  pushed a bare S2C Position (0x08) after mutating `session.x/y/z/worldId`,
-  but vanilla 1.8 requires a specific 4-packet stream to close its loading
-  screen: (1) `0x07` Respawn / Init Spawn Point with `dimension:int32,
-  difficulty:u8=2, gamemode:u8, levelType:"default"` — declares the new
-  plane to the client, clears its cached Overworld chunks, and starts the
-  loading screen for the destination; (2) a single MapChunkBulk (0x26) body
-  carrying **only the drop-point chunk** so the client can decide which
-  blocks to stand the player on; (3) `0x08` Player Position And Look with
-  `x/y/z` doubles + `yaw/pitch` floats + `flags:u8=0x00` (absolute) and
-  **no trailing teleport-ID VarInt** (that field belongs to 1.9+ only,
-  adding it shifted every subsequent packet body and made the client
-  reject the position); (4) the surrounding chunk stream within render
-  distance. Sending only `0x08` (pre-fix) meant the client saw an updated
-  position on a plane whose loading screen was still open on the previous
-  plane's cache — the reported "no-op on screen" symptom. `setPlayerWorldAt`
-  now emits all four in order: `0x07` via a freshly-built respawn buffer,
-  drop-point chunk via `sendMapChunkBulk(fd, session, 0, packetSender)` for
-  1.8+ (`sendFlatChunk` single chunk for pre-1.8 clients, whose equivalent
-  is 0x21), `0x08` with the full body via `Network::Packet::writeDouble`/
-  `writeFloat`, and finally `updateChunksAroundPlayer(fd, session, 5, packetSender)`
-  to prefetch+emit the remaining chunks; `session.loadedChunks` is
-  cleared first so the drop-point chunk inserted by the rd=0 pass is
-  skipped by the rd=5 pass. `session.prevChunkX/Z` are reset to the
-  login-burst sentinel (`std::numeric_limits<int32_t>::min()`) before the
-  stream so the next `updateChunksAroundPlayer` pads the request box
-  symmetrically around the player rather than 2x ahead in a stale
-  movement direction from the previous plane.
-- **`NetworkEvents.cpp` inline scoreboard refresh loop in `pollEvents` replaced
-  with `ScoreboardManager::tick(m_clients, packetSender)`.** The inline
-  `for (const auto &[fd, ses] : m_clients)` loop that dispatched `sendScoreboard`
-  + `sendTablistHeaderFooter` per PLAY client without first snapshotting the
-  fd list was UB once any client disconnected mid-refresh: those two sends go
-  through `NetworkManager::sendPacket` which can cascade
-  `flushSendBuffer -> handleDisconnect -> m_clients.erase(fd)` and invalidate
-  the range-for iterator (and any reference to `ses`) on a later pass. The
-  crash surfaced during `bot_test` under ASan as a heap-use-after-free inside
-  the erased `std::unordered_map<int, PlayerSession>` node read at line 313
-  of NetworkEvents.cpp. `ScoreboardManager::tick` already snapshots the live
-  (fd -> PLAY) pairs into a local `std::vector<int>` before dispatching and
-  re-looks each fd up on its own pass, so delegating to it fixes the use-after-
-  free without any other behaviour change.
-- **`hexPreview(body, bodyOff + packetEnd)` at `NetworkEvents.cpp:166` →
-  `hexPreview(body, packetEnd)`.** `body` points into the receive buffer at
-  offset `headerOff` (so it has exactly `packetEnd = packetLen` valid bytes)
-  but the call site also added `bodyOff`, the varint prefix length that had
-  already been consumed inside the packet-id decode — a two-byte over-read on
-  every debug hex log line for a small-varint packet. ASan reported this as
-  heap-buffer-overflow at `hexPreview` (line 52) reading `1 byte` past a
-  16-byte `std::vector<uint8_t>` allocation for the standard handshake
-  frame; harmless under the normal build (adjacent heap reads stay in-mapped)
-  but it landed on a page boundary occasionally and now SIGSEGVs reproducibly
-  after the coord changes shift heap layout, breaking `run_tests.sh`. Only the
-  debug-log path was affected; the packet body itself was parsed correctly.
+- **Vanilla "loading world" screen never closed on `/gotor`/portal:** `setPlayerWorldAt` now emits the required 4-packet stream (`0x07` Respawn → drop-point `0x26` → `0x08` absolute position with no trailing 1.9+ teleport VarInt → surrounding chunk stream), clearing `loadedChunks` and resetting `prevChunkX/Z` to the login sentinel first.
+- **Scoreboard refresh UB on mid-refresh disconnect:** inline `pollEvents` loop replaced with `ScoreboardManager::tick` which snapshots live fds before dispatch (fixes ASan heap-use-after-free in `bot_test`).
+- **`hexPreview(body, bodyOff + packetEnd)` → `hexPreview(body, packetEnd)`** at `NetworkEvents.cpp:166`: `bodyOff` was already consumed, so the call over-read past the body (ASan heap-buffer-overflow, reproducible SIGSEGV breaking `run_tests.sh`).
 
-  after `/gotor`.** Before 0.0.14, `Database::loadPlayerData` returned a
-  single flat `(lastX, lastY, lastZ, yaw, pitch)` tuple for the player
-  regardless of which plane they were on, and `NetworkManager::setPlayer
-  WorldId` only updated the flat `world_id` column. A player who stood at
-  say `(120, 45, -80)` in the Overworld and used `/gotor nether` was
-  respawned in Nether at `(120, 45, -80)` — coordinates that made sense
-  in the Overworld but not necessarily in the destination plane, and any
-  subsequent Overworld relogin would restore those Nether-flavoured
-  coordinates. The new `player_positions` SQLite table records per-plane
-  coordinates keyed by `(uuid, world_id)`; `setPlayerWorldAt` saves the
-  departure-plane row before switching, loads any arrival-plane row (or
-  the plane's default spawn on first visit) so `/gotor` drops the player
-  where they previously stood on that plane instead of teleporting them
-  to the source-plane coordinates, and the login path in `Database::
-  loadPlayerData` re-reads the per-plane row for the plane the flat
-  `world_id` column indicates. `setPlayerWorldId` becomes a wrapper
-  around `setPlayerWorldAt(..., hasExplicitPosition=false)` so the
-  existing `/gotor` console path picks this behaviour up with no
-  change at the call site.
+- **Per-plane coordinates after `/gotor`:** `player_positions` table replaces the single flat position tuple so a plane switch drops the player at their prior position on that plane (or the plane default spawn) instead of the source-plane coordinates.
 
 ### Documentation
 
-- **`PlayerSession.hpp` world/plane layout comment (line ~103) rewritten** to
-  document the pre-1.12 vanilla Java Edition layout the code actually uses
-  (Overworld 0 / Nether −1 / End 1 / Aether `<aether-plane-id>` default 100 /
-  custom 101+) instead of the aspirational "0/1/2 with 3..99 reserved" block
-  that has never matched the code since 0.0.6.
-- **`WorldCommands.hpp` `/world create` subcommand summary** fixed to read
-  "allocate a new plane (id >= 101)" (was "id >= 100", matching
-  `kFirstCustomWorldId = 101` in `Database.cpp` and the Aether reserved-slot
-  convention).
-- Wiki [Multiworld & Dimensions](Multiworld-and-Dimensions) updated:
-  config-key table, plane table, and intro paragraph now describe the
-  configurable `[world] aether-plane-id` key; the four "Doc/code mismatches
-  worth flagging" callouts are replaced with a resolved-in-0.0.14 note while
-  keeping the still-open `pregenerateWorld` callout.
+- **`PlayerSession.hpp`** plane-layout comment rewritten to the actual pre-1.12 layout (Overworld 0 / Nether −1 / End 1 / Aether `<aether-plane-id>` default 100 / custom 101+).
+- **`WorldCommands.hpp`** `/world create` summary corrected to "allocate a new plane (id >= 101)".
+- **Wiki** Multiworld & Dimensions: documents configurable `[world] aether-plane-id`; stale doc/code mismatch callouts replaced with a resolved-in-0.0.14 note (keeps the open `pregenerateWorld` callout).
 
 ---
-## [0.0.13] - 2026-12-10
+## [0.0.13] - 2026-10-12
 
 ### Added
 
-- **`/world info <name>` subcommand** (`WorldCommands.hpp`, op-level 3). Resolves a
-  plane name through the `world_registry` SQLite table and reports its dimension
-  id, generation style and the per-plane SQLite file it serves (`world.db` /
-  `world-nether.db` / `world-end.db` / `world-aether.db` for the fixed planes;
-  `world-<safeName>.db` for custom planes, mirroring the path-traversal sanitizer
-  in `createWorld`).
-  - Backed by a new `NetworkManager::describeWorld(name, outId, outStyle, outDbPath)`
-    built on `Database::lookupWorld` (which already returned id + style), so
-    `/world info` reflects registered-but-inactive planes too, not just the
-    live in-memory `m_worlds` set.
-  - Wired through a new `CommandContext::describeWorld` closure in both
-    console contexts (`Server::processConsoleInput`, `Server::startConsoleThread`)
-    and the PLAY chat context (`PlayerHandler.cpp`), matching how
-    `createWorld` / `listWorlds` are already wired.
+- **`/world info <name>` subcommand** (op-level 3): reports a plane's dimension id, gen style and per-plane SQLite file via new `NetworkManager::describeWorld` (built on `Database::lookupWorld`, so it lists registered-but-inactive planes too); wired through `CommandContext::describeWorld` in console + PLAY chat contexts.
 
 ### Fixed
 
-- **Console `/gotor <world>` rejected the Nether plane.** The console lambdas
-  tested `lookupWorldId(...) < 0` to detect "not found", but the function uses
-  `-2147483648` as its sentinel and Nether's pre-1.12 id is legitimately `-1`
-  (`NetworkManager.hpp` still documented the stale "-1 when not found" contract).
-  Both `Server::processConsoleInput` and `Server::startConsoleThread` now
-  compare against the sentinel, matching `PlayerHandler.cpp`'s existing check.
-- **Heap corruption seen in the chest→reorg test sequence** — the inventory
-  deserializer in `PlayerSession.cpp` used an always-true unsigned guard
-  (`slot >= 0` where `slot` is a `uint16_t`) before indexing the output
-  vector, so a bad wire slot wrote past the end of the vector and corrupted
-  the heap; the corruption then surfaced as a segfault during the later
-  reorg test. Guarded with `static_cast<std::size_t>(slot) < out.size()`.
-- **Chest test exit-code inversion** (`chest_test.py`): the PASS branch
-  returned non-zero and the WARN condition drove `return 0`, so the runner
-  recorded the opposite verdict; fixed the PASS branch to `return 0`.
-- **Unused-constant warning noise** — `WOOL` block id in `WorldStorage.cpp`
-  marked `[[maybe_unused]]` so the build stays warning-clean.
+- **Console `/gotor` rejected the Nether plane:** "not found" check compared `< 0` but the sentinel is `-2147483648` and Nether's id is legitimately `-1`; both console contexts now compare against the sentinel.
+- **Heap corruption in chest→reorg sequence:** inventory deserializer's always-true unsigned guard (`slot >= 0` on a `uint16_t`) let a bad wire slot write past the vector; guarded with `static_cast<std::size_t>(slot) < out.size()`.
+- **Chest test exit-code inversion** (`chest_test.py`): PASS branch returned non-zero; fixed to `return 0`.
+- **Unused-constant warning noise:** `WOOL` block id in `WorldStorage.cpp` marked `[[maybe_unused]]`.
 
 ---
 ## [0.0.12] - 2026-10-10
 
 ### Added
 
-- **Per-chunk overworld biome picker** (`Gen::biomeForChunk`). Mirrors vanilla
-  1.7's `RegionChoose.cpp`: two coarse 2D noises (height at ~1/32 chunks,
-  temperature at ~1/11 chunks) map to six regions — FOREST, PLAINS, DESERT,
-  ARCTIC, OCEAN, MOUNTAINS — so adjacent chunks agree on their biome and
-  biomes appear as ~30-chunk (480-block) patches.
-- **Biome-specific surface materials** inside `overworldChunk`: FOREST/PLAINS
-  stay GRASS/DIRT, DESERT becomes SAND/SANDSTONE, ARCTIC becomes SNOW/DIRT,
-  OCEAN becomes SAND/SAND, MOUNTAINS becomes COBBLESTONE/STONE.
-- **Biome altitude bias**: OCEAN pushes the density threshold down
-  (−0.25) so water actually dominates those chunks; MOUNTAINS pushes it up
-  (+0.20) so mountains read as raised stone.
-- **Biome-aware vegetation and structures**:
-  * Tree density is per-biome (Forest 3%, Plains 0.8%, Desert 0.4%,
-    Arctic/Ocean 0%, Mountains 1.2%). Trees now span the whole 16×16 chunk
-    instead of the previous 8×8 sub-block that made forests look sparse.
-  * Trunk height is randomised 4..6 blocks (vanilla oak is `4 + nextInt(3)`),
-    and the canopy is a squashed sphere so tall and short oaks look varied
-    instead of "all oaks are exactly 5 tall".
-  * DESERT gets sparse CACTUS (1..3 tall) instead of oaks; ARCTIC/OCEAN
-    get no trees; grass/flower decor is only placed on grass-topped biomes.
-- **Real village clusters**: `Gen::generateVillage` now seeds 4-7 houses
-  (5×5..7×7 with pitched roofs and a doorway), one cobble WELL, one DIRT+WHEAT
-  farm, and one fenced animal PEN, each at its own chunk anchor inside a
-  16×16 chunk region (256×256 blocks). Neighbouring chunks see the same
-  layout, so a walk across chunk seams reveals a real Minecraft village
-  instead of "one box house per chunk."
-- **Real mineshaft shape**: `Gen::generateMineshaft` now starts with a
-  3×3-column **vertical shaft** (startY = 15..50 down 5..45 blocks) lined
-  with WOOD cross-beam supports every 4 blocks, then walks 3-7 horizontal
-  corridors that carve 3×3 tunnels with the same WOOD support pattern and
-  RAILS on the floor. Spider webs are sprinkled on the ceiling. This
-  matches vanilla's `MinShaft.cpp` structure and fixes the previous
-  FENCE+PISTON_HEAD supports that read as a bizarre squiggle.
+- **Per-chunk overworld biome picker** (`Gen::biomeForChunk`): two coarse 2D noises map to six regions (FOREST/PLAINS/DESERT/ARCTIC/OCEAN/MOUNTAINS) so biomes appear as ~30-chunk patches.
+- **Biome surface materials + altitude bias** (DESERT→SAND, ARCTIC→SNOW, OCEAN→SAND, MOUNTAINS→COBBLESTONE; OCEAN lowers / MOUNTAINS raises the density threshold).
+- **Biome-aware vegetation:** per-biome tree density, trees span the full 16×16 chunk, trunk height `4 + nextInt(3)` with squashed-sphere canopy, CACTUS on desert, no trees on arctic/ocean.
+- **Real village clusters** (`Gen::generateVillage`): 4-7 houses + WELL + farm + PEN per 16×16-chunk region, shared across seams.
+- **Real mineshaft shape** (`Gen::generateMineshaft`): 3×3 vertical shaft + horizontal 3×3 corridors with WOOD supports and RAILS floor, matching vanilla `MinShaft.cpp`.
 
 ### Fixed
 
-- **Tree height uniformity**: `for (h = 1; h <= 5; ++h)` replaced with
-  `4 + nextInt(3)`; forest height now varies per tree as in vanilla.
-- **Tree sparsity**: the tree loop was clipped to `lx, lz ∈ [4, 11]`
-  (an 8×8 patch inside the 16×16 chunk), which left the outer 3/4 of
-  every chunk bare of trees. Now uses `lx, lz ∈ [2, 13]` with a small
-  margin so canopies fit within the chunk.
-- **Village "one box house"**: previous `generateVillageComponents`
-  placed a single 5×5×4 box per 32×32 chunk region; new multi-house
-  cluster covers villages properly.
-- **Mineshaft "bizarre shape"**: previous `generateMineshaft` skipped
-  the vertical shaft entirely and used FENCE/PISTON_HEAD as "supports",
-  which reads as a squiggle of strange blocks in game.
+- **Tree height uniformity:** `for (h = 1; h <= 5; ++h)` → `4 + nextInt(3)`.
+- **Tree sparsity:** tree loop was clipped to an 8×8 patch; now `lx, lz ∈ [2, 13]` with margin so canopies fit the chunk.
+- **Village "one box house":** replaced single 5×5×4 box per region with the new multi-house cluster.
+- **Mineshaft "bizarre shape":** previous version skipped the vertical shaft and used FENCE/PISTON_HEAD supports; now uses the vanilla shaft+corridor shape.
 
 ---
 ## [0.0.11] - 2026-10-10
 
 ### Added
 
-- **Per-plane ore generation** (`Gen::generateOverworldOre` / `generateNetherOre` /
-  `generateAetherOre` / `generateEndOre`). Each wrapper drives the vanilla 1.7.x
-  ore vein distribution:
-  * Coal: 27 veins / max 12 blocks / y 5..132
-  * Iron: 10 veins / max 5 / y 5..52
-  * Gold: 4 veins / max 5 / y 0..31
-  * Lapis: 2 veins / max 5 / y 0..31
-  * Diamond: 2 veins / max 5 / y 0..15
-  * Quartz: 2 veins / max 5 / y 16..71
-  and swaps in the correct **host material** per plane:
-  * Overworld → `STONE` (existing behaviour)
-  * Nether → `NETHERRACK` (vanilla Java shares one `createOre()` across planes)
-  * Aether → `SANDSTONE` (the sky-island material `aetherChunk` lays down) with
-    density halved and y band clipped to the aether elevation range (y 30..100)
-  * End → intentionally no ore (matches vanilla End.cpp: End is a hollow wall
-    with no ore veins by design). The stub exists so plane wiring stays
-    symmetric and to enable sparse gems later without touching call-sites.
-- **`Gen::generateOre` host-material parameter**: the vein walker now takes a
-  `hostId` (default `STONE`) so a vein only replaces blocks matching the plane's
-  rock. This is what lets Nether veins appear inside pink Netherrack and Aether
-  veins inside Sandstone rather than only inside STONE.
+- **Per-plane ore generation** (`Gen::generateOverworldOre` / `generateNetherOre` / `generateAetherOre` / `generateEndOre`): vanilla 1.7.x vein distribution (coal 27/12/y5-132, iron 10/5/y5-52, gold 4/5/y0-31, lapis 2/5/y0-31, diamond 2/5/y0-15, quartz 2/5/y16-71) with plane-specific host material (Overworld STONE, Nether NETHERRACK, Aether SANDSTONE y30-100 halved, End none by design).
+- **`Gen::generateOre` host-material parameter** (`hostId`, default `STONE`): a vein only replaces blocks matching the plane's rock.
 
 ### Fixed
 
-- **`Gen::generateOre` per-chunk seed derivation**: old signature `(void)cx;
-  (void)cz;` — the seed was `seed ^ oreType`, so **every chunk showed identical
-  ore layouts** (visible tiling). Fixed by mixing `worldSeed ^ mix(cx) ^ mix(cz)
-  ^ mix(oreType) ^ mix(hostId)` into the LCG state before the vein walk.
-- **Vein-walk algorithm**: previous code scattered blobs by picking random
-  offsets from a fixed start; replaced with vanilla Java's cumulative walk
-  (`x += randInt(-1, 1); y += randInt(-1, 1); z += randInt(-1, 1);` each step)
-  plus a per-vein randomized length in [2, veinSize] rather than always the
-  max. Veins now look vein-shaped (chain-shaped) rather than round blobs.
-- **Overworld chunk ore coverage**: replaced the 3-call block (coal/iron/gold
-  only, non-vanilla counts: coal 20 veins / size 16 / y 0..128; iron 20 veins
-  / size 8 / y 0..64; gold 2 veins / size 8 / y 0..32) with the vanilla-values
-  call to `generateOverworldOre`.
-- **Nether / Aether / End chunks now call an ore pass at all**: previously
-  none of `Gen::netherChunk` / `Gen::aetherChunk` / `Gen::endChunk` invoked
-  `generateOre` (that's why "genstyle aether/end/nether had no proper ore
-  generation").
+- **`Gen::generateOre` per-chunk seed:** seed was `seed ^ oreType` so every chunk showed identical ore layouts (visible tiling); now mixes `worldSeed ^ mix(cx) ^ mix(cz) ^ mix(oreType) ^ mix(hostId)`.
+- **Vein-walk algorithm:** replaced random-offset blob scatter with vanilla's cumulative walk + per-vein randomized length so veins read as chains.
+- **Overworld ore coverage:** replaced the 3-call (coal/iron/gold, non-vanilla counts) block with the vanilla-values `generateOverworldOre` call.
+- **Nether/Aether/End had no ore pass at all:** added the ore wrapper calls to `netherChunk` / `aetherChunk` / `endChunk`.
 
 ### Files
 
@@ -635,196 +122,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 ### Added
 
-- **Off-thread chunk generation (one worker thread per WorldStorage)**: `WorldStorage`
-  now owns a `std::thread` generation worker plus a mutex-guarded `m_genQueue` /
-  `m_genQueued` pending-chunk queue. `requestChunk(cx, cz)` submits a chunk to the queue
-  (idempotent via `isChunkGenerated` fast-reject + in-queue dedup) and lazily spawns the
-  worker on the first call so a plane that is never looked at costs no threads.
-  `getChunkBlocksIfReady(cx, cz)` reads the DB blob for a chunk but **never**
-  triggers a sync `generateChunk()` on miss; it returns an empty map so the caller
-  can skip that chunk this tick and let the worker finish it in the background.
-  `isChunkReady(cx, cz)` is the cheap cross-thread read-only check used by the send
-  path. The `~WorldStorage` destructor flips `m_genStopFlag` + joins the worker so
-  shutdown waits for any in-flight DB write before closing the SQLite handles.
-- **Async chunk streaming flush tick**: `NetworkManager::tickChunkStreaming(renderDistance)`
-  re-runs `WorldManager::sendMapChunkBulk` every game tick against every live
-  PLAY session with `clientProtocol >= 47`. `Server.cpp::start()` throttles it to
-  5 Hz (every 4th 50ms tick) so it does not compete with the 20Hz tick work. This
-  pass exists mainly to catch chunks whose generation completed between a player's
-  movement crossings but before the next crossing -- e.g. the "player stopped
-  moving" tail case where the prefetch queue would otherwise sit forever.
+- **Off-thread chunk generation (one worker per WorldStorage):** `WorldStorage` owns a generation worker + mutex-guarded pending queue; `requestChunk` submits (idempotent, lazy worker spawn), `getChunkBlocksIfReady`/`isChunkReady` are non-blocking read paths, destructor joins the worker before closing SQLite.
+- **Async chunk streaming flush tick** (`NetworkManager::tickChunkStreaming`): re-emits `sendMapChunkBulk` per live PLAY session, throttled to 5 Hz, to catch chunks finished between movement crossings.
 
 ### Changed
 
-- **Chunk emission at high render distance**: `sendMapChunkBulk` (1.8+ streaming)
-  now branches per chunk:
-  * Login burst (`session.loadedChunks.empty()`) keeps the legacy sync path via
-    `getChunkBlocks()` so login behaves identically to the pre-refactor server
-    (a one-time hitch at login that the user has already accepted).
-  * Movement crossings (any subsequent call) use `isChunkReady()` + `getChunkBlocksIfReady()`
-    and skip chunks that are still pending on the worker; those skipped chunks were
-    just `requestChunk()`'d by the prefetch pass, so they ship on the next crossing
-    or on the periodic flush tick.
-- **Directional prefetch in `updateChunksAroundPlayer`**: on each 1.8+ crossing
-  the server submits a box **larger than the render box**, extended
-  `frontPad = renderDistance` chunks in the direction the player just moved
-  and `backPad = 1` chunk behind. This gives the worker a full render distance
-  of lead time along the travel axis -- the "double the render distance ahead"
-  behaviour the user sketched -- so high-speed travel (boat / flight /
-  spectator cam) does not outrun generation. `session.prevChunkX` / `prevChunkZ`
-  (added to `PlayerSession`) track the previous chunk so the direction is
-  derived from `sign(currentChunk - prevChunk)`; the sentinel `INT_MIN` marks
-  the login call so no directional bias is applied for the initial burst.
-- **SQLite `sqlite3_stmt*` thread safety**: WorldStorage's prepared
-  statement members (`m_getChunkStmt` for reads, `m_saveChunkStmt` for writes)
-  are per-instance stateful and must not be driven concurrently. `m_getStmtMutex`
-  guards `readChunkBlob()`, `m_saveStmtMutex` (a `std::recursive_mutex` so
-  `saveBlockChange → generateChunk` nesting doesn't deadlock) guards `generateChunk()`
-  and `saveBlockChange()`. Two separate mutexes let the network thread's chunk
-  reads overlap with the generation worker's writes.
+- **Chunk emission at high render distance:** `sendMapChunkBulk` branches per chunk — login burst keeps the legacy sync `getChunkBlocks()` path; movement crossings use `isChunkReady()`/`getChunkBlocksIfReady()` and skip worker-pending chunks (they ship on the next crossing or flush tick).
+- **Directional prefetch in `updateChunksAroundPlayer`:** submits a box extended `frontPad = renderDistance` ahead / `backPad = 1` behind along the travel axis so high-speed travel doesn't outrun generation; `session.prevChunkX/Z` (new, `INT_MIN` login sentinel) derive the direction.
+- **SQLite `sqlite3_stmt*` thread safety:** per-instance prepared stmts are stateful; `m_getStmtMutex` guards reads, `m_saveStmtMutex` (recursive, so `saveBlockChange → generateChunk` nesting doesn't deadlock) guards writes; two mutexes let network reads overlap worker writes.
 
 ### Design notes
 
-- Thread granularity is **per WorldStorage (per plane)**, not per client.
-  One-thread-per-client would spawn a terrain thread per concurrent player
-  (50 players → 50 threads), all competing for the same `sqlite3_stmt*` handle
-  in one SQLite DB -- a serialization bottleneck dressed up as parallelism.
-  One global thread works but serializes cross-plane generation (Nether and
-  Overworld players compete for the same queue). Per-plane threads (typically
-  3-4 across Overworld / Nether / End / Aether) give independent per-plane
-  progress while bounding total thread count by the number of active worlds.
-- Prefetch is directional (biased along the player's velocity vector), which
-  is what keeps high-speed travel from lagging the server: the worker only
-  generates chunks the client is about to look at, so generation cost stays
-  proportional to `renderDistance` per plane rather than 2-3x that per client.
+- Per-plane (not per-client) worker granularity and velocity-biased prefetch rationale: see wiki "Async chunk generation" / `phases.md`.
 
 ### Files
 
-- `include/storage/WorldStorage.hpp` / `src/storage/WorldStorage.cpp`: worker
-  thread, async queue, `requestChunk` / `isChunkReady` / `getChunkBlocksIfReady`,
-  stmt mutexes, dtor join.
-- `include/player/PlayerSession.hpp`: new `prevChunkX` / `prevChunkZ` fields for
-  velocity-derived prefetch (initialized to `INT_MIN` sentinel to detect the
-  login burst).
-- `src/managers/WorldManager.cpp`: streaming `sendMapChunkBulk` branches on login
-  vs movement; `updateChunksAroundPlayer` submits a directional prefetch box to
-  the WorldStorage worker before invoking the send.
-- `include/network/NetworkManager.hpp` / `src/network/NetworkWorlds.cpp`:
-  `tickChunkStreaming(renderDistance)` periodic flush.
-- `src/core/Server.cpp`: game tick loop throttles the flush pass to 5 Hz.
+- `WorldStorage.{hpp,cpp}`: worker thread, async queue, `requestChunk`/`isChunkReady`/`getChunkBlocksIfReady`, stmt mutexes, dtor join.
+- `PlayerSession.hpp`: new `prevChunkX`/`prevChunkZ` (velocity prefetch, `INT_MIN` login sentinel).
+- `WorldManager.cpp`: login-vs-movement streaming branch + directional prefetch box.
+- `NetworkManager.hpp`/`NetworkWorlds.cpp`: `tickChunkStreaming` flush; `Server.cpp`: 5 Hz throttle.
 
 ---
 ## [0.0.9] - 2026-10-10
 
 ### Changed
 
-- **Minecraft Protocol 1.8 (v47), Map Chunk Bulk (S2C 0x26)**: `sendMapChunkBulk` is now
-  the **active streaming entry point**: it walks the not-yet-loaded chunks inside the
-  render box and emits ONE 0x26 packet per chunk (chunkCount pinned to 1) in vanilla's
-  outer-body layout (byte hasSkyLight at body position 0 + varint chunkCount + metas
-  + payloads). The old monolithic build (which packed every not-yet-loaded chunk within
-  the render box into one 0x26 body and blew the 21-bit / 2,097,151-byte wire cap enforced
-  by `NetworkFraming::sendPacket` at render distance >= 3, silently dropping the body and
-  stalling the world past the initial view) is retained as `sendMapChunkBulkMonolithic`
-  for archival/reference -- it works at render distance 1..2 but is not the active path.
-  `updateChunksAroundPlayer` now calls the streaming `sendMapChunkBulk` **once** for 1.8+
-  clients (the loop is inside the function, matching how vanilla's jar server emits per-
-  chunk packets verified by Wireshark traces), and only iterates `sendFlatChunk` (0x21)
-  for legacy (<1.8, protocol < 47) clients.
+- **Map Chunk Bulk (0x26) streaming entry point:** `sendMapChunkBulk` emits one 0x26 packet per chunk (chunkCount=1, vanilla outer layout) instead of one monolithic body that blew the 21-bit wire cap at render distance >= 3; the monolithic build is kept as `sendMapChunkBulkMonolithic` for reference. `updateChunksAroundPlayer` calls the streaming path once for 1.8+ clients, iterating `sendFlatChunk` only for legacy (<47).
 
 ### Fixed
 
-- **Minecraft Protocol 1.8 (v47), Chunk (S2C 0x21)**: `sendFlatChunk` now skips
-  emission for chunks whose `sectionBitmask == 0`. Vanilla java's `readChunk`
-  short-circuits when the bitmask is empty -- it reads only `int x, int z, byte
-  groundUp, short mask` and does **not** consume the VarInt length prefix or
-  the DEFLATE blob we used to emit. Every air chunk inside the render box
-  left ~15 bytes of garbage in the socket stream, which desynchronised every
-  subsequent 0x21 body and made the JVM client render the entire remainder of
-  the render box as void.
-- **Minecraft Protocol 1.8 (v47), Map Chunk Bulk (S2C 0x26)**: `sendChunkBulkSingle`
-  now writes the vanilla outer header (one `hasSkyLight` byte at body position 0
-  + varint chunkCount) instead of a spurious `compressLevel=0` outer byte plus a
-  per-chunk `hasSkyLight` byte. Those two extras against vanilla's one outer
-  skylight byte were the "1 extra byte" observed on packet 38 (0x26) in the
-  wire. Removing the per-chunk byte and switching the outer byte's meaning from
-  compressLevel to hasSkyLight also flips vanilla from DEFLATE-inflating the
-  body (compressLevel=1 in the previous version) to using the 12,288-byte
-  section width that matches the payloads we emit.
+- **Chunk (0x21) air-chunk desync:** `sendFlatChunk` now skips chunks with `sectionBitmask == 0` — vanilla `readChunk` short-circuits on an empty mask and does not consume the length/DEFLATE we used to emit, so each air chunk left ~15 garbage bytes that desynced the stream.
+- **Map Chunk Bulk (0x26) outer header:** `sendChunkBulkSingle` writes the vanilla one `hasSkyLight` byte + varint chunkCount instead of a spurious `compressLevel=0` outer byte + per-chunk skylight byte (the "1 extra byte" on packet 38); this also flips vanilla from DEFLATE to the 12,288-byte section width.
 
 ### Added
 
-- **Chests**: `handleBlockPlacement` now detects *double chests* by probing the
-  four horizontal neighbours of a clicked chest (IDs 54, 130, 146); the
-  `0x2D Open Window` payload advertises 54 slots for a detected pair (vs.
-  27 for a single chest). Chest blocks continue to be persisted through
-  `WorldStorage::saveBlockChange`, so they survive respawn / reconnect
-  without needing any respawn-specific packet to re-emit them.
-- **Network safety**: `NetworkManager::sendPacket` now rejects any packet whose
-  body exceeds the 21-bit wire length limit (2 097 151 bytes). Callers that
-  forget to split no longer corrupt the client stream; the server logs the
-  oversized packet and drops it instead of emitting half a frame.
+- **Double-chest detection:** `handleBlockPlacement` probes the four horizontal neighbours (IDs 54/130/146); `0x2D Open Window` advertises 54 slots for a pair vs 27 for a single; chests persist via `saveBlockChange`.
+- **Network safety:** `sendPacket` rejects bodies over the 21-bit wire limit (2,097,151 bytes), logging and dropping oversized packets instead of corrupting the stream.
 
 ### Changed
 
-- **Map Chunk Bulk (0x26)**: `WorldManager::sendMapChunkBulk` is now the pre-RAM-fix
-  monolithic build restored from V0.0.5 (git 9620a09). It builds **one** 0x26 body
-  (leading skyLight byte + varint chunkCount + per-chunk metas + concatenated
-  chunk payloads) that contains every not-yet-loaded chunk in the render box and
-  sends it in a single shot. The V0.0.6 / V0.0.7 streaming split (which emitted
-  several consecutive `0x26` bodies to keep RAM bounded) broke loading on the wire:
-  the JVM 1.8 client accepts at most one Map Chunk Bulk per world-load stage, so
-  subsequent split bodies were dropped and the client rendered chunks as air. The
-  pre-RAM monolithic is what the client actually expects and the state where
-  "loading was correct" (cosmetically, pair chunks had generated heights and
-  impair chunks had air up to y=80 because the active preset populated only the
-  bottom five sections, but every chunk was received). RAM note: this peaks at
-  ~10 MB above baseline for a 7x7 view and the body may exceed the 2 MiB wire
-  length cap; `NetworkFraming::sendPacket` still refuses and logs any oversized
-  body rather than corrupting the stream.
-- **World constants (`WorldStorage.hpp`)**: the stale comments
-  ("Y = 0 .. 384, i.e. 25 sections", "// 25", "24 * 8192 = 196 608")
-  are corrected to reflect the actual 16-section range
-  (`MIN_WORLD_Y = 0 .. MAX_WORLD_Y = 255`). A `static_assert` documents
-  the wire-level 16-section ceiling so a future bump to `MAX_WORLD_Y`
-  cannot silently produce an unrepresentable section bitmask.
-- **`minecraft:mountains` preset (`WorldStorage.cpp`)**: terrain height
-  clamp tightened from `[5, 250]` to `[5, 100]` to match the comment's
-  own "Y=110" intent. Keeps mountains inside sections 0..6, halving per-
-  chunk payload.
+- **Map Chunk Bulk (0x26):** `sendMapChunkBulk` reverted to the pre-RAM monolithic build (V0.0.5) — the JVM 1.8 client accepts at most one Map Chunk Bulk per load stage, so the streaming split's extra bodies were dropped (chunks rendered as air). Peaks ~10 MB above baseline for a 7×7 view; oversized bodies are refused+logged by `sendPacket`.
+- **World constants (`WorldStorage.hpp`):** stale 25-section comments corrected to the real 16-section range (`MIN_WORLD_Y=0..MAX_WORLD_Y=255`); `static_assert` documents the wire-level ceiling.
+- **`minecraft:mountains` preset:** height clamp tightened `[5,250]` → `[5,100]` to keep mountains inside sections 0..6 (halves per-chunk payload).
 
 ### Fixed
 
-- **Minecraft Protocol 1.8 (v47)**: root cause of the client-side
-  *CorruptedFrameException: length wider than 21-bit* under the
-  `minecraft:mountains` preset. The monolithic `0x26` build
-  previously pushed 7×7 chunks × 16 populated sections × ~196 KiB/chunk
-  ≈ 9.6 MB in a single packet, overflowing the wire length varint.
-  `NetworkFraming::sendPacket` now rejects any body whose length exceeds
-  the 21-bit wire limit (2 097 151 bytes), logs it, and drops the frame
-  instead of emitting half a frame — the client stream stays aligned.
-  The mountains preset's height clamp (`[5, 100]`) keeps populated
-  sections inside 0..6, so a normal 5-radius bulk body stays well under
-  the cap. If it ever overflows, the log names the offending packet
-  size and the preset / renderDistance to tune.
+- **CorruptedFrameException: length wider than 21-bit (mountains preset):** the monolithic `0x26` build pushed ~9.6 MB (7×7 × 16 sections × ~196 KiB) overflowing the wire varint; `sendPacket` now refuses+logs+drops oversized bodies so the stream stays aligned, and the `[5,100]` clamp keeps sections inside 0..6.
 
 
 ## [0.0.6] - 2026-10-04
 
 ### Added
 
-- **Player management**:Added player persistance
-- **Player management**:Completed Player data structure to latest minecraft "player.dat nbt strucuture"
-- **Biomes & presets generation**: added generation for test world generating each block
+- **Player management:** player persistence; player data structure completed to the vanilla `player.dat` NBT layout.
+- **Biomes & presets generation:** per-block test-world generation.
 
 ### Changed
 
-- **Commands** Refactored command implementation to put them in dedicated headers, to limit further cluter and kep files readable 
-- **Minecraft Protocol** Mockup of handling different protocol, will surely be scrapped for a per protocol basis, or another style, maybe doing a c++ conversion of what Viaversion is doing in java
-- **Console** Better Behaviour and command history
+- **Commands:** moved into dedicated headers to keep files readable.
+- **Minecraft Protocol:** interim multi-protocol mockup (superseded by per-protocol handling).
+- **Console:** improved behaviour and command history.
 
 ### Fixed
-- **Minecraft Protocol 1.8 (v47)**: Crash when dealing with interactive blocs operations (chest / anvil / etc.)
+
+- **Minecraft Protocol 1.8 (v47):** crash on interactive block operations (chest / anvil).
 
 
 ## [0.0.5] - 2026-09-30
@@ -847,7 +208,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 ---
 
-## [0.0.4]- 2026-09-16
+## [0.0.4] - 2026-09-16
 
 ### Added
 - **Biomes & presets generation**: Support for `minecraft:flat`, `minecraft:stone`, `minecraft:water`, and `overworld` presets.
@@ -860,7 +221,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 - **Network serialization (Protocol 47 / MC 1.8)**: Better network stability.
 ---
 
-## [0.0.3]- 2026-09-08
+## [0.0.3] - 2026-09-08
 
 
 ### Added
@@ -869,7 +230,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 - Chat and in game command support (basic)
 ---
 
-## [0.0.2]- 2026-09-02
+## [0.0.2] - 2026-09-02
 
 ### Added
 - **SQLite storage engine (WAL Mode)**: Persistence implementation.
@@ -880,7 +241,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 ---
 
-## [0.0.1]- 2026-09-02
+## [0.0.1] - 2026-09-02
 
 ### Added
 

@@ -252,6 +252,22 @@ struct CommandContext
     std::function<std::string()> worldModelName =
         []() -> std::string { return "sqlite"; };
 
+    // ---- 0.0.15 phase 8d: save-all / save-on / save-off hooks ---------------
+    // Vanilla-1.8's server-side save trio. saveAllPlanes returns true when
+    // the per-plane flush touched at least one plane; setAutosaveEnabled
+    // pushes the toggle down into NetworkManager::m_autosaveEnabled; get
+    // AutosaveEnabled reads it back so /save-on / /save-off can echo the
+    // effective state (idempotent re-run of the same command still prints
+    // a line). Defaults: no-op returns false so a bare console run without
+    // NetworkManager wiring stays compilable and reports "nothing flushed"
+    // honestly.
+    std::function<bool()> saveAllPlanes =
+        []() -> bool { return false; };
+    std::function<void(bool)> setAutosaveEnabled =
+        [](bool) {};
+    std::function<bool()> getAutosaveEnabled =
+        []() -> bool { return false; };
+
     // Command handlers for /setblock, /place and /setworldspawn need to
     // know which plane to write on when the invocation comes from a chat
     // context (the caller's live session knows its PlayerSession::worldId;

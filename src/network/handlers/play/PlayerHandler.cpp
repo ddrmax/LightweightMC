@@ -5,9 +5,11 @@
 #include "network/AntiScan.hpp"
 #include "core/Logger.hpp"
 #include "core/ConfigManager.hpp"
+#include "core/utils.hpp"
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #ifndef MC_PROTOCOL_VERSION_NAME
 #define MC_PROTOCOL_VERSION_NAME "1.8"
 #endif
@@ -45,7 +47,7 @@ namespace PlayerHandler
             ctx.replyCallback = [&net, clientFd](const std::string &msg)
             {
                 std::vector<uint8_t> chatMsg;
-                LightweightMC::Network::Packet::writeString(chatMsg, R"({"text":")" + msg + R"("})");
+                LightweightMC::Network::Packet::writeString(chatMsg, R"({"text":")" + LightweightMC::Core::escapeChatJson(msg) + R"("})");
                 chatMsg.push_back(1);
                 net.sendPacket(clientFd, 0x02, chatMsg);
             };
@@ -191,6 +193,25 @@ namespace PlayerHandler
             {
                 return net.worldModelName();
             };
+            // 0.0.15 phase 8d: /save-all and /save-on//save-off from an in-
+            // game chat context route through the same NetworkManager meth-
+            // ods the console contexts already reach; the steady_clock now-
+            // stamp keeps the level.dat modified field aligned with vanilla
+            // 1.8's "wall-clock ms since boot" convention.
+            ctx.saveAllPlanes = [&net]() -> bool
+            {
+                const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch()).count();
+                return net.saveAllPlanes(nowMs);
+            };
+            ctx.setAutosaveEnabled = [&net](bool enabled) -> void
+            {
+                net.setAutosaveEnabled(enabled);
+            };
+            ctx.getAutosaveEnabled = [&net]() -> bool
+            {
+                return net.autosaveEnabled();
+            };
 
             CommandManager::getInstance().executeCommand(ctx, message);
             return;
@@ -199,7 +220,7 @@ namespace PlayerHandler
         {
             std::string formattedChat = "<" + session.username + "> " + message;
             std::vector<uint8_t> chatMsg;
-            LightweightMC::Network::Packet::writeString(chatMsg, R"({"text":")" + formattedChat + R"("})");
+            LightweightMC::Network::Packet::writeString(chatMsg, R"({"text":")" + LightweightMC::Core::escapeChatJson(formattedChat) + R"("})");
             chatMsg.push_back(0);
 
             for (const auto &[fd, s] : clients)
