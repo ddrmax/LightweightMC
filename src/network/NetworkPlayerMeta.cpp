@@ -47,9 +47,17 @@ namespace LightweightMC::Network
     // Update a player's game mode (0=survival, 1=creative, 2=adventure,
     // 3=spectator). Loads the existing DB row, mutates only the gamemode
     // column, saves it back, updates the live session when the player is
-    // currently online, and forwards a Tab List "Update Player" packet
-    // (0x38) to that client so the change is reflected in-game without
-    // requiring a reconnect.
+    // currently online, and forwards a Change Game State packet (0x2B,
+    // sub-action 3 = Change Game Mode / Adventure) to that client so the
+    // change is reflected in-game without requiring a reconnect.
+    //
+    // Wire op rationale: 0x2B is the correct vanilla-1.8 op for a mode
+    // switch. The client picks up survival/creative/adventure/spectator
+    // rules (gravity, invulnerability, inventory policy) from the "Change
+    // Game State" T sub-action. 0x38 "Update Player Info" -- a.k.a. the
+    // Tab List Update Player packet -- drives tab-list scoring and player
+    // properties (canPvP / invincible flags) only, so sending it here
+    // leaves the client in the old physics/abilities state.
     bool NetworkManager::setPlayerGameMode(const std::string &playerName, uint8_t mode)
     {
         if (mode > 3)
@@ -74,18 +82,30 @@ namespace LightweightMC::Network
         data.gamemode = mode;
         const bool persisted = m_database.savePlayerData(data);
 
-        // Tell the client about the mode change with a Tab List Update
-        // Player packet (0x38): varint count(1), string name, byte mode,
-        // int32 score=0. The client then shows the new mode in the tab
-        // list and switches physics/abilities on the next tick.
+        // Tell the client about the mode change with a Change Game State
+        // packet (0x2B): byte subAction = 3 (Change Game Mode / Adventure),
+        // then float mode (0=survival, 1=creative, 2=adventure,
+        // 3=spectator). The client re-reads its physics / invulnerability /
+        // inventory behaviour from this sub-action on the next tick.
+        //
+        // The commented block below is the legacy 0x38 "Update Player
+        // Info" / Tab List Update Player path (varint count, string name,
+        // byte mode, int score). That packet does NOT cause
+        // the client to switch survival/creative/etc. rules; it is only
+        // for tab-list scoreboard and canPvP / invincible flags, so it
+        // stays disabled here.
         if (foundOnline && liveFd >= 0)
         {
             std::vector<uint8_t> updateTab;
+            /* Legacy Tab List Update Player path (kept for reference only).
             Packet::writeVarInt(updateTab, 1);
             Packet::writeString(updateTab, playerName);
             updateTab.push_back(mode);
             Packet::writeInt(updateTab, 0);
-            sendPacket(liveFd, 0x38, updateTab);
+            sendPacket(liveFd, 0x38, updateTab);*/
+            updateTab.push_back(3); // sub-action 3 (Change Game Mode)
+            Packet::writeFloat(updateTab, mode);
+            sendPacket(liveFd, 0x2B, updateTab); // Change Game State
         }
 
         return foundOnline || persisted;

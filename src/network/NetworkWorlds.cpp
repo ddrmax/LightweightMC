@@ -412,6 +412,16 @@ namespace LightweightMC::Network
         return fallback;
     }
 
+    std::vector<int32_t> NetworkManager::planeIds() const
+    {
+        std::vector<int32_t> out;
+        out.reserve(m_worlds.size());
+        for (const auto &kv : m_worlds)
+            if (kv.second)
+                out.push_back(kv.first);
+        return out;
+    }
+
     int32_t NetworkManager::lookupWorldId(const std::string &worldName) const
     {
         if (worldName.empty())
@@ -572,6 +582,7 @@ namespace LightweightMC::Network
                                   ? static_cast<std::uint64_t>(seed)
                                   : (primary ? primary->getWorldSeed() : 0ULL));
         storage->setGenerationStyle(styleFromName(normalizedStyle));
+        storage->setPlaneWorldId(assignedId);
         // storage->pregenerateWorld(12);
 
         m_worlds.emplace(assignedId, std::move(storage));

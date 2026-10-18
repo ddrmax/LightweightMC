@@ -53,9 +53,14 @@ struct CommandContext
 
     // Optional callback used by /gamemode to change a player's game mode.
     // It must update the live session (if the player is online), persist the
-    // value to the database, and forward the update to the client (typically
-    // via a Tab List "Update Player" packet). `mode` uses Minecraft's
-    // enumeration: 0=survival, 1=creative, 2=adventure, 3=spectator.
+    // value to the database, and forward the update to the client via a
+    // Change Game State packet (wire op 0x2B, sub-action 3 = Change Game
+    // Mode) so the client observes the survival/creative/adventure/spectator
+    // switch without a reconnect. `mode` uses Minecraft's enumeration:
+    // 0=survival, 1=creative, 2=adventure, 3=spectator. 0x2B is
+    // the vanilla-1.8 op the client uses to pick up new game rules;
+    // a Tab List Update Player (0x38) packet only drives tab-list scoring
+    // and player properties, so it is the wrong packet for a mode change.
     // Defaults to a no-op so commands can be exercised from a bare console.
     std::function<bool(const std::string &playerName, int mode)> setGameMode = [](const std::string &, int) -> bool
     {
@@ -268,7 +273,29 @@ struct CommandContext
     std::function<bool()> getAutosaveEnabled =
         []() -> bool { return false; };
 
-    // Command handlers for /setblock, /place and /setworldspawn need to
+    // --------------------------------------------------------------
+    // Login-time debug-summon cleanup hook (see EntityManager.hpp).
+    // --------------------------------------------------------------
+    // Vanilla 1.8's SPacketSpawnEntity decoder reads the last byte of the
+    // Spawn Entity Living (wire 0x0f) payload as a one-byte metadata-length
+    // marker. The previous bug-fix corrected the tail terminator so that
+    // slot now holds 0x7f ("octet de fin des métadonnées", integer 127)
+    // instead of a bare 0, so netty's ByteBuf reader on the client stops
+    // at the wire end without underflowing. Ok -- to actually observe that
+    // fix on a real client, an operator flips LMC_DEBUG_LOGIN_SPAWN=1 in
+    // main.cpp (see the bootstrap there) so the login handler path
+    // spawns a batch of ~10 random entities near the player and emits one
+    // wire 0x0f packet per entity. Ok -- this hook lets the operator then
+    // type /despawntest on the console and the EntityManager::removeLoginDebugTest
+    // (see EntityManager.hpp's paired API) walks every tracked entity id
+    // and pushes one wire 0x10 DestroyEntity packet (payload = VarInt
+    // entity_id, per PrismarineJS DestroyEntity_a8ff6d83) to every live
+    // client's fd, then clearLoginDebugTestIds() despawns them once on
+    // the server side and wipes the tracker so the batch doesn't leak
+    // into the next login. Ok -- returns false when there is nothing to
+    // clean up so a bare console run still parses the command line.
+    std::function<bool()> despawnTestBatch =
+        []() -> bool { return false; };
     // know which plane to write on when the invocation comes from a chat
     // context (the caller's live session knows its PlayerSession::worldId;
     // the console thread defaults to 0 = Overworld unless the caller

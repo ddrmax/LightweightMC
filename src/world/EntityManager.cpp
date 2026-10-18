@@ -49,6 +49,7 @@ namespace LightweightMC::World
         {
             const char *name;
             EntityManager::EntityKind kind;
+            uint8_t mobId; // ID officiel du mob en Minecraft 1.8 (Protocol 47)
             double speed;
             uint16_t hp;
             double aggroRange;
@@ -56,29 +57,31 @@ namespace LightweightMC::World
         };
 
         const TemplateInfo kTemplates[] = {
-            // Passive animals
-            {"cow", EntityManager::EntityKind::PASSIVE, 0.6, 20, 8.0, 24.0},
-            {"pig", EntityManager::EntityKind::PASSIVE, 0.7, 16, 8.0, 20.0},
-            {"sheep", EntityManager::EntityKind::PASSIVE, 0.6, 8, 8.0, 20.0},
-            {"chicken", EntityManager::EntityKind::PASSIVE, 0.5, 6, 6.0, 12.0},
-            {"rabbit", EntityManager::EntityKind::PASSIVE, 0.7, 3, 6.0, 12.0},
-            {"deer", EntityManager::EntityKind::PASSIVE, 1.0, 12, 10.0, 28.0},
-            {"llama", EntityManager::EntityKind::PASSIVE, 0.9, 16, 10.0, 24.0},
-            {"horse", EntityManager::EntityKind::PASSIVE, 1.2, 24, 10.0, 32.0},
-            // Aggressive mobs
-            {"wolf", EntityManager::EntityKind::AGGRESSIVE, 1.1, 14, 20.0, 32.0},
-            {"tiger", EntityManager::EntityKind::AGGRESSIVE, 1.4, 20, 24.0, 36.0},
-            {"bear", EntityManager::EntityKind::AGGRESSIVE, 0.9, 30, 18.0, 24.0},
-            {"zombie", EntityManager::EntityKind::AGGRESSIVE, 0.9, 20, 16.0, 32.0},
-            {"skeleton", EntityManager::EntityKind::AGGRESSIVE, 1.0, 14, 20.0, 32.0},
-            {"hunter", EntityManager::EntityKind::AGGRESSIVE, 1.1, 16, 24.0, 32.0},
-            {"bandit", EntityManager::EntityKind::AGGRESSIVE, 1.1, 24, 24.0, 32.0},
-            {"spider", EntityManager::EntityKind::AGGRESSIVE, 1.2, 8, 20.0, 32.0},
-            // Villagers (H1Z1 style NPCs)
-            {"wandering_trader", EntityManager::EntityKind::VILLAGER, 0.9, 24, 12.0, 40.0},
-            {"patrol", EntityManager::EntityKind::VILLAGER, 1.0, 24, 20.0, 48.0},
-            {"warden", EntityManager::EntityKind::VILLAGER, 1.0, 24, 24.0, 56.0},
-            {"phantom", EntityManager::EntityKind::VILLAGER, 1.2, 16, 24.0, 32.0},
+            // Passive animals (IDs 1.8: Cow=92, Pig=90, Sheep=91, Chicken=93, Rabbit=101, Horse=100, etc.)
+            {"cow", EntityManager::EntityKind::PASSIVE, 92, 0.6, 20, 8.0, 24.0},
+            {"pig", EntityManager::EntityKind::PASSIVE, 90, 0.7, 16, 8.0, 20.0},
+            {"sheep", EntityManager::EntityKind::PASSIVE, 91, 0.6, 8, 8.0, 20.0},
+            {"chicken", EntityManager::EntityKind::PASSIVE, 93, 0.5, 6, 6.0, 12.0},
+            {"rabbit", EntityManager::EntityKind::PASSIVE, 101, 0.7, 3, 6.0, 12.0},
+            {"deer", EntityManager::EntityKind::PASSIVE, 92, 1.0, 12, 10.0, 28.0}, // Fallback ou type personnalisé
+            {"llama", EntityManager::EntityKind::PASSIVE, 100, 0.9, 16, 10.0, 24.0},
+            {"horse", EntityManager::EntityKind::PASSIVE, 100, 1.2, 24, 10.0, 32.0},
+
+            // Aggressive mobs (IDs 1.8: Wolf=95, Zombie=54, Skeleton=51, Spider=52, Cave Spider=59, Enderman=58)
+            {"wolf", EntityManager::EntityKind::AGGRESSIVE, 95, 1.1, 14, 20.0, 32.0},
+            {"tiger", EntityManager::EntityKind::AGGRESSIVE, 95, 1.4, 20, 24.0, 36.0},
+            {"bear", EntityManager::EntityKind::AGGRESSIVE, 95, 0.9, 30, 18.0, 24.0},
+            {"zombie", EntityManager::EntityKind::AGGRESSIVE, 54, 0.9, 20, 16.0, 32.0},
+            {"skeleton", EntityManager::EntityKind::AGGRESSIVE, 51, 1.0, 14, 20.0, 32.0},
+            {"hunter", EntityManager::EntityKind::AGGRESSIVE, 32, 1.1, 16, 24.0, 32.0}, // 32 = Player (ou skin humain)
+            {"bandit", EntityManager::EntityKind::AGGRESSIVE, 32, 1.1, 24, 24.0, 32.0},
+            {"spider", EntityManager::EntityKind::AGGRESSIVE, 52, 1.2, 8, 20.0, 32.0},
+
+            // Villagers / NPCs (IDs 1.8: Villager=120)
+            {"wandering_trader", EntityManager::EntityKind::VILLAGER, 120, 0.9, 24, 12.0, 40.0},
+            {"patrol", EntityManager::EntityKind::VILLAGER, 120, 1.0, 24, 20.0, 48.0},
+            {"warden", EntityManager::EntityKind::VILLAGER, 54, 1.0, 24, 24.0, 56.0},
+            {"phantom", EntityManager::EntityKind::VILLAGER, 65, 1.2, 16, 24.0, 32.0}, // 65 = Bat ou 93
         };
 
         const TemplateInfo *lookupTemplate(const std::string &name)
@@ -106,9 +109,9 @@ namespace LightweightMC::World
         {
             // Each vector lists template names for that style in the same
             // order they should be placed near the login point.
-            std::vector<std::string> passive;   // farmyard / animals
+            std::vector<std::string> passive;    // farmyard / animals
             std::vector<std::string> aggressive; // monsters / beasts
-            std::vector<std::string> villagers; // traders / wardens / etc
+            std::vector<std::string> villagers;  // traders / wardens / etc
         };
 
         StyleRoster rosterForStyle(Storage::GenStyle style)
@@ -116,63 +119,63 @@ namespace LightweightMC::World
             using G = Storage::GenStyle;
             switch (style)
             {
-                case G::NETHER:
-                    // Nether is dark stone-cavern flavor: cave spiders
-                    // (H1Z1) + vanilla skeletons / zombie. No farmyard.
-                    return {
-                        {},
-                        {"spider", "skeleton", "zombie"},
-                        {"phantom"}};
-                case G::AETHER:
-                    // Sky islands + quartz temples: temple guardians (skeleton
-                    // + warden) and flying animals (llama/deer) as passive.
-                    return {
-                        {"llama", "deer"},
-                        {"skeleton"},
-                        {"warden"}};
-                case G::END:
-                    // "The End" obsidian plain: phantom/warden + skeleton
-                    // only, no farmyard.
-                    return {
-                        {},
-                        {"skeleton"},
-                        {"phantom", "warden"}};
-                case G::CREATIVE:
-                    // Flat creative canvas: farmyard only, no monsters, no
-                    // villagers (admin creative worlds are usually peaceful
-                    // sandboxes).
-                    return {
-                        {"cow", "sheep", "pig", "chicken"},
-                        {},
-                        {}};
-                case G::MINING:
-                    // Mining plane: cave fauna (rabbit/spider) + zombies.
-                    return {
-                        {"rabbit"},
-                        {"spider", "zombie"},
-                        {}};
-                case G::TWILIGHT:
-                    // Twilight forest: deer/rabbit + wolves, no farmyard.
-                    return {
-                        {"deer", "rabbit"},
-                        {"wolf"},
-                        {}};
-                case G::TEST_GRID:
-                    // Deterministic block grid for protocol validation: no
-                    // entities at all so packet golden-tests stay stable.
-                    return {{}, {}, {}};
-                case G::SUPERFLAT:
-                case G::OVERWORLD:
-                default:
-                    // Default (and vanilla 1.8 OVERWORLD) mixing so the
-                    // vanilla-1.8 roster is a subset of what the server
-                    // seeds, keeping H1Z1 flavour visible to existing
-                    // testing while vanilla 1.8 clients see the same wire
-                    // shape they expect.
-                    return {
-                        {"cow", "sheep", "pig", "chicken"},
-                        {"zombie", "skeleton", "wolf"},
-                        {"wandering_trader"}};
+            case G::NETHER:
+                // Nether is dark stone-cavern flavor: cave spiders
+                // (H1Z1) + vanilla skeletons / zombie. No farmyard.
+                return {
+                    {},
+                    {"spider", "skeleton", "zombie"},
+                    {"phantom"}};
+            case G::AETHER:
+                // Sky islands + quartz temples: temple guardians (skeleton
+                // + warden) and flying animals (llama/deer) as passive.
+                return {
+                    {"llama", "deer"},
+                    {"skeleton"},
+                    {"warden"}};
+            case G::END:
+                // "The End" obsidian plain: phantom/warden + skeleton
+                // only, no farmyard.
+                return {
+                    {},
+                    {"skeleton"},
+                    {"phantom", "warden"}};
+            case G::CREATIVE:
+                // Flat creative canvas: farmyard only, no monsters, no
+                // villagers (admin creative worlds are usually peaceful
+                // sandboxes).
+                return {
+                    {"cow", "sheep", "pig", "chicken"},
+                    {},
+                    {}};
+            case G::MINING:
+                // Mining plane: cave fauna (rabbit/spider) + zombies.
+                return {
+                    {"rabbit"},
+                    {"spider", "zombie"},
+                    {}};
+            case G::TWILIGHT:
+                // Twilight forest: deer/rabbit + wolves, no farmyard.
+                return {
+                    {"deer", "rabbit"},
+                    {"wolf"},
+                    {}};
+            case G::TEST_GRID:
+                // Deterministic block grid for protocol validation: no
+                // entities at all so packet golden-tests stay stable.
+                return {{}, {}, {}};
+            case G::SUPERFLAT:
+            case G::OVERWORLD:
+            default:
+                // Default (and vanilla 1.8 OVERWORLD) mixing so the
+                // vanilla-1.8 roster is a subset of what the server
+                // seeds, keeping H1Z1 flavour visible to existing
+                // testing while vanilla 1.8 clients see the same wire
+                // shape they expect.
+                return {
+                    {"cow", "sheep", "pig", "chicken"},
+                    {"zombie", "skeleton", "wolf"},
+                    {"wandering_trader"}};
             }
         }
 
@@ -207,16 +210,16 @@ namespace LightweightMC::World
             int32_t itemId;
         };
         static const ItemTemplateInfo kItemTemplates[] = {
-            {"leather",      0},
-            {"meat_raw",     1},
-            {"meat_cooked",  2},
-            {"wool",         3},
-            {"feather",      4},
-            {"wolf_pelt",    5},
-            {"pelt",         6},
-            {"brain",        7},
-            {"bone",         8},
-            {"hide",         9},
+            {"leather", 0},
+            {"meat_raw", 1},
+            {"meat_cooked", 2},
+            {"wool", 3},
+            {"feather", 4},
+            {"wolf_pelt", 5},
+            {"pelt", 6},
+            {"brain", 7},
+            {"bone", 8},
+            {"hide", 9},
             {"rabbit_foot", 10},
         };
         inline int32_t lookupItemTemplate(const std::string &name)
@@ -229,12 +232,25 @@ namespace LightweightMC::World
         inline int xpForTemplate(const std::string &key)
         {
             static const std::pair<const char *, int> tbl[] = {
-                {"cow", 3}, {"sheep", 3}, {"pig", 3}, {"chicken", 1},
-                {"horse", 3}, {"deer", 3}, {"rabbit", 1}, {"llama", 3},
-                {"wolf", 5}, {"tiger", 5}, {"bear", 5},
-                {"zombie", 8}, {"bandit", 8}, {"hunter", 8}, {"spider", 8},
-                {"wandering_trader", 15}, {"patrol", 15},
-                {"warden", 15}, {"phantom", 15},
+                {"cow", 3},
+                {"sheep", 3},
+                {"pig", 3},
+                {"chicken", 1},
+                {"horse", 3},
+                {"deer", 3},
+                {"rabbit", 1},
+                {"llama", 3},
+                {"wolf", 5},
+                {"tiger", 5},
+                {"bear", 5},
+                {"zombie", 8},
+                {"bandit", 8},
+                {"hunter", 8},
+                {"spider", 8},
+                {"wandering_trader", 15},
+                {"patrol", 15},
+                {"warden", 15},
+                {"phantom", 15},
             };
             for (const auto &e : tbl)
                 if (key == e.first)
@@ -244,14 +260,25 @@ namespace LightweightMC::World
         inline const char *pickDropForTemplate(const std::string &key)
         {
             static const std::pair<const char *, const char *> tbl[] = {
-                {"cow", "leather"}, {"sheep", "wool"}, {"pig", "meat_raw"},
-                {"chicken", "feather"}, {"horse", "hide"}, {"deer", "hide"},
-                {"rabbit", "rabbit_foot"}, {"llama", "wool"},
-                {"wolf", "wolf_pelt"}, {"tiger", "pelt"}, {"bear", "pelt"},
-                {"zombie", "brain"}, {"bandit", "pelt"}, {"hunter", "hide"},
+                {"cow", "leather"},
+                {"sheep", "wool"},
+                {"pig", "meat_raw"},
+                {"chicken", "feather"},
+                {"horse", "hide"},
+                {"deer", "hide"},
+                {"rabbit", "rabbit_foot"},
+                {"llama", "wool"},
+                {"wolf", "wolf_pelt"},
+                {"tiger", "pelt"},
+                {"bear", "pelt"},
+                {"zombie", "brain"},
+                {"bandit", "pelt"},
+                {"hunter", "hide"},
                 {"spider", "bone"},
-                {"wandering_trader", "leather"}, {"patrol", "leather"},
-                {"warden", "leather"}, {"phantom", "hide"},
+                {"wandering_trader", "leather"},
+                {"patrol", "leather"},
+                {"warden", "leather"},
+                {"phantom", "hide"},
             };
             for (const auto &e : tbl)
                 if (key == e.first)
@@ -347,11 +374,11 @@ namespace LightweightMC::World
 
         m_entities.emplace(rec.id, rec);
 
-        Core::Logger::debug("[Entity] spawned id=" + std::to_string(rec.id) +
-                            " kind=" + kindToString(kind) +
-                            " templateKey=" + templateKey +
-                            " at (" + std::to_string(x) + "," + std::to_string(y) + "," +
-                            std::to_string(z) + ")");
+        Core::Logger::warn("[Entity] spawned id=" + std::to_string(rec.id) +
+                           " kind=" + kindToString(kind) +
+                           " templateKey=" + templateKey +
+                           " at (" + std::to_string(x) + "," + std::to_string(y) + "," +
+                           std::to_string(z) + ")");
         return rec.id;
     }
 
@@ -360,8 +387,8 @@ namespace LightweightMC::World
         auto it = m_entities.find(entityId);
         if (it == m_entities.end())
             return false;
-        Core::Logger::debug("[Entity] despawned id=" + std::to_string(entityId) +
-                            " templateKey=" + it->second.templateKey);
+        Core::Logger::warn("[Entity] despawned id=" + std::to_string(entityId) +
+                           " templateKey=" + it->second.templateKey);
         m_entities.erase(it);
         return true;
     }
@@ -370,7 +397,7 @@ namespace LightweightMC::World
     {
         if (m_entities.empty())
             return false;
-        Core::Logger::debug("[Entity] despawned ALL (" + std::to_string(m_entities.size()) + ")");
+        Core::Logger::warn("[Entity] despawned ALL (" + std::to_string(m_entities.size()) + ")");
         m_entities.clear();
         return true;
     }
@@ -414,11 +441,11 @@ namespace LightweightMC::World
 
     void EntityManager::dumpToLog() const
     {
-        Core::Logger::debug("[Entity] live=" + std::to_string(m_entities.size()) +
-                            " passive=" + std::to_string(countKind(EntityKind::PASSIVE)) +
-                            " aggressive=" + std::to_string(countKind(EntityKind::AGGRESSIVE)) +
-                            " villager=" + std::to_string(countKind(EntityKind::VILLAGER)) +
-                            " max=" + std::to_string(m_maxTotal));
+        Core::Logger::warn("[Entity] live=" + std::to_string(m_entities.size()) +
+                           " passive=" + std::to_string(countKind(EntityKind::PASSIVE)) +
+                           " aggressive=" + std::to_string(countKind(EntityKind::AGGRESSIVE)) +
+                           " villager=" + std::to_string(countKind(EntityKind::VILLAGER)) +
+                           " max=" + std::to_string(m_maxTotal));
     }
 
     std::string EntityManager::kindToString(EntityKind k)
@@ -557,11 +584,11 @@ namespace LightweightMC::World
                     if (d < 1.8 && (nowMs - rec.lastAttackMs) >= m_attackCooldownMs)
                     {
                         rec.lastAttackMs = nowMs;
-                        Core::Logger::debug("[Combat] " + rec.templateKey + " id=" + std::to_string(rec.id) +
-                                            " attacked " + hostile->username +
-                                            " at (" + std::to_string(hostile->x) + "," +
-                                            std::to_string(hostile->y) + "," +
-                                            std::to_string(hostile->z) + ")");
+                        Core::Logger::warn("[Combat] " + rec.templateKey + " id=" + std::to_string(rec.id) +
+                                           " attacked " + hostile->username +
+                                           " at (" + std::to_string(hostile->x) + "," +
+                                           std::to_string(hostile->y) + "," +
+                                           std::to_string(hostile->z) + ")");
                     }
                 }
                 else
@@ -649,8 +676,8 @@ namespace LightweightMC::World
                 if (d < 6.0 && (nowMs - rec.lastAttackMs) >= 4000)
                 {
                     rec.lastAttackMs = nowMs;
-                    Core::Logger::debug("[Villager] warden id=" + std::to_string(rec.id) +
-                                        " warning issued to " + nearest->username);
+                    Core::Logger::warn("[Villager] warden id=" + std::to_string(rec.id) +
+                                       " warning issued to " + nearest->username);
                 }
                 return;
             }
@@ -673,8 +700,8 @@ namespace LightweightMC::World
             if (nowMs - lastGreetMs > 20000)
             {
                 lastGreetMs = nowMs;
-                Core::Logger::debug("[Villager] wandering_trader id=" + std::to_string(rec.id) +
-                                    " greeting issued (trade window pending)");
+                Core::Logger::warn("[Villager] wandering_trader id=" + std::to_string(rec.id) +
+                                   " greeting issued (trade window pending)");
             }
         }
         // Otherwise fall through to wander.
@@ -695,16 +722,16 @@ namespace LightweightMC::World
 
         const int damage = (damageAmount > 0) ? damageAmount : 3;
         rec.health = (rec.health > damage) ? static_cast<uint16_t>(rec.health - damage)
-                                            : uint16_t{0};
-        Core::Logger::debug("[Entity] id=" + std::to_string(entityId) +
-                            " templateKey=" + rec.templateKey +
-                            " hp=" + std::to_string(rec.health) + "/" +
-                            std::to_string(rec.maxHealth));
+                                           : uint16_t{0};
+        Core::Logger::warn("[Entity] id=" + std::to_string(entityId) +
+                           " templateKey=" + rec.templateKey +
+                           " hp=" + std::to_string(rec.health) + "/" +
+                           std::to_string(rec.maxHealth));
 
         if (rec.health == 0)
         {
-            Core::Logger::debug("[Entity] id=" + std::to_string(entityId) +
-                                " slain by fd=" + std::to_string(attackerFd));
+            Core::Logger::warn("[Entity] id=" + std::to_string(entityId) +
+                               " slain by fd=" + std::to_string(attackerFd));
 
             // mob_drops gamerule gates whether the corpse yields loot.
             // We snapshot the drop template BEFORE erasing so spawnItemDrop
@@ -759,15 +786,15 @@ namespace LightweightMC::World
             return 0;
         const int xp = xpForTemplate(it->second.templateKey);
         const int gained = session.grantXp(xp);
-        Core::Logger::debug("[Entity XP] template=" + it->second.templateKey +
-                            " granted=" + std::to_string(xp) +
-                            " levels=" + std::to_string(gained));
+        Core::Logger::warn("[Entity XP] template=" + it->second.templateKey +
+                           " granted=" + std::to_string(xp) +
+                           " levels=" + std::to_string(gained));
         return gained;
     }
 
     int32_t EntityManager::spawnItemDrop(const std::string &templateKey,
-                                          double x, double y, double z,
-                                          int32_t itemId, int32_t stackCount)
+                                         double x, double y, double z,
+                                         int32_t itemId, int32_t stackCount)
     {
         if ((int32_t)m_entities.size() >= m_maxTotal)
             return 0;
@@ -805,12 +832,12 @@ namespace LightweightMC::World
         // do not stay around forever.
         rec.lifetimeMs = 300000;
         m_entities.emplace(rec.id, rec);
-        Core::Logger::debug("[Entity] dropped item id=" + std::to_string(rec.id) +
-                            " template=" + templateKey +
-                            " itemId=" + std::to_string(id32) +
-                            " stack=" + std::to_string(stackCount) +
-                            " at (" + std::to_string(x) + "," +
-                            std::to_string(y) + "," + std::to_string(z) + ")");
+        Core::Logger::warn("[Entity] dropped item id=" + std::to_string(rec.id) +
+                           " template=" + templateKey +
+                           " itemId=" + std::to_string(id32) +
+                           " stack=" + std::to_string(stackCount) +
+                           " at (" + std::to_string(x) + "," +
+                           std::to_string(y) + "," + std::to_string(z) + ")");
         return rec.id;
     }
 
@@ -821,8 +848,8 @@ namespace LightweightMC::World
             return false;
         if (it->second.kind != EntityKind::DROPPED_ITEM)
             return false;
-        Core::Logger::debug("[Entity] picked up item id=" + std::to_string(entityId) +
-                            " template=" + it->second.templateKey);
+        Core::Logger::warn("[Entity] picked up item id=" + std::to_string(entityId) +
+                           " template=" + it->second.templateKey);
         m_entities.erase(it);
         return true;
     }
@@ -834,7 +861,7 @@ namespace LightweightMC::World
             return false;
         it->second.follower = true;
         it->second.targetFd = followerFd;
-        Core::Logger::debug("[Entity] id=" + std::to_string(entityId) + " now follows fd=" + std::to_string(followerFd));
+        Core::Logger::warn("[Entity] id=" + std::to_string(entityId) + " now follows fd=" + std::to_string(followerFd));
         return true;
     }
 
@@ -845,7 +872,7 @@ namespace LightweightMC::World
             return false;
         it->second.follower = false;
         it->second.targetFd = -1;
-        Core::Logger::debug("[Entity] id=" + std::to_string(entityId) + " stopped following");
+        Core::Logger::warn("[Entity] id=" + std::to_string(entityId) + " stopped following");
         return true;
     }
 
@@ -861,8 +888,8 @@ namespace LightweightMC::World
         const int32_t existing = static_cast<int32_t>(m_entities.size());
         if (existing >= m_maxCramming)
         {
-            Core::Logger::debug("[Entity] skipping seed spawn for " + session.username +
-                                " (max_entity_cramming " + std::to_string(m_maxCramming) + " reached)");
+            Core::Logger::warn("[Entity] skipping seed spawn for " + session.username +
+                               " (max_entity_cramming " + std::to_string(m_maxCramming) + " reached)");
             return;
         }
 
@@ -899,10 +926,10 @@ namespace LightweightMC::World
             place("phantom", EntityKind::VILLAGER);
 
         m_rng = rng;
-        Core::Logger::debug("[Entity] seeded roster for " + session.username +
-                            " (spawn_mobs=" + std::to_string(m_spawnMobs) +
-                            " spawn_monsters=" + std::to_string(m_spawnMonsters) +
-                            " villagers=" + std::to_string(m_spawnPatrols || m_spawnTraders || m_spawnWardens || m_spawnPhantoms) + ")");
+        Core::Logger::warn("[Entity] seeded roster for " + session.username +
+                           " (spawn_mobs=" + std::to_string(m_spawnMobs) +
+                           " spawn_monsters=" + std::to_string(m_spawnMonsters) +
+                           " villagers=" + std::to_string(m_spawnPatrols || m_spawnTraders || m_spawnWardens || m_spawnPhantoms) + ")");
     }
 
     // Terrain-aware overload. Validates every candidate (x, z) offset against
@@ -922,8 +949,8 @@ namespace LightweightMC::World
         const int32_t existing = static_cast<int32_t>(m_entities.size());
         if (existing >= m_maxCramming)
         {
-            Core::Logger::debug("[Entity] skipping seed spawn for " + session.username +
-                                " (max_entity_cramming " + std::to_string(m_maxCramming) + " reached)");
+            Core::Logger::warn("[Entity] skipping seed spawn for " + session.username +
+                               " (max_entity_cramming " + std::to_string(m_maxCramming) + " reached)");
             return;
         }
 
@@ -981,9 +1008,9 @@ namespace LightweightMC::World
             place("phantom", EntityKind::VILLAGER);
 
         m_rng = rng;
-        Core::Logger::debug("[Entity] seeded terrain-aware roster for " + session.username +
-                            " (spawn_mobs=" + std::to_string(m_spawnMobs) +
-                            " spawn_monsters=" + std::to_string(m_spawnMonsters) + ")");
+        Core::Logger::warn("[Entity] seeded terrain-aware roster for " + session.username +
+                           " (spawn_mobs=" + std::to_string(m_spawnMobs) +
+                           " spawn_monsters=" + std::to_string(m_spawnMonsters) + ")");
     }
 
     // Same as the two-argument overload but also emits an S2C SpawnEntityLiving
@@ -1013,8 +1040,8 @@ namespace LightweightMC::World
         const int32_t existing = static_cast<int32_t>(m_entities.size());
         if (existing >= m_maxCramming)
         {
-            Core::Logger::debug("[Entity] skipping seed spawn for " + session.username +
-                                " (max_entity_cramming " + std::to_string(m_maxCramming) + " reached)");
+            Core::Logger::warn("[Entity] skipping seed spawn for " + session.username +
+                               " (max_entity_cramming " + std::to_string(m_maxCramming) + " reached)");
             return;
         }
 
@@ -1029,10 +1056,10 @@ namespace LightweightMC::World
                 return;
             std::vector<uint8_t> payload;
             Network::Packet::writeVarInt(payload, rec.id);
-            payload.push_back(0); // type byte -- 0 = default / unrecognised
-            const int32_t fx = static_cast<int32_t>(rec.x * 1000.0);
-            const int32_t fy = static_cast<int32_t>(rec.y * 1000.0);
-            const int32_t fz = static_cast<int32_t>(rec.z * 1000.0);
+            payload.push_back(lookupTemplate(rec.templateKey)->mobId); // type byte -- 0 = default / unrecognised
+            const int32_t fx = static_cast<int32_t>(rec.x * 32.0);
+            const int32_t fy = static_cast<int32_t>(rec.y * 32.0);
+            const int32_t fz = static_cast<int32_t>(rec.z * 32.0);
             Network::Packet::writeInt(payload, fx);
             Network::Packet::writeInt(payload, fy);
             Network::Packet::writeInt(payload, fz);
@@ -1051,8 +1078,10 @@ namespace LightweightMC::World
             Network::Packet::writeShort(payload, 0); // velocity x (fixed 5000)
             Network::Packet::writeShort(payload, 0); // velocity y
             Network::Packet::writeShort(payload, 0); // velocity z
-            payload.push_back(0);                    // metadata byte-length (0)
+            // payload.push_back(0);                    // metadata byte-length (0)
+            payload.push_back(0x7F); // Octet de fin des métadonnées (terminator 127)
             sendPacket(clientFd, 0x0f, payload);
+            LightweightMC::Core::Logger::warn("Spawn entity sent 0x0f...");
         };
 
         auto place = [&](const std::string &templateKey, EntityKind kind) -> void
@@ -1126,9 +1155,9 @@ namespace LightweightMC::World
         }
 
         m_rng = rng;
-        Core::Logger::debug("[Entity] seeded terrain-aware roster for " + session.username +
-                            " (spawn_mobs=" + std::to_string(m_spawnMobs) +
-                            " spawn_monsters=" + std::to_string(m_spawnMonsters) + ")");
+        Core::Logger::warn("[Entity] seeded terrain-aware roster for " + session.username +
+                           " (spawn_mobs=" + std::to_string(m_spawnMobs) +
+                           " spawn_monsters=" + std::to_string(m_spawnMonsters) + ")");
     }
 
     void EntityManager::setAggroRadius(double r) { m_aggroRadius = r; }

@@ -241,6 +241,45 @@ namespace LightweightMC::Storage
                            uint16_t type, const std::vector<uint8_t> &blob);
         bool deleteContainer(int cx, int cz, int rx, int y, int rz);
 
+        // ---- Phase 9 world-processing rows (see the CREATE TABLE block) ----
+        // One row per tick-capable block that is currently progressing. The
+        // tick engine (ProcessingTick) loads them per chunk, applies a step,
+        // and stages the result through Storage::DirtyWriter; these helpers
+        // are the flush side of that contract.
+        struct TickStateRow
+        {
+            int32_t worldId{0}, cx{0}, cz{0};
+            int32_t relX{0}, y{0}, relZ{0};
+            int32_t tickKind{0}, state{0}, aux{0};
+            int64_t nextTickMs{0};
+        };
+        bool saveTickState(const TickStateRow &row);
+        bool deleteTickState(int32_t worldId, int cx, int cz, int rx, int y, int rz);
+        bool loadTickStates(int32_t worldId, int cx, int cz, std::vector<TickStateRow> &out) const;
+
+        // Last processed world tick per chunk (catch-up bookkeeping).
+        struct ChunkTickRow
+        {
+            int32_t worldId{0}, cx{0}, cz{0};
+            int64_t lastTickMs{0};
+        };
+        bool saveChunkTick(const ChunkTickRow &row);
+        bool loadChunkTick(int32_t worldId, int cx, int cz, int64_t &lastTickMs) const;
+
+        // Dropped items sitting on the ground, with an absolute despawn
+        // deadline (spawn_ms + lifetime_ms) so a logout/relog cannot make a
+        // drop live forever or vanish early.
+        struct GroundItemRow
+        {
+            int32_t worldId{0}, cx{0}, cz{0};
+            int32_t relX{0}, y{0}, relZ{0};
+            int32_t itemId{0}, itemCount{0}, damage{0};
+            int64_t spawnMs{0}, lifetimeMs{0};
+        };
+        bool saveGroundItem(const GroundItemRow &row);
+        bool deleteGroundItem(int32_t worldId, int cx, int cz, int rx, int y, int rz);
+        bool loadGroundItems(int32_t worldId, int cx, int cz, std::vector<GroundItemRow> &out) const;
+
         // ---- Multiworld registry (server_data.db) ---------------------------
         // Maps custom dimension names to unique auto-allocated IDs. Standard
         // Minecraft dimension IDs use the pre-1.12 vanilla layout: 0 =

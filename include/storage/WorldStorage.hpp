@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include "storage/DirtyWriter.hpp"   // StagedCell for applyCellBatch
 
 namespace LightweightMC::Storage
 {
@@ -150,6 +151,7 @@ namespace LightweightMC::Storage
         sqlite3_stmt *m_saveChunkStmt{nullptr};
         GenStyle m_genStyle{GenStyle::OVERWORLD};
         std::uint64_t m_worldSeed{0};
+        std::int32_t m_planeWorldId{0};   // multiworld id for sparse row families
 
         // SQLite shared-stmt locks. m_getChunkStmt and m_saveChunkStmt are per-instance
         // prepared statements, so only ONE thread at a time may drive each of them.
@@ -218,6 +220,27 @@ namespace LightweightMC::Storage
         // been generated yet. Callers pair it with requestChunk() to submit
         // generation to the worker and re-send on the next tick.
         std::unordered_map<BlockCoord, uint16_t, BlockCoordHash> getChunkBlocksIfReady(int chunkX, int chunkZ);
+
+        // The plane's world_id (multiworld registry). Defaults to 0 (Overworld)
+        // and is set by NetworkWorlds right after createWorld allocates the
+        // plane; sparse row families (tick_states / chunk_ticks / ground_items)
+        // stamp it so their rows never leak across planes.
+        //
+        // Defined in WorldStorage.cpp -- re-registers every DirtyWriter
+        // flusher for the plane under the new worldId (Overworld uses the
+        // default id 0 that init() installs; Nether/End/custom override
+        // here so staged rows and flush callbacks share the same key).
+        void setPlaneWorldId(int32_t worldId);
+        int32_t getPlaneWorldId() const { return m_planeWorldId; }
+
+        // ---- Phase 9 staged write-back ---------------------------------
+        // The world-processing tick never writes SQLite inline: it stages
+        // chunk-cell mutations through Storage::DirtyWriter, whose flush
+        // callback for this plane lands here. One read/decompress, N patched
+        // cells, one compress/save -- i.e. the batched twin of saveBlockChange
+        // that amortises the LZ4 round trip over the whole staged bucket.
+        void applyCellBatch(int chunkX, int chunkZ,
+                            const std::vector<DirtyWriter::StagedCell> &cells);
 
         bool init(const std::string &dbPath);
 

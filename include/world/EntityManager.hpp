@@ -266,6 +266,11 @@ namespace LightweightMC::World
         // operator wants byte-aligned wire with no S2C spawn / despawn.
         bool m_networkSync{true};
 
+        // Ok -- login-time debug spawn state. See spawnLoginDebugTest /
+        // removeLoginDebugTest above for the semantics.
+        bool m_debugLoginSpawn{false};
+        std::vector<int32_t> m_debugTestIds;
+
         std::mt19937 m_rng;
     };
 

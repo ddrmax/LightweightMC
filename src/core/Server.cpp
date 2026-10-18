@@ -21,6 +21,7 @@
 #include <vector>
 #include <csignal>
 #include <chrono>
+#include "world/ProcessingTick.hpp"
 namespace LightweightMC::Core
 {
 
@@ -180,9 +181,12 @@ namespace LightweightMC::Core
 
         // Allow the console to change a player's game mode. The hook updates
         // the live session, persists the change to the database, and (when
-        // the player is online) pushes a Tab List (0x38) update to the
-        // client so survival/creative/adventure/spectator is observable
-        // immediately without requiring a reconnect.
+        // the player is online) pushes a Change Game State (0x2B, sub-action
+        // 3 = Change Game Mode) update to the client so survival/creative/
+        // adventure/spectator is observable immediately without requiring a
+        // reconnect. 0x2B is the vanilla-1.8 op the client uses to
+        // pick up new rules; a Tab List / Update Player Info (0x38) packet
+        // only touches the tab list and player properties.
         consoleCtx.setGameMode = [this](const std::string &name, int level) -> bool
         {
             uint8_t clamped = static_cast<uint8_t>(std::max(0, std::min(3, level)));
@@ -692,6 +696,23 @@ namespace LightweightMC::Core
 
         Logger::info("Starting Network Manager (epoll)...");
         m_network.start(port);
+
+        // Bind the world-processing tick singleton to Server.cpp's
+        // Database so seedChunk/processChunk can reach saveTickState /
+        // saveGroundItem for persistence. Do this *before* the main loop
+        // starts; ProcessingTick::init() is idempotent (repeat calls
+        // short-circuit on the second init guard).
+        World::ProcessingTick::getInstance().init(&m_database);
+
+        // Bind ChunkManager to every plane NetworkManager seeded at start
+        // (Overworld 0 / Nether -1 / End 1 / Aether 100 if the special-
+        // dimension switch is on). Server.cpp re-binds planes on every
+        // tick further down (see the planeIds loop in the 20 Hz section)
+        // so custom worlds spawned via /world create after boot are also
+        // registered lazily without extra code in NetworkWorlds.cpp.
+        for (std::int32_t id : m_network.planeIds())
+            m_chunkManager.registerPlane(id, &m_network.getWorldStorage(id));
+
         startConsoleThread(m_running);
         Logger::info("Server is ready and listening. Type /help for available commands. ");
 
@@ -715,7 +736,28 @@ namespace LightweightMC::Core
             {
                 if (!m_running)
                     break;
-                m_chunkManager.tickActiveChunks();
+
+                // Absolute unix-ms timestamp (wall clock, monotonic across
+                // restarts when combined with SQLite-persisted nextTickMs)
+                // so persisted nextTickMs values survive a restart and
+                // ProcessingTick::processChunk's fast-forward window (now
+                // minus kMaxCatchupMsPerRecordPerTick) resolves to
+                // "up to 5 real minutes behind" regardless of how the
+                // server was previously running.
+                const std::int64_t nowMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+
+                // Register any planes added since boot (custom worlds via
+                // /world create, /world join, or Aether toggled mid-run).
+                // ChunkManager::registerPlane short-circuits on already-
+                // registered ids, so this stays cheap -- m_worlds holds
+                // <=64 planes on any realistic server.
+                for (std::int32_t pid : m_network.planeIds())
+                    m_chunkManager.registerPlane(pid, &m_network.getWorldStorage(pid));
+
+                m_chunkManager.tickActiveChunks(nowMs);
                 // Periodic 1.8+ chunk-stream flush. Fires at 5 Hz (throttle
                 // by running every 4th 50ms tick) so the async WorldStorage
                 // generation worker's outputs reach idle or slow-moving

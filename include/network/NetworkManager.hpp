@@ -95,8 +95,12 @@ namespace LightweightMC::Network
         // Update a player's game mode (0=survival, 1=creative, 2=adventure,
         // 3=spectator). Loads the existing database row, mutates only the
         // gamemode column, saves it back, updates the live session when the
-        // player is currently online, and forwards a Tab List "Update Player"
-        // packet (0x38) to that client so the change is reflected in-game.
+        // player is currently online, and forwards a Change Game State
+        // packet (wire op 0x2B, sub-action 3 = Change Game Mode) to that
+        // client so the change is reflected in-game. 0x2B is the
+        // vanilla-1.8 op the client actually uses to switch survival /
+        // creative / adventure / spectator rules; 0x38 "Update Player
+        // Info" is only for tab-list scoring and player properties.
         bool setPlayerGameMode(const std::string &playerName, uint8_t mode);
 
         // Teleport an online player (looked up by username) to absolute
@@ -211,6 +215,16 @@ namespace LightweightMC::Network
         // but not in m_worlds, so this count only reflects the planes the
         // server currently serves chunks for.
         size_t worldCount() const { return m_worlds.size(); }
+
+        // Snapshot of every live plane id currently in m_worlds. Used by
+        // Server.cpp's fixed 20 Hz tick loop to bind ChunkManager to every
+        // plane (Overworld 0, Nether -1, End 1, custom >=101, Aether 100
+        // if the special-dimension switch is on) so per-tick sweeps cover
+        // any plane a session might have teleported into. Returns a fresh
+        // vector so callers may safely iterate while NetworkWorlds adds or
+        // removes planes concurrently (map mutation is not permitted during
+        // iteration in unordered_map -- the copy side-steps that).
+        std::vector<int32_t> planeIds() const;
 
         // ---- Phase 6 (0.0.15) vanilla-1.8 HP / XP / respawn / chat ------
         // Every entry-point resolves a display name to a live PLAY session

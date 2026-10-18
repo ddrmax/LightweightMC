@@ -629,7 +629,79 @@ namespace LightweightMC::Storage
             return false;
         }
 
+        // Phase 9: this plane owns the DirtyWriter cell flusher. Staged chunk
+        // cells therefore reach SQLite through applyCellBatch (one read/patch/
+        // write per staged bucket) instead of one LZ4 round trip per cell.
+        // Lock order is always DirtyWriter::m_mutex -> WorldStorage::m_save
+        // StmtMutex: flush callbacks never stage back into the writer, so the
+        // two never invert. setPlaneWorldId re-registers when NetworkWorlds
+        // pins a non-default plane id so staging keys and flushers agree.
+        DirtyWriter::getInstance().registerCellFlush(
+            m_planeWorldId,
+            [this](int cx, int cz, const std::vector<DirtyWriter::StagedCell> &cells)
+            { applyCellBatch(cx, cz, cells); });
+
         return true;
+    }
+
+    void WorldStorage::setPlaneWorldId(int32_t worldId)
+    {
+        m_planeWorldId = worldId;
+        // Re-register the cell flusher under the new plane id (init() already
+        // installed it under the previous value; the map key is the plane id
+        // that staged rows use).
+        DirtyWriter::getInstance().registerCellFlush(
+            m_planeWorldId,
+            [this](int cx, int cz, const std::vector<DirtyWriter::StagedCell> &cells)
+            { applyCellBatch(cx, cz, cells); });
+    }
+
+    void WorldStorage::applyCellBatch(int chunkX, int chunkZ,
+                                      const std::vector<DirtyWriter::StagedCell> &cells)
+    {
+        if (cells.empty())
+            return;
+
+        // Same statement guard as saveBlockChange: whoever holds m_saveStmt
+        //Mutex wins against a concurrent generation-worker insert, and the
+        // chunk blob is re-read under it (readChunkBlob takes m_getStmtMutex
+        // first, matching the existing read-after-write ordering).
+        std::lock_guard<std::recursive_mutex> saveLock(m_saveStmtMutex);
+
+        if (!isChunkGenerated(chunkX, chunkZ))
+            generateChunk(chunkX, chunkZ);
+
+        std::vector<uint8_t> rawBuffer;
+        if (!readChunkBlob(chunkX, chunkZ, rawBuffer))
+            return;
+
+        uint16_t *blocksArray = reinterpret_cast<uint16_t *>(rawBuffer.data());
+        std::size_t patched = 0;
+        for (const DirtyWriter::StagedCell &cell : cells)
+        {
+            if (cell.relY < MIN_WORLD_Y || cell.relY > MAX_WORLD_Y ||
+                cell.relX < 0 || cell.relX >= 16 || cell.relZ < 0 || cell.relZ >= 16)
+                continue;
+            const int index = ((cell.relY - MIN_WORLD_Y) * 256) + (cell.relZ * 16) + cell.relX;
+            blocksArray[index] = cell.value;
+            ++patched;
+        }
+        if (patched == 0)
+            return;
+
+        std::vector<uint8_t> compressed = compressBuffer(rawBuffer);
+
+        sqlite3_reset(m_saveChunkStmt);
+        sqlite3_clear_bindings(m_saveChunkStmt);
+        sqlite3_bind_int(m_saveChunkStmt, 1, chunkX);
+        sqlite3_bind_int(m_saveChunkStmt, 2, chunkZ);
+        sqlite3_bind_blob(m_saveChunkStmt, 3, compressed.data(),
+                          static_cast<int>(compressed.size()), SQLITE_TRANSIENT);
+        sqlite3_step(m_saveChunkStmt);
+
+        Core::Logger::debug("DirtyWriter flush: patched " + std::to_string(patched) +
+                            " staged cell(s) of chunk [" + std::to_string(chunkX) + "," +
+                            std::to_string(chunkZ) + "] in one LZ4 round trip");
     }
 
     bool WorldStorage::isChunkGenerated(int chunkX, int chunkZ)

@@ -66,6 +66,45 @@ namespace LightweightMC::Storage
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (uuid, world_id)
         );
+        -- 0.0.15 (phase 9): world-processing state kept as SPARSE rows on
+        -- top of the chunk rows rather than as a full in-RAM voxel copy of
+        -- every loaded chunk (the ChunkSection[16] holder in world/Chunk.hpp
+        -- would cost ~131 KB per chunk and would duplicate -- i.e. risk
+        -- drifting from -- the SQLite authority the phase 8b codec path
+        -- established):
+        --   * tick_states: one row per tick-capable block (furnace,
+        --     brewing stand, crop, water/lava source, fire, dispenser/hopper
+        --     link, torch, ...) carrying its progress state, an aux counter
+        --     and the next processing timestamp (ms). Rows exist ONLY for
+        --     blocks that are actually progressing, so a populated plane
+        --     pays per active process rather than per voxel.
+        --   * chunk_ticks: last processed world-tick timestamp per chunk so
+        --     a chunk that was outside the player's view catches up on
+        --     ovens/crops/etc. on the next tick without replaying ticks it
+        --     already resolved (Chunk::catchup() semantics).
+        --   * ground_items: dropped items (chest/container drops, mob loot,
+        --     broken-block fragments) keyed by the chunk holding them with an
+        --     absolute despawn deadline, i.e. the phase 5 drop ledger
+        --     persists instead of living in RAM for the 300 s lifetime only.
+        CREATE TABLE IF NOT EXISTS tick_states (
+            world_id INTEGER, chunk_x INTEGER, chunk_z INTEGER,
+            rel_x INTEGER, y INTEGER, rel_z INTEGER,
+            tick_kind INTEGER, state INTEGER, aux INTEGER,
+            next_tick_ms INTEGER,
+            PRIMARY KEY (world_id, chunk_x, chunk_z, rel_x, y, rel_z)
+        );
+        CREATE TABLE IF NOT EXISTS chunk_ticks (
+            world_id INTEGER, chunk_x INTEGER, chunk_z INTEGER,
+            last_tick_ms INTEGER,
+            PRIMARY KEY (world_id, chunk_x, chunk_z)
+        );
+        CREATE TABLE IF NOT EXISTS ground_items (
+            world_id INTEGER, chunk_x INTEGER, chunk_z INTEGER,
+            rel_x INTEGER, y INTEGER, rel_z INTEGER,
+            item_id INTEGER, item_count INTEGER, damage INTEGER,
+            spawn_ms INTEGER, lifetime_ms INTEGER,
+            PRIMARY KEY (world_id, chunk_x, chunk_z, rel_x, y, rel_z)
+        );
     )";
 
         char *errMsg = nullptr;
@@ -1543,5 +1582,294 @@ namespace LightweightMC::Storage
         }
         return true;
     }
+
+    // -------------------------------------------------------------------
+    // Phase 9 world-processing rows.
+    //
+    // All three families carry a world_id column so a plane's tick states,
+    // catch-up timestamps and ground drops never leak across planes (the
+    // chunks table is per-SQLite-file already; block_entities predates this
+    // and stays chunk-keyed only, see its own comment above).
+    //
+    // Timestamps are absolute epoch milliseconds bound with sqlite3_bind_
+    // int64: an ms epoch is ~1.7e12, past the 32-bit range that bind_int
+    // would silently truncate (SQLite INTEGER columns are 64-bit).
+    // -------------------------------------------------------------------
+    bool Database::saveTickState(const TickStateRow &row)
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql = R"(
+            INSERT OR REPLACE INTO tick_states
+            (world_id, chunk_x, chunk_z, rel_x, y, rel_z, tick_kind, state, aux, next_tick_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        )";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare saveTickState SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, row.worldId);
+        sqlite3_bind_int(stmt, 2, row.cx);
+        sqlite3_bind_int(stmt, 3, row.cz);
+        sqlite3_bind_int(stmt, 4, row.relX);
+        sqlite3_bind_int(stmt, 5, row.y);
+        sqlite3_bind_int(stmt, 6, row.relZ);
+        sqlite3_bind_int(stmt, 7, row.tickKind);
+        sqlite3_bind_int(stmt, 8, row.state);
+        sqlite3_bind_int(stmt, 9, row.aux);
+        sqlite3_bind_int64(stmt, 10, row.nextTickMs);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE)
+        {
+            Core::Logger::error("Failed to save tick state at (" + std::to_string(row.cx) + ", " +
+                                std::to_string(row.cz) + ", " + std::to_string(row.relX) + ", " +
+                                std::to_string(row.y) + ", " + std::to_string(row.relZ) + ")");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool Database::deleteTickState(int32_t worldId, int cx, int cz, int rx, int y, int rz)
+    {
+        if (!m_db)
+            return false;
+
+        const char *delSql =
+            "DELETE FROM tick_states WHERE world_id = ? AND chunk_x = ? AND chunk_z = ? "
+            "AND rel_x = ? AND y = ? AND rel_z = ?;";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, delSql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare deleteTickState SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, worldId);
+        sqlite3_bind_int(stmt, 2, cx);
+        sqlite3_bind_int(stmt, 3, cz);
+        sqlite3_bind_int(stmt, 4, rx);
+        sqlite3_bind_int(stmt, 5, y);
+        sqlite3_bind_int(stmt, 6, rz);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE)
+        {
+            Core::Logger::error("Failed to delete tick state at (" + std::to_string(cx) + ", " +
+                                std::to_string(cz) + ", " + std::to_string(rx) + ", " +
+                                std::to_string(y) + ", " + std::to_string(rz) + ")");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool Database::loadTickStates(int32_t worldId, int cx, int cz, std::vector<TickStateRow> &out) const
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql =
+            "SELECT world_id, chunk_x, chunk_z, rel_x, y, rel_z, tick_kind, state, aux, next_tick_ms "
+            "FROM tick_states WHERE world_id = ? AND chunk_x = ? AND chunk_z = ?;";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare loadTickStates SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, worldId);
+        sqlite3_bind_int(stmt, 2, cx);
+        sqlite3_bind_int(stmt, 3, cz);
+
+        while (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            TickStateRow row;
+            row.worldId = sqlite3_column_int(stmt, 0);
+            row.cx = sqlite3_column_int(stmt, 1);
+            row.cz = sqlite3_column_int(stmt, 2);
+            row.relX = sqlite3_column_int(stmt, 3);
+            row.y = sqlite3_column_int(stmt, 4);
+            row.relZ = sqlite3_column_int(stmt, 5);
+            row.tickKind = sqlite3_column_int(stmt, 6);
+            row.state = sqlite3_column_int(stmt, 7);
+            row.aux = sqlite3_column_int(stmt, 8);
+            row.nextTickMs = sqlite3_column_int64(stmt, 9);
+            out.push_back(row);
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool Database::saveChunkTick(const ChunkTickRow &row)
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql = R"(
+            INSERT OR REPLACE INTO chunk_ticks
+            (world_id, chunk_x, chunk_z, last_tick_ms)
+            VALUES (?, ?, ?, ?);
+        )";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare saveChunkTick SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, row.worldId);
+        sqlite3_bind_int(stmt, 2, row.cx);
+        sqlite3_bind_int(stmt, 3, row.cz);
+        sqlite3_bind_int64(stmt, 4, row.lastTickMs);
+
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool Database::loadChunkTick(int32_t worldId, int cx, int cz, int64_t &lastTickMs) const
+    {
+        lastTickMs = 0;
+        if (!m_db)
+            return false;
+
+        const char *sql =
+            "SELECT last_tick_ms FROM chunk_ticks WHERE world_id = ? AND chunk_x = ? AND chunk_z = ?;";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare loadChunkTick SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, worldId);
+        sqlite3_bind_int(stmt, 2, cx);
+        sqlite3_bind_int(stmt, 3, cz);
+
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            lastTickMs = sqlite3_column_int64(stmt, 0);
+            found = true;
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+    bool Database::saveGroundItem(const GroundItemRow &row)
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql = R"(
+            INSERT OR REPLACE INTO ground_items
+            (world_id, chunk_x, chunk_z, rel_x, y, rel_z, item_id, item_count, damage, spawn_ms, lifetime_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        )";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare saveGroundItem SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, row.worldId);
+        sqlite3_bind_int(stmt, 2, row.cx);
+        sqlite3_bind_int(stmt, 3, row.cz);
+        sqlite3_bind_int(stmt, 4, row.relX);
+        sqlite3_bind_int(stmt, 5, row.y);
+        sqlite3_bind_int(stmt, 6, row.relZ);
+        sqlite3_bind_int(stmt, 7, row.itemId);
+        sqlite3_bind_int(stmt, 8, row.itemCount);
+        sqlite3_bind_int(stmt, 9, row.damage);
+        sqlite3_bind_int64(stmt, 10, row.spawnMs);
+        sqlite3_bind_int64(stmt, 11, row.lifetimeMs);
+
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool Database::deleteGroundItem(int32_t worldId, int cx, int cz, int rx, int y, int rz)
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql =
+            "DELETE FROM ground_items WHERE world_id = ? AND chunk_x = ? AND chunk_z = ? "
+            "AND rel_x = ? AND y = ? AND rel_z = ?;";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare deleteGroundItem SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, worldId);
+        sqlite3_bind_int(stmt, 2, cx);
+        sqlite3_bind_int(stmt, 3, cz);
+        sqlite3_bind_int(stmt, 4, rx);
+        sqlite3_bind_int(stmt, 5, y);
+        sqlite3_bind_int(stmt, 6, rz);
+
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool Database::loadGroundItems(int32_t worldId, int cx, int cz, std::vector<GroundItemRow> &out) const
+    {
+        if (!m_db)
+            return false;
+
+        const char *sql =
+            "SELECT world_id, chunk_x, chunk_z, rel_x, y, rel_z, item_id, item_count, damage, spawn_ms, lifetime_ms "
+            "FROM ground_items WHERE world_id = ? AND chunk_x = ? AND chunk_z = ?;";
+
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare loadGroundItems SQL: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+
+        sqlite3_bind_int(stmt, 1, worldId);
+        sqlite3_bind_int(stmt, 2, cx);
+        sqlite3_bind_int(stmt, 3, cz);
+
+        while (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            GroundItemRow row;
+            row.worldId = sqlite3_column_int(stmt, 0);
+            row.cx = sqlite3_column_int(stmt, 1);
+            row.cz = sqlite3_column_int(stmt, 2);
+            row.relX = sqlite3_column_int(stmt, 3);
+            row.y = sqlite3_column_int(stmt, 4);
+            row.relZ = sqlite3_column_int(stmt, 5);
+            row.itemId = sqlite3_column_int(stmt, 6);
+            row.itemCount = sqlite3_column_int(stmt, 7);
+            row.damage = sqlite3_column_int(stmt, 8);
+            row.spawnMs = sqlite3_column_int64(stmt, 9);
+            row.lifetimeMs = sqlite3_column_int64(stmt, 10);
+            out.push_back(row);
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+
 
 } // namespace LightweightMC::Storage

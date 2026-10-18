@@ -352,6 +352,7 @@ namespace LightweightMC::Network
             }
             storage->setWorldSeed(worldSeed);
             storage->setGenerationStyle(spec.style);
+            storage->setPlaneWorldId(spec.id);
             m_worlds.emplace(spec.id, std::move(storage));
         }
 
