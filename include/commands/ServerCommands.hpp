@@ -4,6 +4,7 @@
 #include "core/ConfigManager.hpp"
 #include "network/AntiScan.hpp"
 #include "network/BanList.hpp"
+#include "plugins/PluginManager.hpp"
 #include "core/Logger.hpp"
 #include "core/utils.hpp"
 #include <limits>
@@ -691,15 +692,65 @@ class PluginsCommand : public Command
 public:
     std::string getName() const override { return "plugins"; }
     std::string getDescription() const override { return "List all installed plugins."; }
-    std::string getUsage() const override { return "/Plugins"; }
+    std::string getUsage() const override { return "/Plugins [list|load <so-path>|unload <name>]"; }
     std::vector<std::string> getAliases() const override { return {"Pl"}; }
     int getRequiredOpLevel() const override { return 0; }
 
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        (void)args;
-        // TODO: Query the PluginManager
-        ctx.reply("Plugins (0): ");
+        using namespace LightweightMC::Plugin;
+        // Phase 11 path A "hybrid now" pivot: boot loader + this backend is real
+        // (dlopen bookkeeping, see src/plugins/PluginLoader.cpp); hook *invocation*
+        // sites and the Lua half land with Phase 20's dual extension engine.
+        const std::string sub = args.empty() ? "list" : args[0];
+
+        if (sub == "list")
+        {
+            const auto lines = describeLoaded();
+            ctx.reply("Plugins (" + std::to_string(lines.size()) + "): ");
+            for (const auto &line : lines)
+                ctx.reply(line);
+            return;
+        }
+
+        if (sub == "load")
+        {
+            if (args.size() < 2)
+            {
+                ctx.reply("Usage: /plugins load <path.so>");
+                return;
+            }
+
+            const std::string name = loadPluginPath(args[1]);
+            if (name.empty())
+            {
+                ctx.reply("Plugin load failed (see [PLUGIN] log line): " + args[1]);
+                return;
+            }
+
+            ctx.reply("Loaded plugin: " + name + " (" + args[1] + ")");
+            return;
+        }
+
+        if (sub == "unload")
+        {
+            if (args.size() < 2)
+            {
+                ctx.reply("Usage: /plugins unload <name>");
+                return;
+            }
+
+            if (unloadPluginByName(args[1]))
+            {
+                ctx.reply("Unloaded plugin: " + args[1]);
+                return;
+            }
+
+            ctx.reply("No loaded plugin named '" + args[1] + "'. Try /plugins list first.");
+            return;
+        }
+
+        ctx.reply("Unknown subcommand. Usage: /plugins [list|load <so-path>|unload <name>]");
     }
 };
 

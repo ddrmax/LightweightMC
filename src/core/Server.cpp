@@ -17,6 +17,7 @@
 #include "network/Packet.hpp"
 #include "core/utils.hpp"
 #include "network/BanList.hpp"
+#include "plugins/PluginManager.hpp"
 
 #include <termios.h>
 #include <unistd.h>
@@ -807,6 +808,9 @@ namespace LightweightMC::Core
         LightweightMC::Network::setWhitelistEnabled(whitelistOn);
         Logger::info(std::string("[CONFIG] Whitelist Enabled: ") + (whitelistOn ? "Yes" : "No"));
 
+        // Phase 11 path A loader-first pivot — dlopen ./.plugins/*.so at boot;
+        // see src/plugins/PluginLoader.cpp + include/plugins/PluginManager.hpp.
+        LightweightMC::Plugin::loadRegisteredPlugins();
 
         Logger::info("Starting Network Manager (epoll)...");
         m_network.start(port);

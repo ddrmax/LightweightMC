@@ -155,6 +155,11 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
     - [ ] `/lwmc mobcaps [<world>]`.
     - [ ] `/lwmc playermobcaps [<player>]`.
     - [ ] `/lwmc chunkinfo [<world>]`.
+- [ ] **Native plugin subsystem (Phase 11 path A, hybrid-now pick)**
+  - [x] Boot loader for `./plugins/*.so` via `dlopen` + bookkeeping singleton (`src/plugins/PluginLoader.cpp`).
+  - [x] `/plugins [list|load <so-path>|unload <name>]` backend (alias `/Pl`) — command de-stubbed in `ServerCommands.hpp`.
+  - [ ] ABI hook invocation sites (`on_join`, `on_chat`, `on_tick`, `on_command`) — declared in the loader contract, deliberately deferred with path B (embedded Lua) to Phase 20's dual extension engine.
+
 ### 5. 💾 Database & State Persistence
 - [ ] **SQLite Integration**
   - [ ] `blocks` / `tile_entities` table: Modified world block state persistence.

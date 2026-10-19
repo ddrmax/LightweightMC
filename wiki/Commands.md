@@ -120,7 +120,7 @@ Source: `include/commands/ServerCommands.hpp`.
 | `pardon` | /Humban | `/pardon <pseudo>` | 3 | stub (TODO in handler) | Unban a player. | — |
 | `pardon-ip` | /Unban ip | `/pardon-ip <IP>` | 3 | stub (TODO in handler) | Unbans an IP address. | — |
 | `save-all` | /Save | `/save-all` | 4 | stub (TODO in handler) | Forces immediate saving of the world to disk. | — |
-| `plugins` | /Pl | `/Plugins` | 0 | stub (TODO in handler) | List all installed plugins. | Registered lowercase: type `/plugins`; the usage string shows `/Plugins` (cosmetic). Lookup is case-sensitive. |
+| `plugins` | /Pl | `/plugins [list\|load <so-path>\|unload <name>]` | 0 | wired (Phase 11 loader) | List or load/unload native `.so` plugins. | Registered lowercase: type `/plugins`; the class usage string shows `/Plugins ...` leading-uppercase form in help output. Lookup is case-sensitive. |
 | `lwmc` | — | `/lwmc <entity list\|track>` | 3 | stub (TODO in handler) | Diagnostic commands and advanced server management. | — |
 | `banlist` | — | `/banlist [ips\|players]` | 3 | ack-only | Shows the ban list. | — |
 | `data pack` | — | `/datapack <list\|enable\|disable>` | 2 | ack-only | Checks loaded data packs. | Quirk: `getName()` returns `data pack` (with a space) but the tokenizer only reads the first token, so `/datapack` resolves to `/data` instead. |
@@ -266,13 +266,13 @@ Source: `include/commands/WorldCommands.hpp`.
     "aliases": [
       "Pl"
     ],
-    "usage": "/Plugins",
+    "usage": "/Plugins [list|load <so-path>|unload <name>]",
     "op_level": 0,
     "description": "List all installed plugins.",
     "class": "PluginsCommand",
     "source": "ServerCommands.hpp",
     "registered": true,
-    "status": "stub (TODO in handler)",
+    "status": "wired (Phase 11 loader; hook invocation deferred to Phase 20)",
     "notes": "Registered lowercase: type `/plugins`; the usage string shows `/Plugins` (cosmetic). Lookup is case-sensitive."
   },
   {
@@ -1255,8 +1255,8 @@ Source: `include/commands/WorldCommands.hpp`.
 | Status | Count | Verbs |
 | --- | --- | --- |
 | ack-only | 58 | `/advancement`, `/attribute`, `/banlist`, `/bossbar`, `/clear`, `/clone`, `/damage`, `/data`, `/data pack`, `/debug`, `/defaultgamemode`, `/difficulty`, `/effect`, `/enchant`, `/execute`, `/experience`, `/fill`, `/fillbiome`, `/forceload`, `/function`, `/give`, `/item`, `/jfr`, `/kill`, `/locate`, `/loot`, `/me`, `/particle`, `/perf`, `/ping`, `/place`, `/playsound`, `/publish`, `/recipe`, `/return`, `/ride`, `/save-off`, `/save-on`, `/schedule`, `/scoreboard`, `/seed`, `/setblock`, `/setworldspawn`, `/spawnpoint`, `/spreadplayers`, `/stopsound`, `/summon`, `/tag`, `/team`, `/teammsg`, `/tellraw`, `/time`, `/title`, `/trigger`, `/version`, `/watch`, `/weather`, `/worldborder` |
-| stub (TODO in handler) | 14 | `/ban`, `/ban-ip`, `/compute`, `/kick`, `/list`, `/lwmc`, `/msg`, `/pardon`, `/pardon-ip`, `/plugins`, `/save-all`, `/say`, `/setidletimeout`, `/whitelist` |
-| wired | 13 | `/antiscan`, `/deop`, `/gamemode`, `/gamerule`, `/gotor`, `/help`, `/hud`, `/op`, `/reload`, `/stop`, `/testpackets`, `/tp`, `/world` |
+| stub (TODO in handler) | 13 | `/ban`, `/ban-ip`, `/compute`, `/kick`, `/list`, `/lwmc`, `/msg`, `/pardon`, `/pardon-ip`, `/save-all`, `/say`, `/setidletimeout`, `/whitelist` |
+| wired | 14 | `/antiscan`, `/deop`, `/gamemode`, `/gamerule`, `/gotor`, `/help`, `/hud`, `/op`, `/plugins`, `/reload`, `/stop`, `/testpackets`, `/tp`, `/world` |
 
 (85 classes are scanned; the single **not registered** class additionally has no handler call site.)
 

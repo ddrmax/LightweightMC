@@ -132,7 +132,7 @@ These are all **Java-1.13..1.21 forks** that expose a plugin API (the Forge/Bukk
 
 | Plugin-ecosystem capability | Paper/Bukkit/Spigot/Forge | LightweightMC |
 | --- | --- | --- |
-| Plugin runtime (Java classes, lifecycle, event hooks `onJoin`/`onLeave`/`onDamage` etc.) | Yes | No — the binary is native C++, no runtime plugin loader, no FFI/dlopen layer, no Lua/JS engine, no scripting subsystem. |
+| Plugin runtime (Java classes, lifecycle, event hooks `onJoin`/`onLeave`/`onDamage` etc.) | Yes | Partial (Phase 11, path A shipped): native `dlopen` loader + bookkeeping live (`src/plugins/PluginLoader.cpp`, boot scan of `./plugins/*.so`, `/plugins [list|load|unload]` backend); the ABI hook points are declared but **not yet invoked**, and there is still no JVM-style class system, no FFI-visible storage handle, and no Lua/JS engine — path B lands with Phase 20's dual extension engine. |
 | Command surface (per-plugin commands with argument parsing / per-plugin help) | Yes | The 11 built-in command categories only; `/plugins` verb is `stub (TODO)`. |
 | Plugin-side storage (per-plugin SQLite / file) | Yes | Server-side SQLite only, no plugin-visible storage handle. |
 | Admin tooling (`/freeze`, `/protect`, `/guard`, `/vote`, `/restart`, `/mass`, `/cache`, `/admin`, `/lobby`, `/spec`) | Delivered by plugins on those stacks | Absent. |
@@ -204,6 +204,15 @@ Two possible paths — decide with the maintainer before we build:
 - **A. Native plugin API**: `dlopen`-based C++ plugin ABI, ~15 hook points (`onJoin`, `onChat`, `onDamage`, `onTick`, `onPacket`, `onCommand`). Simple but no source compat with Bukkit/Forge.
 - **B. Embedded scripting (Lua via Sol or QuickJS)**: gives admin scripting without needing compiled ABI, closer in spirit to Bukkit's plugin API from the admin's viewpoint.
 Either way, `/plugins` becomes a real backend.
+
+**Status (hybrid-now pick, this batch):** path A *loader half* DONE — dlopen boot loader + name bookkeeping + the
+real `/plugins [list|load <so-path>|unload <name>]` console backend (`/Pl` alias) are wired and boot-validated
+(boot log: `No plugins registered at boot (no ./plugins dir — created one now).` on an empty tree,
+`Registered plugin: NAME (path)` per loaded `.so`). The ABI *hook invocation sites* (`on_join`, `on_chat`,
+`on_tick`, `on_command`) are declared in the loader contract but deliberately not fired yet, and path B
+(embedded Lua) stays deferred until Phase 20's dual extension engine — that is what "hybrid now" means: ship
+the cheap loader/backend first, fold the expensive scripting half into its planned phase instead of dragging
+Sol2/QuickJS into this build.
 
 ### Phase 12 — testing & CI
 1. Add a real C++ test framework (Catch2 or GoogleTest) alongside existing Python probes.
