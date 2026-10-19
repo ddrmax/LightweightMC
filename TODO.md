@@ -60,7 +60,7 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
   - [x] Commands `/antiscan <block|add|reload>` & `/hunter <block|add|reload>` (AntiScan Feature).
   - [x] Multiworld `/world list | create <name> <style> | info <name>` (dimension-plane registry backed by the `world_registry` SQLite table; `/world info` reports id + style + per-plane db path).
   - [x] Ban backends `/ban`, `/ban-ip`, `/pardon`, `/pardon-ip` backed by in-memory lists persisted to vanilla-compatible sidecars `banned-players.json` + `banned-ips.json` (src/network/BanList.cpp; import/export on boot + rewrite-on-change).
-- [x] `/kick <player> [reason]` pushes the Disconnect packet (S2C wire 0x00 per PacketCodec47.hpp, NOT the "0x40" an earlier roadmap draft guessed) then closes the client socket via NetworkManager::handleDisconnect().
+  - [x] `/kick <player> [reason]` pushes the Disconnect packet (S2C wire 0x00 per PacketCodec47.hpp, NOT the "0x40" an earlier roadmap draft guessed) then closes the client socket via NetworkManager::handleDisconnect().
   - [x] Whitelist gating `/whitelist <on|off|add|remove>` + `whitelist.json` sidecar enforced at LoginStart ([security] whitelist-enabled default off; bans always win over whitelist).
 - [ ] **PaperMC / Bukkit Style Commands (Refer to PaperMC Commands Reference)**
   - [x] Commands `/version`, `/ver`, `/about` (displays the version information about the server).
