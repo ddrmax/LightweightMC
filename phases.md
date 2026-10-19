@@ -132,7 +132,7 @@ These are all **Java-1.13..1.21 forks** that expose a plugin API (the Forge/Bukk
 
 | Plugin-ecosystem capability | Paper/Bukkit/Spigot/Forge | LightweightMC |
 | --- | --- | --- |
-| Plugin runtime (Java classes, lifecycle, event hooks `onJoin`/`onLeave`/`onDamage` etc.) | Yes | Partial (Phase 11, path A shipped): native `dlopen` loader + bookkeeping live (`src/plugins/PluginLoader.cpp`, boot scan of `./plugins/*.so`, `/plugins [list|load|unload]` backend); the ABI hook points are declared but **not yet invoked**, and there is still no JVM-style class system, no FFI-visible storage handle, and no Lua/JS engine — path B lands with Phase 20's dual extension engine. |
+| Plugin runtime (Java classes, lifecycle, event hooks `onJoin`/`onLeave`/`onDamage` etc.) | Yes | Partial (Phase 11, path A shipped): native `dlopen` loader + bookkeeping live (`src/plugins/PluginLoader.cpp`, boot scan of `./plugins/*.so`, `/plugins [list|load|unload]` backend); the ABI hook points are declared but **not yet invoked**, and there is still no JVM-style class system, no FFI-visible storage handle, and no Lua/JS engine — path B lands with Phase 30's dual extension engine. |
 | Command surface (per-plugin commands with argument parsing / per-plugin help) | Yes | The 11 built-in command categories only; `/plugins` verb is `stub (TODO)`. |
 | Plugin-side storage (per-plugin SQLite / file) | Yes | Server-side SQLite only, no plugin-visible storage handle. |
 | Admin tooling (`/freeze`, `/protect`, `/guard`, `/vote`, `/restart`, `/mass`, `/cache`, `/admin`, `/lobby`, `/spec`) | Delivered by plugins on those stacks | Absent. |
@@ -210,7 +210,7 @@ real `/plugins [list|load <so-path>|unload <name>]` console backend (`/Pl` alias
 (boot log: `No plugins registered at boot (no ./plugins dir — created one now).` on an empty tree,
 `Registered plugin: NAME (path)` per loaded `.so`). The ABI *hook invocation sites* (`on_join`, `on_chat`,
 `on_tick`, `on_command`) are declared in the loader contract but deliberately not fired yet, and path B
-(embedded Lua) stays deferred until Phase 20's dual extension engine — that is what "hybrid now" means: ship
+(embedded Lua) stays deferred until Phase 30's dual extension engine — that is what "hybrid now" means: ship
 the cheap loader/backend first, fold the expensive scripting half into its planned phase instead of dragging
 Sol2/QuickJS into this build.
 
@@ -219,23 +219,32 @@ Sol2/QuickJS into this build.
 2. Golden file tests for every wire packet kind per era (encode→decode round trip, PrismarineJS fixtures).
 3. Golden file test for vanilla 1.8 region file / level.dat import.
 
-### Phase 13 — configuration surface
-1. Fill in vanilla-1.8 keys (server-name, difficulty, gamemode, hardcore, day-length, weather, enable-pvp, enable-mob-spawning, enable-spawning, sit-in, share-server, roll-movement, max-ping, master-server-ping, chat-enabled, banned-players, banned-ips, banned-agents, per-plane variants of the same).
-2. Unify the `max-players` fallback (50 vs 100 inconsistency in Configuration.md).
-3. Fix the JoinGame dimension byte so it emits `session.worldId`, not hard-coded 0.
+### Phase 13 — vanilla auth residuals & server-browser completion (what Phase 5 left open)
+Audit of what Phase 5 left open (evidence-checked): AES-128 CFB now exists (`src/network/AesCfb.cpp`, self-contained) and token auth + SHA-1 digest live in `src/network/Authentication.cpp` with offline fast path, but the cipher is **never plugged into the frame path** — `BaseProtocol::encodeFrame` stays plain-framed and no session switches to CFB after Login Success. Still lacking: enable AES-CFB on the socket upon successful token auth (encode + decode sides), emit/handle S2C/C2S CannotConnect `0x03` + InvalidSessionToken `0x04`, peer AddPlayer `0x05` / RemovePlayer `0x06` packets (only Scoreboard 0x3B–0x3D are sent today), and the HTTP-GET handler on the same socket answering `/` with the `\xFE\xFD` server-info datagram (name/MOTD/player counts/version/icon) + an outbound master-server ping requester for the `master-server-*` keys.
 
-### Phase 14 — cleanup tasks already noted
+### Phase 14 — vanilla play-packet residuals & movement validation (what Phases 6–7 left open)
+Audit of what Phases 6–7 left open: player death→respawn never emits S2C Respawn `0x07` (`grep 'sendPacket(.*0x07' = none`; NetworkGameplay.cpp only mentions the 0x08 comment) — hook respawn rules (`respawn_radius` / `immediate_respawn` / `forgive_dead_players`, unconsumed). Ground-item pair: SQLite persistence (`Database::saveGroundItem`/`loadGroundItems`, ProcessingTick.cpp) is live but the packets Spawn Item `0x0E` / Collect Item `0x0D` are never broadcast to vanilla clients, and mob/block drop tables (mob_drops etc.) unapplied. Add XP store + advancements (`show_advancement_messages`; `/experience`, `/advancement` ack-only). Movement validation on C2S Player Position `0x08` (noclip/speed exploit check + fall-damage tracking, TODO.md "Physics" box); knockback impulse on velocity still TODO in EntityManager::tick (KnockbackStrength recorded in-memory only, EntityRecord not persisted). Also fix the JoinGame packet: difficulty byte hard-coded 1 and `joinGame.push_back(100)` (char-truncation quirk) — drive from config + max-players canonical default.
+
+### Phase 15 — vanilla admin-command completion (remaining ack-only backends)
+The wiki/Commands.md status table drifted after Phases 9–10 resplit (`stub` rows for list/msg/say/whitelist/kick/ban/pardon/save-* and `ack-only` rows for seed/setblock/place/setworldspawn/spawnpoint/version now have live backends — fix the doc in this batch first, verified against src/network/BanList.cpp + NetworkManager::saveAllPlanes + world_registry hooks). Residual command backends to wire: `/difficulty`, `/defaultgamemode`, `/give`, `/banlist`, `/publish`, `setidletimeout` + the `/lwmc <chunkinfo|dumpitem|entity list|holderinfo|mobcaps|playermobcaps>` admin introspection verbs (TODO.md PaperMC box).
+
+### Phase 16 — block-interaction & tile-entity completion
+C2S packets currently "consume + log only" need real subsystems (TODO.md caveats): Tool Damage `0x09` durability decrement, Block Interaction / Block Change per-block behaviour hooks into the chunk codec, Tile Entity init via Update Block Entity `0x35` for containers/sign state (`0x12 UpdateSign` text persistence + sign NBT storage).
+
+### Phase 17 — vanilla-1.8 configuration keys (second half of what ConfigManager is missing)
+Extend ConfigManager::forEachCanonicalDefault with vanilla keys still missing: difficulty engine linkage, day-length, weather, enable-pvp, enable-mob-spawning, enable-spawning, sit-in, share-server, roll-movement, max-ping, chat-enabled, hardcore, banned-agents + per-plane variants; unify the `max-players` fallback (Server.cpp still falls back to 50 while canonical default is 100 — code fix belongs here).
+
+### Phase 18 — cleanup tasks already noted
 - Remove the Unicode U+2010-hyphen duplicate wiki page `AntiScan‐and‐Security.md` (leaves the ASCII-hyphen one).
 - Update stale era-range header comments in `LegacyProtocol.hpp` / `ModernProtocol.hpp` (called out in Protocol-and-Clients.md as "aspirational").
 - Fix `/Seed` vs `/seed` usage casing; fix `/jfr.` stray dot in `/jfr` usage string; register `compute` verb (currently unreachable).
-
----
 
 ## Assumptions made & decisions to confirm before Act mode
 
 1. **"Vanilla 1.8" = Java Edition 1.8.1 wire protocol 47** (not a Minecraft "1.8 mod" or PE 1.8). Confirm — the whole repo is 1.8-wire-shaped (`advertisedProtocol()=47`, 16-bit block, `clientProtocol >= 47` gates), so this seems safe.
 2. **Plugin parity (PaperMC/Spigot/Bukkit/Forge)** is unattainable at the source-compat level (those are JVM Java plugin APIs). The only way to match their functionality is (a) re-implement their plugins natively on LightweightMC (a huge amount of work) or (b) add a plugin ABI / scripting layer. I've put that in Phase 11, but the *shape* of that plugin layer is a design decision I'd like the maintainer's input on before Act.
 3. **World save format compatibility** — LightweightMC's `.mcc` format is deliberate ("no JVM, minimal RAM"). Making it read vanilla worlds is a design decision: full compat vs. import-tool only. Import-tool is much less invasive.
+
 4. **Auth mode** — LightweightMC may want to stay "offline-first" by design. Phase 5 offers both paths, but I need a decision on which is default.
 
 Please confirm/choose these four points before we switch to Act mode:
@@ -247,27 +256,27 @@ Please confirm/choose these four points before we switch to Act mode:
 ## 🔌 Version 0.0.16: Third-Party Ecosystem & Server Infrastructure
 *Objective: Build high-performance, modular infrastructure inspired by PaperMC, Spigot, Bukkit, Forge, and Velocity—targeting low-resource systems.*
 
-### Phase 15: Advanced Role & Permission Management
+### Phase 25: Advanced Role & Permission Management
 * **Code Affinity:** *Access Control, Node Hierarchies*
 * Tree-based permission node verification system (compatible with LuckPerms node formats) integrated directly into commands, command auto-completion, and player capabilities.
 
-### Phase 16: Asynchronous Command Execution & Brigadier Engine
+### Phase 26: Asynchronous Command Execution & Brigadier Engine
 * **Code Affinity:** *Command Parsing, Tab Completion, Task Threading*
 * Graph-based command tree parser supporting argument completion, sub-commands, and asynchronous command execution off the main game tick.
 
-### Phase 17: Threading Framework & Zero-Allocation Memory Pools
+### Phase 27: Threading Framework & Zero-Allocation Memory Pools
 * **Code Affinity:** *Concurrency, Ring Buffers, Memory Management*
 * Worker thread pool for background tasks (async chunk loading, world saving, database queries) and thread-safe lock-free queues for network frame processing.
 
-### Phase 18: Modern Proxy Integration & Forwarding Protocols
+### Phase 28: Modern Proxy Integration & Forwarding Protocols
 * **Code Affinity:** *BungeeCord, Velocity Forwarding, Network Channels*
 * Support for BungeeCord/Velocity IP forwarding (player real IP, offline/online UUIDs, skin properties) and custom payload channels (`Plugin Message` `0x17` / `0x3F`).
 
-### Phase 19: Telemetry, Diagnostic Profiling & Metrics
+### Phase 29: Telemetry, Diagnostic Profiling & Metrics
 * **Code Affinity:** *System Profiling, Monitoring, Logging*
 * Integrated performance profiler (`/perf`), TPS/RAM usage metrics endpoints, and multi-level log rotation engines.
 
-### Phase 20: Dual Extension Engine (Embedded Lua + Native C++ ABI)
+### Phase 30: Dual Extension Engine (Embedded Lua + Native C++ ABI)
 * **Code Affinity:** *Embedded Runtimes, FFI, Dynamic Loading*
 * **Lua Scripting Layer:** Embedded Lua engine (via Sol2 or native C API) exposing server event hooks (`onPlayerJoin`, `onBlockBreak`, `onCommand`).
 * **Native C++ Shared Library ABI:** Dynamic shared object loader (`dlopen` / `LoadLibrary`) utilizing a C-compatible ABI (`extern "C"`) for compiled high-performance native extensions.
@@ -277,42 +286,42 @@ Please confirm/choose these four points before we switch to Act mode:
 ## 🌍 Version 0.0.17: Deep Vanilla Simulation & World Mechanics
 *Objective: Achieve 1:1 gameplay, world simulation, physics, and AI parity with the reference vanilla 1.8 server.*
 
-### Phase 21: Fluid Dynamics & Environmental Physics
+### Phase 31: Fluid Dynamics & Environmental Physics
 * **Code Affinity:** *World Ticks, Fluid Propagation*
 * Water and lava flow propagation rules, viscosity decay calculations, source block creation, and cobblestone/obsidian generation on fluid contact.
 
-### Phase 22: Dimensional Portals & World Transitions
+### Phase 32: Dimensional Portals & World Transitions
 * **Code Affinity:** *Dimension Switching, Structure Checking*
 * Nether Portal block creation and search algorithms, End Portal frame activation, dimension changing lifecycle, and player respawn handling across dimensions.
 
-### Phase 23: Complete Redstone Logic & Circuitry State Machine
+### Phase 33: Complete Redstone Logic & Circuitry State Machine
 * **Code Affinity:** *Circuit Graph, Signal Propagation, Tick Scheduling*
 * Graph-based Redstone wire signal decay (15 to 0), indirect block powering, and tick-accurate state machines for Repeaters, Comparators, Redstone Torches, and Pistons (push limits, entity pushing).
 
-### Phase 24: Entity AI & 3D Pathfinding Engine
+### Phase 34: Entity AI & 3D Pathfinding Engine
 * **Code Affinity:** *A* Pathfinding, AI Behavioral Trees*
 * Voxel-based 3D $A^*$ pathfinding algorithm accounting for step heights, drop limits, and water. Priority-based goal selectors (Attack, Flee, Wander, Target), aggro tracking, and mob drop tables.
 
-### Phase 25: Vanilla 1.8 Procedural World Generation
+### Phase 35: Vanilla 1.8 Procedural World Generation
 * **Code Affinity:** *Perlin Noise, Biome Decorators, Terrain Pipelines*
 * 1.8 3D Perlin/Simplex noise terrain generation pipeline, biome-specific surface decoration, cave carving algorithms, and ore distribution bounds.
 
-### Phase 26: Multi-Block Structure Generators
+### Phase 36: Multi-Block Structure Generators
 * **Code Affinity:** *Procedural Structure Assembly*
 * Multi-block structure placement algorithms for Villages, Strongholds, Nether Fortresses, Abandoned Mineshafts, and Ocean Monuments.
 
-### Phase 27: Combat Math, Potion Effects & Attribute Modifiers
+### Phase 37: Combat Math, Potion Effects & Attribute Modifiers
 * **Code Affinity:** *Combat Math, Potion Mechanics, Attributes*
 * Armor damage mitigation formulas, weapon attribute modifiers, knockback vector math, and active potion status effect ticking loops.
 
-### Phase 28: Economy, Villager Trading & Workstation Mechanics
+### Phase 38: Economy, Villager Trading & Workstation Mechanics
 * **Code Affinity:** *Villager AI, Recipe Registries, Container Workstations*
 * Villager trade list generation and tier unlocking, crafting table recipe validation, and furnace/anvil/enchanting table workstation processing logic.
 
-### Phase 29: Environment, Weather & World Border Ticks
+### Phase 39: Environment, Weather & World Border Ticks
 * **Code Affinity:** *World Loop, Weather Systems, World Limits*
 * Day/night cycle time updates, rain/thunder weather state transitions, lightning strikes, and world border restriction enforcement.
 
-### Phase 30: Sound Effects, Particles & Client Animations
+### Phase 40: Sound Effects, Particles & Client Animations
 * **Code Affinity:** *Audio Packets, Particle Streams, Visual Events*
 * World sound effect dispatching (`Sound Effect` `0x29`), particle stream generation (`Particle` `0x2A`), and client animation broadcasting (`Animation` `0x0B`).

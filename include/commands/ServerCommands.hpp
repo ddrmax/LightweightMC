@@ -701,7 +701,7 @@ public:
         using namespace LightweightMC::Plugin;
         // Phase 11 path A "hybrid now" pivot: boot loader + this backend is real
         // (dlopen bookkeeping, see src/plugins/PluginLoader.cpp); hook *invocation*
-        // sites and the Lua half land with Phase 20's dual extension engine.
+        // sites and the Lua half land with Phase 30's dual extension engine.
         const std::string sub = args.empty() ? "list" : args[0];
 
         if (sub == "list")

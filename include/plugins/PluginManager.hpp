@@ -4,7 +4,7 @@
 // Native plugin ABI loader — Phase 11 path A (dlopen-based C++ plugins).
 // Roadmap pivots recorded in phases.md §Phase 11: "Hybrid now" maintainer pick
 // ships this minimal boot-time loader + /plugins backend first, deferring the
-// embedded-scripting half (B. Lua via Sol/QuickJS) to Phase 20's dual engine.
+// embedded-scripting half (B. Lua via Sol/QuickJS) to Phase 30's dual engine.
 //
 // Contract: plugins live in ./plugins/*.so next to the server binary (created
 // dir at boot if absent). A plugin .so exports extern "C" symbols:

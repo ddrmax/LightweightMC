@@ -272,7 +272,7 @@ Source: `include/commands/WorldCommands.hpp`.
     "class": "PluginsCommand",
     "source": "ServerCommands.hpp",
     "registered": true,
-    "status": "wired (Phase 11 loader; hook invocation deferred to Phase 20)",
+    "status": "wired (Phase 11 loader; hook invocation deferred to Phase 30)",
     "notes": "Registered lowercase: type `/plugins`; the usage string shows `/Plugins` (cosmetic). Lookup is case-sensitive."
   },
   {

@@ -3,7 +3,7 @@
 // See include/plugins/PluginManager.hpp for the ABI contract + roadmap notes
 // (dlopen per-plugin .so, dlsym optional on_join/on_chat/on_tick/on_command
 // hooks resolved but NOT yet invoked: hook invocation sites deferred with the
-// scripting half to Phase 20's dual extension engine — loader + bookkeeping
+// scripting half to Phase 30's dual extension engine — loader + bookkeeping
 // ships first so /plugins stops being a stub).
 // =============================================================================
 
