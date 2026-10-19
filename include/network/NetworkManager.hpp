@@ -73,9 +73,25 @@ namespace LightweightMC::Network
         void handleDisconnect(int fd);
         void flushSendBuffer(LightweightMC::Player::PlayerSession &client);
 
+        // Phase 10 (ban/kick/whitelist) login-gate helper. allowLoginGate answers
+        // whether a player name may connect given the ban/whitelist state loaded
+        // from banned-players.json / whitelist.json sidecars (see src/network/BanList.cpp):
+        // bans always win, and when the whitelist is active only whitelisted names pass.
+        // The kick + denial wire helpers (denyLoginOnFd sends CannotConnect 0x03,
+        // kickSessionByName pushes Disconnect wire 0x00 -- PacketCodec47 contract, not
+        // the "0x40" the roadmap draft guessed) live in NetworkEvents.cpp.
+
     public:
         NetworkManager() = default;
         ~NetworkManager() = default;
+        bool allowLoginGate(const std::string &username);
+
+        // Kick a connected player by (case-insensitive) username: pushes the
+        // Disconnect packet (wire 0x00, payload JSON reason -- PacketCodec47)
+        // to that socket then closes it via handleDisconnect(). Returns the
+        // resolved session username ("" when nobody is connected by that name).
+        std::string kickSessionByName(const std::string &name, const std::string &reason);
+        void denyLoginOnFd(int fd, const std::string &reason);
         void sendPacket(int fd, int32_t packetId, const std::vector<uint8_t> &payload);
         void broadcastPacket(int32_t packetId, const std::vector<uint8_t> &payload, int ignoreFd = -1);
         bool start(uint16_t port);

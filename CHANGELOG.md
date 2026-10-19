@@ -50,8 +50,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 - **Phase 9 processing substrate (`ProcessingTick`):** new per-tick singleton sweeping per-plane registries (kind registry for ground items/crops/flows, sparse `TickRecord` on Chunk replacing the dense byte-slice record model -- wire voxel sections unchanged), TTL expiry path for dropped entities (`KIND_GROUND`) w/o SQLite churn; Server.cpp binds ChunkManager + every live plane id into the tick each 20 Hz pass.
 - **DirtyWriter staged cell flushes:** new singleton staging chunk-cell edits into batched read/patch/write buckets dispatched via `WorldStorage::applyCellBatch` (registered per plane through `DirtyWriter::registerCellFlush`, re-pinned by `setPlaneWorldId` when NetworkWorlds/NetworkSocket assign non-default planes); lock order DirtyWriter mutex -> save-statement mutex documented in WorldStorage comments.
 - **Ground-item storage API:** `Storage::Database` gained ground-item rows (`saveGroundItem`/`deleteGroundItem`/`loadGroundItems`) + ProcessingTick expiry consumes them; new `include/world/MC18ItemIds.hpp` constants header groups 1.8 item ids (materials/tools/food/misc) for upcoming drop tables and pickup paths.
-
-
+- **Ban backends + vanilla sidecars** (`src/network/BanList.cpp`): `/ban`, `/ban-ip`, `/pardon`, `/pardon-ip` persist `banned-players.json` + `banned-ips.json` (rewrite-on-change, boot import) instead of the earlier draft's `server_data.db` tables.
+- **Kick on the real Disconnect wire** (`NetworkManager::kickSessionByName`, NetworkEvents.cpp): protocol 47 sends Disconnect as S2C wire 0x00 whose payload is a JSON reason object (verified in include/network/protocol/PacketCodec47.hpp + tools/protocol_seed/packet_ids_1.8.json; the phases.md draft value `0x40` was a misread), then closes the socket via handleDisconnect().
+- **Login gate + whitelist** (`src/network/handlers/LoginHandler.cpp`, `NetworkEvents::allowLoginGate/denyLoginOnFd`): bans always deny at Login Start; `[security] whitelist-enabled` (default off) + `whitelist.json` restrict logins when on; denials reply CannotConnect 0x03 then close. `/whitelist <on|off|add|remove>` shares this state with console + chat contexts.
+- **PlayerSession::peerIp** captured at socket-accept in NetworkEvents.cpp for per-session IP matching against banned-ips.json entries.
 ### Fixed
 
 - **Relogin after `/gotor` returned to Overworld:** `loadPlayerData` SELECT now includes `world_id`; login handler restores `session.worldId` before first chunk-stream.
@@ -179,7 +181,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 - **CorruptedFrameException: length wider than 21-bit (mountains preset):** the monolithic `0x26` build pushed ~9.6 MB (7×7 × 16 sections × ~196 KiB) overflowing the wire varint; `sendPacket` now refuses+logs+drops oversized bodies so the stream stays aligned, and the `[5,100]` clamp keeps sections inside 0..6.
 
-
 ## [0.0.6] - 2026-10-04
 
 ### Added
@@ -196,7 +197,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 ### Fixed
 
 - **Minecraft Protocol 1.8 (v47):** crash on interactive block operations (chest / anvil).
-
 
 ## [0.0.5] - 2026-09-30
 
@@ -226,13 +226,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 ### Changed
 - Refactored the chunk storage system to optimize RAM usage.
+
 ### Fixed
 
 - **Network serialization (Protocol 47 / MC 1.8)**: Better network stability.
 ---
 
 ## [0.0.3] - 2026-09-08
-
 
 ### Added
 - **SQLite storage engine (WAL Mode)**: LZ4 compression/decompression implementation for chunk data.

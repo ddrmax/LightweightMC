@@ -3,6 +3,7 @@
 #include "core/CommandManager.hpp"
 #include "core/ConfigManager.hpp"
 #include "network/AntiScan.hpp"
+#include "network/BanList.hpp"
 #include "core/Logger.hpp"
 #include "core/utils.hpp"
 #include <limits>
@@ -403,24 +404,39 @@ public:
         std::string subCmd = args[0];
         if (subCmd == "On")
         {
-            // TODO: Enable whitelist in config
+// Phase 10 subphase 10.3 - toggle gating via Network::setWhitelistEnabled.
+            ctx.setWhitelistEnabledHook(true);
             ctx.reply("The whitelist is now activated.");
         }
         else if (subCmd == "Off")
         {
-            // TODO: Disable whitelist
+// Phase 10 subphase 10.3 - disable gating (everyone may join again).
+            ctx.setWhitelistEnabledHook(false);
             ctx.reply("The whitelist is now deactivated.");
         }
         else if (subCmd == "Add" && args.size() >= 2)
         {
             std::string target = args[1];
-            // TODO: Add the player to whitelist.json
-            ctx.reply("Adding" + target + "to the whitelist.");
+// Phase 10 subphase 10.3 - Network::whitelistAdd -> whitelist.json sidecar.
+            const bool added = ctx.whitelistAddHook(target);
+            if (!added)
+            {
+                ctx.reply(target + " is already whitelisted.");
+                return;
+            }
+            // Broadcast the change so connected players see console-style feedback.
+            ctx.reply("Adding " + target + " to the whitelist.");
         }
         else if (subCmd == "Remove" && args.size() >= 2)
         {
             std::string target = args[1];
-            // TODO: Remove player from whitelist.json
+// Phase 10 subphase 10.3 - Network::whitelistRemove updates whitelist.json too.
+            const bool removed = ctx.whitelistRemoveHook(target);
+            if (!removed)
+            {
+                ctx.reply(target + " is not on the whitelist (nothing changed).");
+                return;
+            }
             ctx.reply("Removal of " + target + " from the whitelist.");
         }
         else
@@ -463,8 +479,17 @@ public:
             }
         }
 
-        // TODO: Find the player's clientFd, send packet 0x40 (Disconnect) and close the connection
-        ctx.reply("The player" + target + " was expelled for: " + reason);
+        // Phase 10 subphase 10.2 - real kick via NetworkManager::kickSessionByName
+        // hook: sends Disconnect wire 0x00 (PacketCodec47::encodeDisconnect, NOT 0x40
+        // as the roadmap draft guessed - see include/network/protocol/PacketCodec47.hpp)
+        // and closes the client socket.
+        const std::string kicked = ctx.kickSessionByName(target);
+        if (kicked.empty())
+        {
+            ctx.reply("Player " + target + " is not connected (nothing was kicked).");
+            return;
+        }
+        ctx.reply("The player " + kicked + " was expelled for: " + reason);
     }
 };
 
@@ -501,8 +526,18 @@ public:
             }
         }
 
-        // TODO: Add the nickname to banned-players.json and kicked if online
-        ctx.reply("The player" + target + "was banned.");
+        if (ctx.isPlayerBannedHook(target))
+        {
+            ctx.reply("The player " + target + " is already banned.");
+            return;
+        }
+
+        const bool banned = ctx.banPlayerHook(target, reason);
+        const std::string kickedName = ctx.kickSessionByName(target);
+        if (!kickedName.empty())
+            ctx.reply("Kicking client " + kickedName + " (now banned).");
+        ctx.reply(banned ? "The player " + target + " was banned."
+                         : "Ban for " + target + " failed (the ban list did not change).");
     }
 };
 
@@ -527,8 +562,27 @@ public:
         }
 
         std::string target = args[0];
-        // TODO:Resolve IP if passed pseudo, add to AntiScan/banned-ips.json and disconnect socket
-        ctx.reply("IP ban applied for " + target);
+        std::string reason = "Banned by an administrator.";
+        if (args.size() > 1)
+        {
+            reason = "";
+            for (size_t i = 1; i < args.size(); ++i)
+            {
+                if (i > 1)
+                    reason += " ";
+                reason += args[i];
+            }
+        }
+
+        // Phase 10 subphase 10.1 - ban the given dotted IP (or a connected
+        // player's session IP) via Network::banIp through ctx.banIpHook.
+        const bool ipBanned = ctx.banIpHook(target, reason);
+        if (!ipBanned)
+        {
+            ctx.reply("IP ban for " + target + " failed (already on the list or empty).");
+            return;
+        }
+        ctx.reply("Banning IP " + target);
     }
 };
 
@@ -553,8 +607,13 @@ public:
         }
 
         std::string target = args[0];
-        // TODO: Remove nickname from banned-players.json
-        ctx.reply("The player " + target + " was unbanned.");
+        // Phase 10 subphase 10.1 - honest unban report through Network::unbanPlayer.
+        if (!ctx.isPlayerBannedHook(target))
+        {
+            ctx.reply("The player " + target + " is not on the ban list (nothing changed).");
+            return;
+        }
+        ctx.unbanPlayerHook(target);
     }
 };
 
@@ -579,8 +638,13 @@ public:
         }
 
         std::string ip = args[0];
-        // TODO: Remove IP from banned-ips.json and AntiScan
-        ctx.reply("IP address " + ip + " was unbanned.");
+        // Phase 10 subphase 10.1 - honest IP unban through Network::unbanIp.
+        if (!ctx.isIpBannedHook(ip))
+        {
+            ctx.reply("IP " + ip + " is not on the ban list (nothing changed).");
+            return;
+        }
+        ctx.unbanIpHook(ip);
     }
 };
 

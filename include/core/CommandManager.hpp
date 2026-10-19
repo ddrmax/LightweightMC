@@ -273,6 +273,42 @@ struct CommandContext
     std::function<bool()> getAutosaveEnabled =
         []() -> bool { return false; };
 
+    // ---- Phase 10 subphase 10.1-10.3: ban / kick / whitelist hooks ----------
+    // Backends live in namespace LightweightMC::Network (include/network/BanList.hpp):
+    // the sidecars banned-players.json, banned-ips.json and whitelist.json follow
+    // vanilla-1.8 filenames so external tools can import them unchanged. Console
+    // and chat contexts bind every hook to those free functions; defaults are
+    // no-ops so bare compile stays safe when NetworkManager is not linked in.
+    std::function<bool(const std::string &target, const std::string &reason)> banPlayerHook =
+        [](const std::string &, const std::string &) -> bool { return false; };
+    std::function<bool(const std::string &target)> unbanPlayerHook =
+        [](const std::string &) -> bool { return false; };
+    std::function<bool(const std::string &ip, const std::string &reason)> banIpHook =
+        [](const std::string &, const std::string &) -> bool { return false; };
+    std::function<bool(const std::string &ip)> unbanIpHook =
+        [](const std::string &) -> bool { return false; };
+    // isBannedProbe answers "already on that list?" so /pardon can print honest
+    // not-banned text instead of pretending the removal worked.
+    std::function<bool(const std::string &target)> isPlayerBannedHook =
+        [](const std::string &) -> bool { return false; };
+    std::function<bool(const std::string &ip)> isIpBannedHook =
+        [](const std::string &) -> bool { return false; };
+    // kickSessionByName looks the live session up inside NetworkManager::m_clients
+    // and returns "" when nobody by that name is connected, the resolved username
+    // ("{Name} Expelled") so a case-insensitive login name still matches.
+    std::function<std::string(const std::string &name)> kickSessionByName =
+        [](const std::string &) -> std::string { return std::string{}; };
+    // whitelistHook toggles/edits the whitelist sidecar; mode=true means turn
+    // gating on. getWhitelistMode reads it back for /whitelist status lines.
+    std::function<bool(bool)> setWhitelistEnabledHook =
+        [](bool) -> bool { return false; };
+    std::function<bool()> getWhitelistModeHook =
+        []() -> bool { return false; };
+    std::function<bool(const std::string &name)> whitelistAddHook =
+        [](const std::string &) -> bool { return false; };
+    std::function<bool(const std::string &name)> whitelistRemoveHook =
+        [](const std::string &) -> bool { return false; };
+
     // --------------------------------------------------------------
     // Login-time debug-summon cleanup hook (see EntityManager.hpp).
     // --------------------------------------------------------------

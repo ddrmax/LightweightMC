@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include "network/BanList.hpp"
 #ifndef MC_PROTOCOL_VERSION_NAME
 #define MC_PROTOCOL_VERSION_NAME "1.8"
 #endif
@@ -211,6 +212,59 @@ namespace PlayerHandler
             ctx.getAutosaveEnabled = [&net]() -> bool
             {
                 return net.autosaveEnabled();
+            };
+            // Phase 10 (ban/kick/whitelist): bind the same Network:: admin hooks
+            // the console contexts get, so /ban, /kick, /whitelist from in-game
+            // chat drive identical state (src/network/BanList.cpp sidecars).
+            ctx.banPlayerHook = [](const std::string &name, const std::string &reason) -> bool
+            {
+                LightweightMC::Network::banPlayer(name, reason);
+                return true;
+            };
+            ctx.unbanPlayerHook = [](const std::string &name) -> bool
+            {
+                LightweightMC::Network::unbanPlayer(name);
+                return true;
+            };
+            ctx.banIpHook = [](const std::string &ip, const std::string &reason) -> bool
+            {
+                LightweightMC::Network::banIp(ip, reason);
+                return true;
+            };
+            ctx.unbanIpHook = [](const std::string &ip) -> bool
+            {
+                LightweightMC::Network::unbanIp(ip);
+                return true;
+            };
+            ctx.isPlayerBannedHook = [](const std::string &name) -> bool
+            {
+                return LightweightMC::Network::isPlayerBanned(name);
+            };
+            ctx.isIpBannedHook = [](const std::string &ip) -> bool
+            {
+                return LightweightMC::Network::isIpBanned(ip);
+            };
+            ctx.kickSessionByName = [&net](const std::string &name) -> std::string
+            {
+                return net.kickSessionByName(name, "Kicked from the server.");
+            };
+            ctx.setWhitelistEnabledHook = [](bool enabled) -> bool
+            {
+                return LightweightMC::Network::setWhitelistEnabled(enabled);
+            };
+            ctx.getWhitelistModeHook = []() -> bool
+            {
+                return LightweightMC::Network::getWhitelistEnabled();
+            };
+            ctx.whitelistAddHook = [](const std::string &name) -> bool
+            {
+                LightweightMC::Network::whitelistAdd(name);
+                return true;
+            };
+            ctx.whitelistRemoveHook = [](const std::string &name) -> bool
+            {
+                LightweightMC::Network::whitelistRemove(name);
+                return true;
             };
 
             CommandManager::getInstance().executeCommand(ctx, message);

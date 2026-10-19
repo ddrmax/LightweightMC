@@ -16,6 +16,8 @@
 #include "commands/TestPacketsCommand.hpp"
 #include "network/Packet.hpp"
 #include "core/utils.hpp"
+#include "network/BanList.hpp"
+
 #include <termios.h>
 #include <unistd.h>
 #include <vector>
@@ -341,6 +343,57 @@ namespace LightweightMC::Core
         {
             return m_network.autosaveEnabled();
         };
+        consoleCtx.banPlayerHook = [](const std::string &name, const std::string &reason) -> bool
+        {
+            Network::banPlayer(name, reason);
+            return true;
+        };
+        consoleCtx.unbanPlayerHook = [](const std::string &name) -> bool
+        {
+            Network::unbanPlayer(name);
+            return true;
+        };
+        consoleCtx.banIpHook = [](const std::string &ip, const std::string &reason) -> bool
+        {
+            Network::banIp(ip, reason);
+            return true;
+        };
+        consoleCtx.unbanIpHook = [](const std::string &ip) -> bool
+        {
+            Network::unbanIp(ip);
+            return true;
+        };
+        consoleCtx.isPlayerBannedHook = [](const std::string &name) -> bool
+        {
+            return Network::isPlayerBanned(name);
+        };
+        consoleCtx.isIpBannedHook = [](const std::string &ip) -> bool
+        {
+            return Network::isIpBanned(ip);
+        };
+        consoleCtx.kickSessionByName = [this](const std::string &name) -> std::string
+        {
+            return m_network.kickSessionByName(name, "Kicked from the server.");
+        };
+        consoleCtx.setWhitelistEnabledHook = [](bool enabled) -> bool
+        {
+            return Network::setWhitelistEnabled(enabled);
+        };
+        consoleCtx.getWhitelistModeHook = []() -> bool
+        {
+            return Network::getWhitelistEnabled();
+        };
+        consoleCtx.whitelistAddHook = [](const std::string &name) -> bool
+        {
+            Network::whitelistAdd(name);
+            return true;
+        };
+        consoleCtx.whitelistRemoveHook = [](const std::string &name) -> bool
+        {
+            Network::whitelistRemove(name);
+            return true;
+        };
+
 
         CommandManager::getInstance().executeCommand(consoleCtx, inputLine);
     }
@@ -566,6 +619,57 @@ namespace LightweightMC::Core
             {
                 return network->autosaveEnabled();
             };
+        consoleCtx.banPlayerHook = [](const std::string &name, const std::string &reason) -> bool
+        {
+            Network::banPlayer(name, reason);
+            return true;
+        };
+        consoleCtx.unbanPlayerHook = [](const std::string &name) -> bool
+        {
+            Network::unbanPlayer(name);
+            return true;
+        };
+        consoleCtx.banIpHook = [](const std::string &ip, const std::string &reason) -> bool
+        {
+            Network::banIp(ip, reason);
+            return true;
+        };
+        consoleCtx.unbanIpHook = [](const std::string &ip) -> bool
+        {
+            Network::unbanIp(ip);
+            return true;
+        };
+        consoleCtx.isPlayerBannedHook = [](const std::string &name) -> bool
+        {
+            return Network::isPlayerBanned(name);
+        };
+        consoleCtx.isIpBannedHook = [](const std::string &ip) -> bool
+        {
+            return Network::isIpBanned(ip);
+        };
+        consoleCtx.kickSessionByName = [network](const std::string &name) -> std::string
+        {
+            return network->kickSessionByName(name, "Kicked from the server.");
+        };
+        consoleCtx.setWhitelistEnabledHook = [](bool enabled) -> bool
+        {
+            return Network::setWhitelistEnabled(enabled);
+        };
+        consoleCtx.getWhitelistModeHook = []() -> bool
+        {
+            return Network::getWhitelistEnabled();
+        };
+        consoleCtx.whitelistAddHook = [](const std::string &name) -> bool
+        {
+            Network::whitelistAdd(name);
+            return true;
+        };
+        consoleCtx.whitelistRemoveHook = [](const std::string &name) -> bool
+        {
+            Network::whitelistRemove(name);
+            return true;
+        };
+
 
             std::vector<std::string> history;
 
@@ -693,6 +797,16 @@ namespace LightweightMC::Core
         m_running = true;
         Logger::info("SQLite Database Init...");
         m_database.init();
+        // Phase 10 (ban/kick/whitelist): load vanilla-compatible sidecars
+        // banned-players.json + banned-ips.json + whitelist.json (missing files
+        // = empty lists like vanilla assumes). [security] whitelist-enabled gates
+        // logins once on; bans always win regardless. See src/network/BanList.cpp.
+        LightweightMC::Network::loadBanSidecars();
+        LightweightMC::Network::loadWhitelistSidecar();
+        const bool whitelistOn = ConfigManager::getInstance().getBool("security", "whitelist-enabled", false);
+        LightweightMC::Network::setWhitelistEnabled(whitelistOn);
+        Logger::info(std::string("[CONFIG] Whitelist Enabled: ") + (whitelistOn ? "Yes" : "No"));
+
 
         Logger::info("Starting Network Manager (epoll)...");
         m_network.start(port);

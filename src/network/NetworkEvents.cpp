@@ -29,6 +29,7 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include "network/BanList.hpp"
 
 namespace LightweightMC::Network
 {
@@ -290,6 +291,10 @@ namespace LightweightMC::Network
                 LightweightMC::Player::PlayerSession ses{};
                 ses.fd = newFd;
                 ses.state = ClientState::HANDSHAKE;
+                // Phase 10 (ban/kick/whitelist): remember the peer IP so LoginHandler
+                // and NetworkManager's ban lookups can match it against
+                // banned-ips.json-style entries without probing every session.
+                ses.peerIp = clientIp;
                 m_clients[newFd] = ses;
                 continue;
             }
@@ -369,6 +374,63 @@ namespace LightweightMC::Network
         Core::Logger::info("Client " + std::to_string(fd) + " (" + username +
                             ") disconnected. [IP: " + ipPort + "]");
     }
+    // Phase 10 (ban/kick/whitelist). allowLoginGate answers whether
+    // `username` may connect right now: explicit bans always win, and when the
+    // whitelist is enabled only whitelisted names pass (vanilla semantics; see
+    // src/network/BanList.cpp sidecar format).
+    bool NetworkManager::allowLoginGate(const std::string &username)
+    {
+        if (Network::isPlayerBanned(username))
+            return false;
+        if (Network::getWhitelistEnabled() && !Network::isWhitelisted(username))
+            return false;
+        return true;
+    }
+
+    // Deny a login that passed the wire but failed the gate: CannotConnect
+    // (wire 0x03, payload = plain reason string + NUL terminator like LoginHandler
+    // uses for its own auth-failure path) then close the socket.
+    void NetworkManager::denyLoginOnFd(int fd, const std::string &reason)
+    {
+        std::vector<uint8_t> payload;
+        LightweightMC::Network::Packet::writeString(payload, reason);
+        payload.push_back(0);
+        sendPacket(fd, 0x03, payload);
+        handleDisconnect(fd);
+    }
+
+    // Kick a connected session by username (case-insensitive like login names).
+    // Wire note: the Disconnect packet is S2C wire 0x00 whose payload is a JSON
+    // object carrying the reason string (PacketCodec47::encodeDisconnect contract);
+    // NOT the "0x40" that phases.md's draft roadmap line guessed -- verified against
+    // include/network/protocol/PacketCodec47.hpp and tools/protocol_seed/packet_ids_1.8.json.
+    std::string NetworkManager::kickSessionByName(const std::string &name, const std::string &reason)
+    {
+        std::string lowerName = name;
+        for (char &c : lowerName)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (auto &[fd, session] : m_clients)
+        {
+            if (session.state != LightweightMC::Player::ClientState::PLAY && 
+                session.username.empty())
+                continue;
+            std::string candidate = session.username;
+            for (char &c : candidate)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (candidate != lowerName)
+                continue;
+            const std::string resolved = session.username;
+            std::vector<uint8_t> payload;
+            LightweightMC::Network::Packet::writeString(payload, 
+                                                        R"({"reason":")" + Core::escapeChatJson(reason) + R"("})");
+            payload.push_back(0);
+            sendPacket(fd, 0x00, payload);
+            handleDisconnect(fd);
+            return resolved;
+        }
+        return {};
+    }
+
 
     // Push the pending bytes in session.sendBuffer out of the socket. Loops
     // until drained or until send() reports EAGAIN (in which case we set

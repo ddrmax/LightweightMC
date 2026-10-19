@@ -90,6 +90,11 @@ namespace LightweightMC::Player
         std::string username{""};
         std::string uuid{""}; // Offline-mode UUID (deterministic from username), set at login.
 
+        // Phase 10 ban/kick/whitelist enforcement: the dotted-quad IP string
+        // NetworkEvents stores for this live session at accept time so LoginHandler,
+        // kick-close and banned-ips matching all see one canonical value.
+        std::string peerIp{"unknown"};
+
         // --- Auth state (Phase 5: Vanilla-1.8 Auth & Server-Browser) ---
         // accessToken: raw token bytes from packet 0x01 Login (Access Token)
         // C2S; empty when the client sent LoginStart (0x00) directly.

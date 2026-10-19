@@ -6,6 +6,7 @@
 #include "network/Authentication.hpp"
 #include "network/AesCfb.hpp"
 #include "network/protocol/ProtocolVersion.hpp"
+#include "network/BanList.hpp"
 
 namespace LoginHandler
 {
@@ -61,6 +62,22 @@ namespace LoginHandler
                 std::vector<uint8_t> loginSuccess;
                 LightweightMC::Network::Packet::writeString(loginSuccess, uuid);
                 LightweightMC::Network::Packet::writeString(loginSuccess, username);
+                // Phase 10 login gate (ban/kick/whitelist): bans always deny
+                // a connect; with [security] whitelist-enabled on, only names in
+                // whitelist.json pass. Denial sends CannotConnect (wire 0x03) plus the reason string then closes the socket.
+                if (!net.allowLoginGate(username))
+                {
+                    net.denyLoginOnFd(clientFd, "You are not whitelisted on this server.");
+                    return;
+                }
+                // Phase 10 login gate (ban/kick/whitelist): bans always deny a connect;
+                // with [security] whitelist-enabled on, only names in whitelist.json pass.
+                // Denial sends CannotConnect (wire 0x03) + reason string and closes the socket.
+                if (!net.allowLoginGate(session.username))
+                {
+                    net.denyLoginOnFd(clientFd, "You are not whitelisted on this server.");
+                    return;
+                }
                 net.sendPacket(clientFd, 0x02, loginSuccess);
                 return;
             }
@@ -83,6 +100,14 @@ namespace LoginHandler
             std::vector<uint8_t> loginSuccess;
             LightweightMC::Network::Packet::writeString(loginSuccess, playerUuid);
             LightweightMC::Network::Packet::writeString(loginSuccess, session.username);
+            // Phase 10 login gate (ban/kick/whitelist): bans always deny a connect;
+            // with [security] whitelist-enabled on, only names in whitelist.json pass.
+            // Denial sends CannotConnect (wire 0x03) + reason string and closes the socket.
+            if (!net.allowLoginGate(session.username))
+            {
+                net.denyLoginOnFd(clientFd, "You are not whitelisted on this server.");
+                return;
+            }
             net.sendPacket(clientFd, 0x02, loginSuccess);
 
             auto packetSender = [&net](int f, int32_t p, const std::vector<uint8_t> &b)

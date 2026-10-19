@@ -193,9 +193,9 @@ Grouped so a single PR per phase keeps the "phase-N wiki page" cadence you have 
 3. Item durability decrement on use / on damage / on break.
 
 ### Phase 10 — admin/security parity
-1. Ban backend: persisted ban tables (`banned-players`, `banned-ips`, `banned-agents`) in `server_data.db` and enforced in `NetworkSocket::handleClientData`.
-2. `/kick` sends Disconnect 0x40 and closes socket.
-3. `/whitelist` gating: enforce on LoginStart.
+1. DONE (subphase 10.1): ban backends live in src/network/BanList.cpp as in-memory lists persisted to vanilla-compatible sidecars `banned-players.json`/`banned-ips.json` (design pivot away from SQLite tables + .txt names for external-tool import compatibility); login-gate enforcement hooks LoginHandler before sending Login Success and NetworkEvents::allowLoginGate/kickSessionByName.
+2. DONE (subphase 10.2): `/kick` pushes the Disconnect packet on S2C wire id 0x00 whose payload is a JSON reason object (PacketCodec47::encodeDisconnect contract; the earlier "0x40" guess was wrong - verified against include/network/protocol/PacketCodec47.hpp + tools/protocol_seed/packet_ids_1.8.json) then closes the socket via NetworkManager::handleDisconnect().
+3. DONE (subphase 10.3): whitelist gate enforced before the Login Success reply in LoginHandler.cpp; whitelist.json sidecar + [security] whitelist-enabled config key (default off).
 4. `/pardon`, `/pardon-ip`, `/banlist`.
 5. RCON subsystem: RCON packet framing (client 0xF300+ sequence, server auth), config keys `rcon-port`, `rcon-password`, `use-rcon`.
 
