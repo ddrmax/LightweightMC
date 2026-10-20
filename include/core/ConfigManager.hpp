@@ -103,6 +103,13 @@ private:
         // [server]
         emit("server", "port", "25565");
         emit("server", "max-players", "100");
+
+        // [gameplay]
+        // World difficulty fed to JoinGame/Respawn spawn-info packets as a
+        // signed byte. 0 = peaceful, 1 = easy, 2 = normal, 3 = hard —
+        // /difficulty updates this key so a single gamerule drives all
+        // wire sites (no per-packet hardcoded literals left).
+        emit("gameplay", "difficulty", "1");
         emit("server", "motd", "LightweightMC C++ Engine");
 
         // [security]

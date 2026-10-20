@@ -205,7 +205,7 @@ sessions and calls `sendPacket` for each.
 
 ## The receive path — chunked reassembly
 
-Defined in `src/network/NetworkEvents.cpp::handleClientData`:
+Defined in `src/network/NetworkEvents.cpp::handleClientData` (server-browser GET-ping interception for listing bots lives above its frame loop, and the token-era reject helper is `denySessionTokenOnFd`, both added in Phase 13):
 
 - Each client has a growable `rxBuffer` (per-session), capped at
   `kMaxRxBufferBytes = 4 MiB`. Buffers over that cap are dropped with a
@@ -347,15 +347,15 @@ actually change the wire.
 
 ## Phase 13 auth/server-browser residuals (what Phase 5 left open)
 
-Audit trail for the vanilla-auth/server-browser gaps tracked across Phase 13;
-the items marked done shipped in that phase, the rest are open:
+Audit trail for the vanilla-auth/server-browser gaps tracked across Phase 13.
 
 - **AES-128 CFB on the frame path**: `src/network/AesCfb.cpp` +
   `include/network/AesCfb.hpp` exist and LoginHandler already arms
   `session.cipherS2C`/`cipherC2S` on MODERN/LATEST token-auth, but
-  `BaseProtocol::encodeFrame` (and the recv path in
-  `NetworkEvents.cpp::handleClientData`) never consult those members —
-  token-era sessions still travel **plain-framed** end-to-end.
+  `BaseProtocol::encodeFrame` never consults those cipher members —
+  token-era sessions still travel **plain-framed** end-to-end. Open item,
+  scoped for a follow-up auth phase; the recv side parses frames in
+  plaintext (`NetworkEvents.cpp::handleClientData`).
 - **InvalidSessionToken S2C reply**: `NetworkManager::denySessionTokenOnFd`
   emits wire `0x04` with a plain reason-string payload (kept distinct from
   CannotConnect `0x03`, which now only flags verify-chain outages) and
@@ -365,12 +365,26 @@ the items marked done shipped in that phase, the rest are open:
   sent to PLAY sessions today; `encodeAddPlayer`/`encodeRemovePlayer` in
   `PacketCodec47.hpp` have no invocation outside the `/testpackets` command.
 - **Server-browser master-server ping requester**: inbound GET-ping
-  detection + status datagram (`ServerBrowser.cpp`) work, but the
-  outbound `[auth] master-server-ping` fire-and-forget HTTP call exists in
-  `Authentication.cpp::pingMasterServers`; the `[auth] server-icon` key +
-  trailing `&icon=<base64>` status-datagram suffix fed by the new `[auth]
-  server-icon` key are both in place; only Base64 loading of an actual
-  PNG/JPEG asset remains.
+  detection + status datagram (`ServerBrowser.cpp`) work, and the outbound
+  `[auth] master-server-ping` fire-and-forget HTTP call exists in
+  `Authentication.cpp::pingMasterServers`; the `[auth] server-icon` key's
+  trailing `&icon=<base64>` status-datagram suffix fed by that new key are
+  both in place, leaving only Base64 loading of an actual PNG/JPEG asset.
+
+## Phase 14 play-packet residuals (what Phases 6–7 left open)
+
+Same audit discipline as above, for the vanilla **play**-packet gaps:
+
+- **Ground-item packet pair**: SQLite persistence (`Database::saveGroundItem`/
+  `loadGroundItems`, consumed by `src/world/ProcessingTick.cpp`) and the mob
+  drop rule gate (`mob_drops` in `src/world/EntityManager.cpp`) are live, but
+  no era-mapped Spawn Item / Collect Item packet is broadcast to vanilla
+  clients when items land on ground or get picked up; and the block-drop side
+  of that pair — the per-block drop tables backing the `block_drops` gamerule
+  and `/loot`-style payloads — remains unapplied. Open item for a follow-up
+  play-packet phase; the wire ops are absent from era 1.7 and have no entry in
+  `tools/protocol_seed/packet_ids_1.8.json`, so any new op needs a seed +
+  PacketKind entry first (never invent an op code).
 
 ## Cross-links
 

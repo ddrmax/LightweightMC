@@ -49,6 +49,7 @@
 #include "core/Logger.hpp"
 #include "core/utils.hpp"
 #include "network/Packet.hpp"
+#include "core/ConfigManager.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -998,8 +999,9 @@ namespace LightweightMC::Network
 
             // 1. Respawn (0x07): dimension, difficulty, gamemode, levelType.
             // Dimension is signed int32 so vanilla's Nether (-1) and any
-            // custom plane id (>=101) both fit; difficulty 2 = Normal,
-            // gamemode 0 = Survival, and levelType "default" mirror what
+            // custom plane id (>=101) both fit; difficulty comes from the canonical
+            // [gameplay] difficulty gamerule (same key JoinGame reads), gamemode
+            // 0 = Survival, and levelType "default" mirror what
             // vanilla's /gotor-style world swap emits over the wire.
             //
             // Sky trick: vanilla 1.8 clients only know three sky renders
@@ -1017,7 +1019,8 @@ namespace LightweightMC::Network
             // the wire value visible to the client is remapped.
             std::vector<uint8_t> respawn;
             Network::Packet::writeInt(respawn, m_worldManager.skyDimensionFor(newWorldId));
-            respawn.push_back(2); // difficulty (byte, 2 = Normal)
+            respawn.push_back(static_cast<uint8_t>(std::clamp(
+                LightweightMC::ConfigManager::getInstance().get<int>("gameplay", "difficulty", 1), 0, 3))); // difficulty (byte)
             respawn.push_back(static_cast<uint8_t>(session.gamemode)); // gamemode (byte)
             Network::Packet::writeString(respawn, "default"); // levelType (string)
             sendPacket(kv.first, 0x07, respawn);

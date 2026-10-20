@@ -294,6 +294,15 @@ namespace LightweightMC::Network
         // client animates the jump. Returns true when the target exists.
         bool respawnPlayer(const std::string &playerName);
 
+        // Sweep live PLAY sessions for deaths whose respawn window has come
+        // due per immediate_respawn / respawn_radius / respawnwaves gamerules
+        // (SessionState.hpp tracks when the player took a fatal hit) and run
+        // them through the same respawn path as respawnPlayer() so vanilla
+        // clients see Update Health + Player Position refresh without waiting
+        // for an explicit operator /respawn. Returns how many sessions were
+        // respawned this pass; called from Server.cpp's fixed 20 Hz tick loop.
+        int autoRespawnDuePlayers(int64_t nowMs);
+
         // Grant XP to a player and emit Experience (0x1f) when online.
         // Returns the number of levels gained (0-15) so the /experience
         // command can decide whether to fire show_advancement_messages.

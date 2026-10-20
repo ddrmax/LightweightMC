@@ -5,8 +5,10 @@
 #include "core/utils.hpp"
 #include "storage/WorldStorage.hpp"
 #include "storage/Database.hpp"
+#include "core/ConfigManager.hpp"
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 
 namespace LightweightMC::Player
 {
@@ -252,12 +254,18 @@ namespace LightweightMC::Player
         // registered sky hint or 0 by default) and cast to a signed byte on
         // the wire so Nether's -1 becomes 0xFF, which vanilla expects.
         joinGame.push_back(static_cast<uint8_t>(static_cast<int8_t>(worldManager.skyDimensionFor(currentSession.worldId))));
-        joinGame.push_back(1);                         // Difficulty (1 = Easy)
+        // 0.0.15 phase 14a: difficulty byte now comes from the canonical [gameplay]
+        // difficulty gamerule key in server.properties (ConfigManager::forEachCanonicalDefault
+        // emit) instead of a hardcoded literal; clamped to 0-3 so a bad file value
+        // degrades gracefully instead of shifting subsequent wire bytes.
+        joinGame.push_back(static_cast<uint8_t>(std::clamp(
+            LightweightMC::ConfigManager::getInstance().get<int>("gameplay", "difficulty", 1), 0, 3)));
         if (currentSession.clientProtocol >= 47)
         {
             // Max Players, Level Type and Reduced Debug Info only exist in 1.8+ (protocol >= 47).
             // Network::Packet::writeInt(joinGame, 100);         // Max Players
-            joinGame.push_back(100);
+            joinGame.push_back(static_cast<uint8_t>(std::clamp(
+                LightweightMC::ConfigManager::getInstance().get<int>("server", "max-players", 100), 1, 255)));
             Network::Packet::writeString(joinGame, "flat"); // Level Type
             joinGame.push_back(0);                          // Reduced Debug Info
         }
