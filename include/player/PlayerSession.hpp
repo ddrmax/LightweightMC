@@ -26,12 +26,18 @@ namespace LightweightMC::Storage
 
 namespace LightweightMC::Player
 {
+    // Lifecycle: HANDSHAKE -> STATUS -> LOGIN -> PLAY while the socket is
+    // live. DISCONNECTED is a tombstone marker set by NetworkManager::handleDisconnect:
+    // the session stays in m_clients (so packets still queued against it this
+    // tick do not dangle) until NetworkManager::flushPendingDisconnects drains
+    // it and removes the entry from m_clients.
     enum class ClientState
     {
         HANDSHAKE,
         STATUS,
         LOGIN,
-        PLAY
+        PLAY,
+        DISCONNECTED
     };
 
     struct ChunkPos
@@ -232,6 +238,18 @@ namespace LightweightMC::Player
 
         std::vector<uint8_t> rxBuffer{};
         std::vector<uint8_t> sendBuffer{};
+
+        // -------------------------------------------------------------
+        // Disconnect tombstone bookkeeping (ClientState::DISCONNECTED).
+        // handleDisconnect flips the session to DISCONNECTED and records
+        // this timestamp instead of erasing the map entry immediately; the
+        // epoll loop and NetworkManager teardown call flushPendingDisconnects
+        // to drop these tombstones once every pending packet reference for
+        // the tick has been processed, so sendBuffers drained during
+        // kick/dispatch paths never read a freed session. 0 means "not
+        // queued for removal".
+        // -------------------------------------------------------------
+        int64_t disconnectedAtMs{0};
 
         // Multi-version protocol support: the era adapter chosen during handshake.
         // Non-null once the client has sent a Handshake packet. Callers do not own

@@ -1,3 +1,5 @@
+#include "network/NetworkManager.hpp"
+#include <chrono>
 // -----------------------------------------------------------------------------
 // NetworkManager implementation is split by responsibility across several
 // translation units. Each file owns a distinct concern and the class
@@ -25,3 +27,19 @@
 // deleting it) preserves a grep-able landing point for anyone looking for
 // "NetworkManager.cpp" in the tree.
 // -----------------------------------------------------------------------------
+
+// Close every disconnect tombstone still queued when the singleton tears down
+// after main() returns. pollEvents flushes them each event pass, but sessions
+// disconnected during shutdown commands or right before exit would otherwise
+// leak their fds (the default dtor erases m_clients without closing sockets).
+namespace LightweightMC::Network
+{
+    NetworkManager::~NetworkManager()
+    {
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+        flushPendingDisconnects(nowMs);
+    }
+
+} // namespace LightweightMC::Network

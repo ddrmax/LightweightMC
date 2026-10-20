@@ -73,6 +73,14 @@ namespace LightweightMC::Network
         void handleDisconnect(int fd);
         void flushSendBuffer(LightweightMC::Player::PlayerSession &client);
 
+        // Drain every ClientState::DISCONNECTED tombstone queued by handleDisconnect:
+        // removes them from m_clients (socket already closed / epoll-removed by then)
+        // so no PlayerSession survives past the tick that still holds pending packets.
+        // Called by pollEvents and ~NetworkManager (before member teardown); callers
+        // must not invoke inside an iteration over m_clients itself, flushPendingDisconnects
+        // walks a copy of the fds for that reason.
+        void flushPendingDisconnects(int64_t nowMs);
+
         // Phase 10 (ban/kick/whitelist) login-gate helper. allowLoginGate answers
         // whether a player name may connect given the ban/whitelist state loaded
         // from banned-players.json / whitelist.json sidecars (see src/network/BanList.cpp):
@@ -83,7 +91,8 @@ namespace LightweightMC::Network
 
     public:
         NetworkManager() = default;
-        ~NetworkManager() = default;
+        ~NetworkManager();
+
         bool allowLoginGate(const std::string &username);
 
         // Kick a connected player by (case-insensitive) username: pushes the

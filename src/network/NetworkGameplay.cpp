@@ -60,15 +60,16 @@ namespace LightweightMC::Network
                                         int32_t entityId,
                                         const std::string &message)
     {
-        Packet::writeVarInt(out, playerId);
-        Packet::writeInt(out, entityId);
-        Packet::writeString(out, message);
+        Packet::writeVarInt(out, 2);        // 1. Event Type: 2 = Entity Dead (MUST be written first!)
+        Packet::writeVarInt(out, playerId); // 2. Player ID (VarInt)
+        Packet::writeInt(out, entityId);    // 3. Entity ID / Killer ID (Int 32-bit, or -1 if none)
+        Packet::writeString(out, message);  // 4. Death Message (JSON Chat Component)
     }
 
     bool NetworkManager::applyDamageToPlayer(const std::string &playerName,
-                                              float amount,
-                                              int64_t nowMs,
-                                              int damageTypeCode)
+                                             float amount,
+                                             int64_t nowMs,
+                                             int damageTypeCode)
     {
         for (auto &[fd, ses] : m_clients)
         {
@@ -121,7 +122,8 @@ namespace LightweightMC::Network
         else
         {
             data.health = 20.0f - amount;
-            if (data.health < 0.0f) data.health = 0.0f;
+            if (data.health < 0.0f)
+                data.health = 0.0f;
             data.deathCount = (data.health <= 0.0f) ? 1 : 0;
         }
         const bool persisted = m_database.savePlayerData(data);
@@ -226,7 +228,8 @@ namespace LightweightMC::Network
         const bool found = m_database.loadPlayerData(data.uuid, existing);
         const int32_t prevLevel = found ? existing.experienceLevel : 0;
         int64_t newTotal = (found ? existing.totalExperience : 0) + amount;
-        if (newTotal < 0) newTotal = 0;
+        if (newTotal < 0)
+            newTotal = 0;
         data.totalExperience = static_cast<int32_t>(newTotal);
         const int32_t newLevel = std::min(15, data.totalExperience / 1000);
         data.experienceLevel = static_cast<int16_t>(newLevel);
@@ -236,33 +239,33 @@ namespace LightweightMC::Network
         return newLevel - prevLevel;
     }
 
-void NetworkManager::tickRegeneration(int64_t nowMs)
-{
-    // Vanilla-1.8 natural_health_regeneration gamerule gates the sweep; PlayerSession::tickRegen
-    // then applies the 5 s no-damage window + foodLevel >= 9 food-gate + full-HP short-circuit internally.
-    bool regenEnabled = true;
-    World::GameRules::getInstance().getBool("natural_health_regeneration", regenEnabled);
-    if (!regenEnabled)
-        return;
-
-    for (auto &[fd, ses] : m_clients)
+    void NetworkManager::tickRegeneration(int64_t nowMs)
     {
-        if (ses.state != ClientState::PLAY || !ses.alive)
-            continue;
-        const float before = ses.health;
-        if (!ses.tickRegen(nowMs))
-            continue;
-        std::vector<uint8_t> hp;
-        writeUpdateHealthPayload(hp, ses.health,
-                                 static_cast<int32_t>(ses.foodLevel),
-                                 ses.foodSaturationLevel);
-        sendPacket(fd, 0x06, hp);
-        Core::Logger::debug("[NET REGEN] player=" + ses.username +
-                            " fd=" + std::to_string(fd) +
-                            " hpBefore=" + std::to_string(before) +
-                            " hpAfter=" + std::to_string(ses.health));
+        // Vanilla-1.8 natural_health_regeneration gamerule gates the sweep; PlayerSession::tickRegen
+        // then applies the 5 s no-damage window + foodLevel >= 9 food-gate + full-HP short-circuit internally.
+        bool regenEnabled = true;
+        World::GameRules::getInstance().getBool("natural_health_regeneration", regenEnabled);
+        if (!regenEnabled)
+            return;
+
+        for (auto &[fd, ses] : m_clients)
+        {
+            if (ses.state != ClientState::PLAY || !ses.alive)
+                continue;
+            const float before = ses.health;
+            if (!ses.tickRegen(nowMs))
+                continue;
+            std::vector<uint8_t> hp;
+            writeUpdateHealthPayload(hp, ses.health,
+                                     static_cast<int32_t>(ses.foodLevel),
+                                     ses.foodSaturationLevel);
+            sendPacket(fd, 0x06, hp);
+            Core::Logger::debug("[NET REGEN] player=" + ses.username +
+                                " fd=" + std::to_string(fd) +
+                                " hpBefore=" + std::to_string(before) +
+                                " hpAfter=" + std::to_string(ses.health));
+        }
     }
-}
 
     bool NetworkManager::setRespawnWaves(bool enabled)
     {
@@ -287,7 +290,7 @@ void NetworkManager::tickRegeneration(int64_t nowMs)
     }
 
     bool NetworkManager::sendPrivateChat(const std::string &targetName,
-                                          const std::string &message)
+                                         const std::string &message)
     {
         for (auto &[fd, ses] : m_clients)
         {

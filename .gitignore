@@ -24,5 +24,8 @@ wiki/
 build-san/
 phases.md
 build_*/
+san_build/
 .continue/
 .clinerules/
+tests/
+.baseline_tmp/

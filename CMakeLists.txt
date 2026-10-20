@@ -41,3 +41,6 @@ target_link_libraries(lightweight_mc
     z
     pthread
 )
+# LightweightMC Phase 12: hand-rolled golden wire round-trip harness (zero third-party deps).
+add_executable(lwmc_tests tests/wire_roundtrip_test.cpp)
+target_link_libraries(lwmc_tests PRIVATE pthread)
