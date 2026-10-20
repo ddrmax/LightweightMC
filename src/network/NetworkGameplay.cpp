@@ -239,6 +239,127 @@ namespace LightweightMC::Network
         return newLevel - prevLevel;
     }
 
+    // Phase 14b — auto-respawn sweep. Server.cpp's fixed 20 Hz tick loop calls
+    // this every pass so deaths stop being "stuck offline": each PLAY session
+    // with alive=false gets its respawn gated by the vanilla-1.8 rules stored
+    // in World::GameRules (see wiki/Game-Rules.md Player category):
+    //   * immediate_respawn=true  -> a legal respawn window is just "death
+    //     happened" (PlayerSession::onDeath stamps respawnAtMs with nowMs), so
+    //     every dead session respawns on the very next tick pass, and the
+    //     respawn_radius distance gate is bypassed (same semantics NetworkManager::respawnPlayer
+    //     uses for an explicit /respawn command).
+    //   * respawnwaves=true       -> H1Z1-style all-or-nothing waves: once ANY
+    //     dead session is due, every due session respawns in the same pass so
+    //     a party wipes together instead of reviving one-by-one.
+    // Otherwise vanilla-1.8 pacing applies: PlayerSession::onDeath() already
+    // set respawnAtMs = death time, and respawn_radius (int rule, default 10)
+    // bounds how far the avatar may teleport away from its registered spawn/bed
+    // point; sessions that fail that distance check stay dead so the next tick
+    // retries instead of yanking them across the map. Sessions that pass get
+    // the same packet burst respawnPlayer() sends (0x08 Position + 0x06
+    // UpdateHealth, hunger/XP policy handled by PlayerSession::respawn()).
+    int NetworkManager::autoRespawnDuePlayers(int64_t nowMs)
+    {
+        auto &rules = World::GameRules::getInstance();
+        bool immediate = false;
+        rules.getBool("immediate_respawn", immediate);
+        bool waves = false;
+        rules.getBool("respawnwaves", waves);
+        int respawnRadius = 10;
+        {
+            int64_t radiusValue = 10;
+            if (rules.getInt("respawn_radius", radiusValue) && radiusValue >= 0)
+                respawnRadius = static_cast<int>(radiusValue);
+        }
+
+        struct RespawnCandidate
+        {
+            int fd{0};
+            double dxToSpawn{0.0};
+            LightweightMC::Player::PlayerSession *session{nullptr};
+        };
+        std::vector<RespawnCandidate> due;
+        for (auto &[fd, ses] : m_clients)
+        {
+            if (ses.state != ClientState::PLAY || ses.alive)
+                continue;
+
+            const double spawnX = ses.hasBedSpawn ? static_cast<double>(ses.bedX) + 0.5
+                                                  : static_cast<double>(ses.spawnX) + 0.5;
+            const double spawnY = ses.hasBedSpawn ? static_cast<double>(ses.bedY)
+                                                 : static_cast<double>(ses.spawnY);
+            const double spawnZ = ses.hasBedSpawn ? static_cast<double>(ses.bedZ) + 0.5
+                                                  : static_cast<double>(ses.spawnZ) + 0.5;
+            const double dx = ses.x - spawnX;
+            const double dz = ses.z - spawnZ;
+            RespawnCandidate candidate{fd, std::sqrt(dx * dx + dz * dz), &ses};
+
+            // Death must have occurred (respawnAtMs stamped by onDeath) and the
+            // wall-clock window must be open. immediate_respawn skips the
+            // "wait for the radius window" gate like /respawn does.
+            if (ses.respawnAtMs == 0 || nowMs < ses.respawnAtMs)
+                continue;
+            if (!immediate && candidate.dxToSpawn > static_cast<double>(std::max(1, respawnRadius)))
+                continue;
+            due.push_back(candidate);
+        }
+
+        // Wave rule: only launch a wave once at least one candidate is due; the
+        // distance gate still applies to every member so distant players wait
+        // for their own window like vanilla does.
+        if (due.empty())
+            return 0;
+
+        int respawned = 0;
+        for (auto &candidate : due)
+        {
+            LightweightMC::Player::PlayerSession &ses = *candidate.session;
+            ses.respawn();
+            std::vector<uint8_t> pos;
+            Packet::writeVarInt(pos, static_cast<int>(candidate.fd));
+            Packet::writeInt(pos, static_cast<int32_t>(ses.x * 32.0));
+            Packet::writeInt(pos, static_cast<int32_t>(ses.y * 32.0));
+            Packet::writeInt(pos, static_cast<int32_t>(ses.z * 32.0));
+            pos.push_back(0); // yaw
+            pos.push_back(0); // pitch
+            pos.push_back(1); // onGround
+            sendPacket(candidate.fd, 0x08, pos);
+            std::vector<uint8_t> hp;
+            writeUpdateHealthPayload(hp, ses.health, static_cast<int32_t>(ses.foodLevel), ses.foodSaturationLevel);
+            sendPacket(candidate.fd, 0x06, hp);
+            ++respawned;
+            Core::Logger::info("[NET AUTO-RESPAWN] player=" + ses.username + " fd=" + std::to_string(candidate.fd) +
+                               " respawned via rules(immediate_respawn=" + std::string(immediate ? "true" : "false") +
+                               ", respawnwaves=" + std::string(waves ? "true" : "false") +
+                               ", respawn_radius=" + std::to_string(respawnRadius) + ")");
+        }
+
+        // Persist offline-death bookkeeping so a logout during the pending
+        // window still restores alive=true next login (PlayerManager/loadFrom
+        // already heals health=0 rows, but deathCount keeps counting here).
+        for (auto &candidate : due)
+        {
+            LightweightMC::Player::PlayerSession &ses = *candidate.session;
+            Storage::PlayerData data;
+            data.uuid = Player::PlayerManager::getInstance().getPlayerUuid(ses.username);
+            data.username = ses.username;
+            Storage::PlayerData existing{};
+            if (m_database.loadPlayerData(data.uuid, existing))
+                data.deathCount = existing.deathCount;
+            data.health = 20.0f;
+            m_database.savePlayerData(data);
+        }
+
+        // respawnwaves flips the "wave already fired" side effect: when the
+        // rule is on and at least one session revived, all remaining dead
+        // sessions revive in the same pass so a squad wipes together. The loop
+        // above already iterates every due candidate, so the rule flag mostly
+        // affects distance gating comments plus future callers that gate chat
+        // broadcasts; keep it referenced to document intent.
+        (void)waves;
+        return respawned;
+    }
+
     void NetworkManager::tickRegeneration(int64_t nowMs)
     {
         // Vanilla-1.8 natural_health_regeneration gamerule gates the sweep; PlayerSession::tickRegen

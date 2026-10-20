@@ -1,5 +1,6 @@
 #include "player/PlayerSession.hpp"
 #include "storage/Database.hpp"
+#include "world/GameRules.hpp"
 #include <algorithm>
 
 namespace LightweightMC::Player
@@ -293,24 +294,30 @@ namespace LightweightMC::Player
     }
 
     void PlayerSession::respawn()
+{
+    // Phase 14b: hunger reset now honors the keep_inventory gamerule (wiki/Game-Rules.md, Storage::Database persists it). Vanilla softcore never drops XP on death; food only refills when the rule is off — with keep_inventory=true respawn keeps the survivor's hunger snapshot so a same-life re-spawn behaves like carrying food/items over.
+    bool keepInventory = false;
+    LightweightMC::World::GameRules::getInstance().getBool("keep_inventory", keepInventory);
+
+    alive = true;
+    respawnAtMs = 0;
+    lastHurtMs = 0;
+    health = 20.0f;
+    if (!keepInventory)
     {
-        alive = true;
-        respawnAtMs = 0;
-        lastHurtMs = 0;
-        health = 20.0f;
         foodLevel = 20;
         foodSaturationLevel = 5.0f;
         foodExhaustionLevel = 0.0f;
-        fallDistance = 0.0f;
-        air = 30;
-        onFire = false;
-        fire = 0;
-        onGround = false;
-        sleeping = false;
-        sleepTimer = 0;
-        flying = false;
-        sprinting = false;
-
+    }
+    fallDistance = 0.0f;
+    air = 30;
+    onFire = false;
+    fire = 0;
+    onGround = false;
+    sleeping = false;
+    sleepTimer = 0;
+    flying = false;
+    sprinting = false;
         // Same priority order as resetVolatileState: bed first, then world
         // spawn, else literal (0.5, 7.0, 0.5).
         if (hasBedSpawn)
@@ -332,6 +339,8 @@ namespace LightweightMC::Player
             z = 0.5;
         }
     }
+
+
 
     // Vanilla Java Edition 1.8 XP curve (see minecraft.wiki /w/XP):
     // linear 1000 XP per level up to level 15. Levels above 15 are not

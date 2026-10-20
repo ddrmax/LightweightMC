@@ -132,6 +132,7 @@ namespace LightweightMC::Core
         cmdMgr.registerCommand(std::make_shared<BossbarCommand>());
         cmdMgr.registerCommand(std::make_shared<DamageCommand>());
         cmdMgr.registerCommand(std::make_shared<KillCommand>());
+        cmdMgr.registerCommand(std::make_shared<RespawnCommand>()); // aliases /r
         cmdMgr.registerCommand(std::make_shared<LootCommand>());
         cmdMgr.registerCommand(std::make_shared<RideCommand>());
         cmdMgr.registerCommand(std::make_shared<SpectateCommand>());
@@ -880,6 +881,10 @@ namespace LightweightMC::Core
                 // Natural-HP regeneration sweep (0x06 refresh per healed session).
                 // Fixed at the same 20 Hz cadence as the world tick so regen timing stays close to vanilla without a second accumulator.
                 m_network.tickRegeneration(nowMs);
+                // Auto-respawn sweep (Phase 14b): dead PLAY sessions revive per immediate_respawn / respawn_radius / respawnwaves gamerules so clients don't stay stuck on the death HUD; emits the same 0x08 Position + 0x06 UpdateHealth burst as an explicit /respawn.
+
+                m_network.autoRespawnDuePlayers(nowMs);
+
                 // Periodic 1.8+ chunk-stream flush. Fires at 5 Hz (throttle
                 // by running every 4th 50ms tick) so the async WorldStorage
                 // generation worker's outputs reach idle or slow-moving

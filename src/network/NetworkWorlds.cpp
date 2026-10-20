@@ -1020,7 +1020,7 @@ namespace LightweightMC::Network
             std::vector<uint8_t> respawn;
             Network::Packet::writeInt(respawn, m_worldManager.skyDimensionFor(newWorldId));
             respawn.push_back(static_cast<uint8_t>(std::clamp(
-                LightweightMC::ConfigManager::getInstance().get<int>("gameplay", "difficulty", 1), 0, 3))); // difficulty (byte)
+                ConfigManager::getInstance().get<int>("gameplay", "difficulty", 1), 0, 3))); // difficulty (byte)
             respawn.push_back(static_cast<uint8_t>(session.gamemode)); // gamemode (byte)
             Network::Packet::writeString(respawn, "default"); // levelType (string)
             sendPacket(kv.first, 0x07, respawn);

@@ -137,7 +137,7 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
     - natural regen sweep (tickRegeneration emitting S2C Update Health per healed PLAY session) is now
       driven from Server.cpp's fixed 20 Hz tick loop, gated by the natural_health_regeneration gamerule.
   - [ ] PvP and PvE hit detection and knockback calculation.
-  - [ ] Player respawn flow (`0x07 Respawn`).
+  - [x] Player respawn flow (`0x07 Respawn`).
 - [ ] **Administration Commands**
   - [x] `/gamemode <0|1|2|3>` (`0x2B Change Game State`).
   - [ ] `/time set <day|night|ticks>` (`0x03 Time Update`).

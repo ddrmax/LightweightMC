@@ -151,6 +151,63 @@ public:
 };
 
 
+class RespawnCommand : public Command
+{
+public:
+    std::string getName() const override { return "respawn"; }
+    std::string getDescription() const override { return "Force players back to their respawn point immediately."; }
+    std::string getUsage() const override { return "/respawn [targets...]"; }
+    std::vector<std::string> getAliases() const override { return {"r"}; }
+    int getRequiredOpLevel() const override { return 2; }
+    // Force-respawn mutates every targeted session (HP back to full + a
+    // 0x08 Position packet like the tick-loop auto-respawn sweep sends), so
+    // CommandManager must broadcast console replies back into chat as it does
+    // for /damage and /kill.
+    bool affectsPlayerState() const override { return true; }
+
+    void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
+    {
+        // "/respawn" with no args respawns the console caller (chat players get
+        // their own name via ctx.senderName like /kill does); explicit targets
+        // revive exactly those names. Unknown/offline names just fail silently
+        // so spamming the command doesn't crash anything.
+        std::vector<std::string> targets;
+        if (args.empty())
+        {
+            if (!ctx.sender.empty())
+                targets.push_back(ctx.sender);
+        }
+        else
+        {
+            targets.assign(args.begin(), args.end());
+        }
+        if (targets.empty())
+        {
+            ctx.reply("Usage: " + getUsage());
+            return;
+        }
+        int revived = 0;
+        for (const auto &t : targets)
+        {
+            if (ctx.respawnPlayer(t))
+                ++revived;
+        }
+        if (revived == 0)
+        {
+            ctx.reply("respawn failed for every listed target (unknown or already-alive players).");
+        }
+        else if (targets.size() == 1 && revived == 1)
+        {
+            ctx.reply("Respawned " + targets[0] + ".");
+        }
+        else
+        {
+            ctx.reply("Respawned " + std::to_string(revived) + " of " + std::to_string(targets.size()) + " listed targets.");
+        }
+    }
+};
+
+
 class LootCommand : public Command
 {
 public:

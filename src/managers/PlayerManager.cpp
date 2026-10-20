@@ -10,6 +10,7 @@
 #include <cmath>
 #include <algorithm>
 
+
 namespace LightweightMC::Player
 {
     // Free function (declared in managers/PlayerManager.hpp) so the network login
@@ -259,13 +260,13 @@ namespace LightweightMC::Player
         // emit) instead of a hardcoded literal; clamped to 0-3 so a bad file value
         // degrades gracefully instead of shifting subsequent wire bytes.
         joinGame.push_back(static_cast<uint8_t>(std::clamp(
-            LightweightMC::ConfigManager::getInstance().get<int>("gameplay", "difficulty", 1), 0, 3)));
+            ConfigManager::getInstance().get<int>("gameplay", "difficulty", 1), 0, 3)));
         if (currentSession.clientProtocol >= 47)
         {
             // Max Players, Level Type and Reduced Debug Info only exist in 1.8+ (protocol >= 47).
             // Network::Packet::writeInt(joinGame, 100);         // Max Players
             joinGame.push_back(static_cast<uint8_t>(std::clamp(
-                LightweightMC::ConfigManager::getInstance().get<int>("server", "max-players", 100), 1, 255)));
+                ConfigManager::getInstance().get<int>("server", "max-players", 100), 1, 255)));
             Network::Packet::writeString(joinGame, "flat"); // Level Type
             joinGame.push_back(0);                          // Reduced Debug Info
         }
