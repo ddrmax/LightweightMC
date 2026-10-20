@@ -101,6 +101,9 @@ namespace LightweightMC::Network
         // resolved session username ("" when nobody is connected by that name).
         std::string kickSessionByName(const std::string &name, const std::string &reason);
         void denyLoginOnFd(int fd, const std::string &reason);
+        // Phase 13: InvalidSessionToken (S2C wire 0x04) counterpart for the
+        // token-era auth path — sends reason string but keeps the socket open.
+        void denySessionTokenOnFd(int fd, const std::string &reason);
         void sendPacket(int fd, int32_t packetId, const std::vector<uint8_t> &payload);
         void broadcastPacket(int32_t packetId, const std::vector<uint8_t> &payload, int ignoreFd = -1);
         bool start(uint16_t port);

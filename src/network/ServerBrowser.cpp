@@ -1,7 +1,8 @@
 // Master-server / server-list ping handler for MC 1.8 vanilla.
 
 #include "network/ServerBrowser.hpp"
-#include "network/NetworkManager.hpp"
+#include "core/utils.hpp"
+#include <string>
 #include "core/ConfigManager.hpp"
 #include "core/Logger.hpp"
 #include "core/utils.hpp"
@@ -56,7 +57,18 @@ namespace LightweightMC::Network
                               LightweightMC::Network::NetworkManager &net)
         {
             if (n < 8) return false;
-            if (!(bytes[0] == 'G' && bytes[1] == 'E' && bytes[2] == 'T' && bytes[3] == ' '))
+            // Phase 13: accept case-insensitive "GET" + a '/' anywhere in the
+            // first bytes — listings ping bare paths ("GET / HTTP/1.0"), and
+            // this has to agree with the detector in NetworkEvents.cpp's
+            // handleClientData that routes frames here.
+            const bool verbMatch = (bytes[0] == 'G' || bytes[0] == 'g') &&
+                                   (bytes[1] == 'E' || bytes[1] == 'e') &&
+                                   (bytes[2] == 'T' || bytes[2] == 't');
+            bool hasSlash = false;
+            const std::size_t scanLen = n < 64 ? n : 64;
+            for (std::size_t i = 3; i < scanLen; ++i)
+                if (bytes[i] == '/') { hasSlash = true; break; }
+            if (!(verbMatch && hasSlash))
                 return false;
 
             LightweightMC::Core::Logger::info("Server browser ping received on fd=" + std::to_string(clientFd));
@@ -70,8 +82,16 @@ namespace LightweightMC::Network
             const std::uint16_t playerCount = static_cast<std::uint16_t>(net.countOnline());
             const std::uint16_t maxPlayers = static_cast<std::uint16_t>(cfg.template get<int>("server", "max-players", 100));
             const std::uint16_t protocol = 47;
+            // Phase 13: read the configured [auth] server-icon before building datagram
+            const std::string iconB64 = cfg.getString("auth", "server-icon", "");
 
-            const auto datagram = buildStatusDatagram(protocol, serverName, motd, version, playerCount, maxPlayers);
+            std::vector<std::uint8_t> datagram = buildStatusDatagram(protocol, serverName, motd, version, playerCount, maxPlayers);
+            // Phase 13: append "&icon=<base64>" suffix for master-server icon field.
+            if (!iconB64.empty())
+            {
+                const std::string suffix = "&icon=" + iconB64;
+                datagram.insert(datagram.end(), suffix.begin(), suffix.end());
+            }
             const ssize_t sent = ::send(clientFd, datagram.data(), datagram.size(), MSG_NOSIGNAL);
             if (sent < 0)
                 LightweightMC::Core::Logger::warn("Server browser datagram send failed on fd=" + std::to_string(clientFd));

@@ -160,6 +160,11 @@ private:
         // Master-server listing endpoints (comma-separated). Only used
         // when master-server-ping = true.
         emit("auth", "master-server-urls", "");
+        // Phase 13: Base64 PNG/JPEG server icon (max 128x128) appended to
+        // the \xFE\xFD status datagram as &icon=<base64> for listings that
+        // render it. Empty (default) = no &icon field emitted at all, so
+        // servers that never set an icon stay byte-identical to before.
+        emit("auth", "server-icon", "");
 
         // [world]
         // Generation preset selector: overworld / nether / aether / superflat / test-grid.

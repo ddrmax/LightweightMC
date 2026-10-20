@@ -345,6 +345,33 @@ actually change the wire.
 | Client drops connection right after first chunk | `sendPacket` logged `dropped (exceeds 21-bit wire length)` — payload > 2 MiB. Enable the chunk-stream throttle in `Server.cpp` or split the packet on the source side. |
 | `rxBuffer` grew too large / "buffer overflow" log | Incoming packet > 4 MiB. Rare; usually a client bug. Kill the connection. |
 
+## Phase 13 auth/server-browser residuals (what Phase 5 left open)
+
+Audit trail for the vanilla-auth/server-browser gaps tracked across Phase 13;
+the items marked done shipped in that phase, the rest are open:
+
+- **AES-128 CFB on the frame path**: `src/network/AesCfb.cpp` +
+  `include/network/AesCfb.hpp` exist and LoginHandler already arms
+  `session.cipherS2C`/`cipherC2S` on MODERN/LATEST token-auth, but
+  `BaseProtocol::encodeFrame` (and the recv path in
+  `NetworkEvents.cpp::handleClientData`) never consult those members —
+  token-era sessions still travel **plain-framed** end-to-end.
+- **InvalidSessionToken S2C reply**: `NetworkManager::denySessionTokenOnFd`
+  emits wire `0x04` with a plain reason-string payload (kept distinct from
+  CannotConnect `0x03`, which now only flags verify-chain outages) and
+  LoginHandler routes empty/foreign access tokens to it on token-era auth
+  failures — done in Phase 13.
+- **Peer AddPlayer/RemovePlayer**: only Scoreboard packets `0x3B–0x3D` are
+  sent to PLAY sessions today; `encodeAddPlayer`/`encodeRemovePlayer` in
+  `PacketCodec47.hpp` have no invocation outside the `/testpackets` command.
+- **Server-browser master-server ping requester**: inbound GET-ping
+  detection + status datagram (`ServerBrowser.cpp`) work, but the
+  outbound `[auth] master-server-ping` fire-and-forget HTTP call exists in
+  `Authentication.cpp::pingMasterServers`; the `[auth] server-icon` key +
+  trailing `&icon=<base64>` status-datagram suffix fed by the new `[auth]
+  server-icon` key are both in place; only Base64 loading of an actual
+  PNG/JPEG asset remains.
+
 ## Cross-links
 
 - [Home](Home) — general overview and version history.

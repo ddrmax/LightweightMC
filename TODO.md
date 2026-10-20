@@ -180,3 +180,8 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
 - [ ] **🔑 Core Management & Security**
   - [ ] LuckPerms : Fine tuned permissions management.
   - [x] Hunter : adding unblock/remove feature to allow a server (only for custom adresses) 
+
+### 8. 🌐 Vanilla Auth Residuals & Server-Browser Completion (Phase 13)
+- [x] **Server-browser GET ping broadening** (case-insensitive "GET" + '/' scan in `NetworkEvents.cpp::handleClientData` / `ServerBrowser.cpp::handleFromBuffer`, HANDSHAKE and PLAY states).
+- [x] **InvalidSessionToken wire reply** (`NetworkManager::denySessionTokenOnFd`, S2C wire 0x04 + reason string; LoginHandler routes empty/foreign access tokens to it vs CannotConnect 0x03 for verify-chain outages).
+- [x] **`&icon=<base64>` status datagram suffix** fed by new `[auth] server-icon` canonical config key (empty default = byte-identical legacy pings).

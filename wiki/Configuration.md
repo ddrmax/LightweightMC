@@ -40,6 +40,8 @@ aether-active = true
 aether-plane-id = 100
 aether-inventory-policy = standard
 aether-force-gamemode = none
+[auth]
+server-icon = 
 ```
 
 ## `server.properties` reference
@@ -64,6 +66,7 @@ source of truth for both fresh files and schema migration.
 | `aether-plane-id` | `world` | int | `100` | Any signed 32-bit int outside `0` / `-1` / `1` (the vanilla pre-1.12 slots) — the server refuses to boot with a colliding value. | The plane id the Aether special dimension occupies. Read once by `NetworkManager::start()` and used for both the `world_registry` row (via `Database::setWorldById`) and the `m_worlds` map key. Setting a value ≥ 101 pushes `Database::registerWorld`'s `max(world_registry.id) + 1` allocator higher so `/world create` never collides. |
 | `aether-inventory-policy` | `world` | enum string | `standard` | `standard`, `separate`, `restricted` | **0.0.15.** Per-plane inventory policy for the Aether special dimension. `standard` keeps vanilla-Minecraft's cross-plane blob sharing (the flat `players.inventory_blob` column, `world_registry.inventory_policy=0 SYNC`); `separate` opens a per-plane blob keyed on `player_inventories(uuid, world_id)` (`inventory_policy=1`) so a creative sandbox's loot never leaks back to the mining chain (and vice-versa); `restricted` (`inventory_policy=2`) uses the same storage but treats it as one-way — arriving never inherits the source's inventory and leaving never carries items back (PVP / PVE training maps). Persisted to `world_registry` via `Database::setWorldInventoryPolicy` and mirrored onto `WorldManager::setInventoryPolicy` for the hot path. See [Multiworld & Dimensions](Multiworld-and-Dimensions) § "Plane inventory policy". |
 | `aether-force-gamemode` | `world` | enum string | `none` | `none`, `survival`, `creative`, `adventure`, `spectator` | **0.0.15.** Pins `session.gamemode` on entry to Aether (`world_registry.force_gamemode`, `-1 INHERIT` / `0 SURVIVAL` / `1 CREATIVE` / `2 ADVENTURE` / `3 SPECTATOR`). `none` keeps whatever mode the player carried in; the four concrete modes override `session.gamemode` on arrival so a creative sandbox stays creative even when the player was on survival elsewhere. Applied **before** the 0x07 Respawn packet in `NetworkManager::setPlayerWorldAt` so the wire byte and the session's next save mirror agree. |
+| `server-icon` | `auth` | string (Base64) | *(empty)* | Base64-encoded PNG/JPEG ≤ 128×128, or empty = no icon field | **Phase 13.** Appended to the `\xFE\xFD` server-status datagram as a trailing `&icon=<base64>` suffix so master-server listings that support icons render the server logo. Empty (the default) emits no suffix at all — status pings stay byte-identical for servers that never configure an icon. |
 
 ### Machine-readable option array
 

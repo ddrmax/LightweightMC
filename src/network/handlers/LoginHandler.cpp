@@ -84,9 +84,21 @@ namespace LoginHandler
 
             LightweightMC::Core::Logger::warn("Login (Access Token) verify chain failed for fd=" +
                                               std::to_string(clientFd));
-            std::vector<uint8_t> cannot;
-            LightweightMC::Network::Packet::writeShort(cannot, 2);
-            net.sendPacket(clientFd, 0x03, cannot);
+            // Phase 13: distinguish the two vanilla auth failure replies by
+            // what actually went wrong, verified against wiki/Protocol-and-Clients.md
+            // ("Server replies ... 0x02 LoginSuccess / 0x03 CannotConnect / 0x04
+            // InvalidSessionToken") and packet_ids_1.8.json login ids (Login Start =
+            // 0x06, Access Token = 0x07): an empty/foreign token the relay never
+            // issued gets InvalidSessionToken (0x04) — keep socket alive; a full
+            // verify-chain outage on a real token stays CannotConnect (0x03).
+            if (token.empty())
+                net.denySessionTokenOnFd(clientFd, "Invalid session token.");
+            else
+            {
+                std::vector<uint8_t> cannot;
+                LightweightMC::Network::Packet::writeShort(cannot, 2);
+                net.sendPacket(clientFd, 0x03, cannot);
+            }
             return;
         }
 

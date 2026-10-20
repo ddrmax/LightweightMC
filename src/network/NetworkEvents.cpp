@@ -136,12 +136,22 @@ namespace LightweightMC::Network
         // been parsed, so we intercept here rather than treating them as a
         // corrupt frame that disconnects the client silently. Only check
         // while the session is still HANDSHAKE -- real Minecraft clients
-        // will not have "GET " at byte 0.
-        if (session.state == ClientState::HANDSHAKE && session.rxBuffer.size() >= 8)
+        // will not have "GET " at byte 0. Phase 13 extension: listings also
+        // ping bare paths (they send "GET / HTTP/1.0") and some probe with
+        // lowercase verbs, so match "GET" + a '/' in the request line here
+        // instead of requiring the old "GET <space>" byte pair.
+        if ((session.state == ClientState::HANDSHAKE || session.state == ClientState::PLAY) &&
+            session.rxBuffer.size() >= 8)
         {
             const uint8_t *p = session.rxBuffer.data();
-            if (p[0] == 'G' && p[1] == 'E' && p[2] == 'T' && p[3] == ' ')
-            {
+            const bool verbMatch = (p[0] == 'G' || p[0] == 'g') &&
+                                   (p[1] == 'E' || p[1] == 'e') &&
+                                   (p[2] == 'T' || p[2] == 't');
+            bool hasSlash = false;
+            const size_t scanLen = session.rxBuffer.size() < 64 ? session.rxBuffer.size() : 64;
+            for (size_t i = 3; i < scanLen; ++i)
+                if (session.rxBuffer[i] == '/') { hasSlash = true; break; }
+            if (verbMatch && hasSlash)            {
                 Core::Logger::info("[NET BROWSER] fd=" + std::to_string(clientFd) +
                                    " GET-prefix request, emitting server-info datagram");
                 ServerBrowser::handleFromBuffer(session.rxBuffer.data(),
@@ -497,6 +507,22 @@ namespace LightweightMC::Network
         payload.push_back(0);
         sendPacket(fd, 0x03, payload);
         handleDisconnect(fd);
+    }
+
+    // Phase 13: InvalidSessionToken (S2C wire 0x04) — the counterpart of denyLoginOnFd
+    // for the token-era auth-mode path. Wire verified against tools/protocol_seed/
+    // packet_ids_1.8.json + src/network/handlers/LoginHandler.cpp (the server replies
+    // 0x02 LoginSuccess / 0x03 CannotConnect / 0x04 InvalidSessionToken); the payload
+    // is the plain reason string like the other auth-failure replies in this file.
+    // Unlike denyLoginOnFd this keeps the socket open: a token-era client that sent a
+    // stale/foreign session token still gets its LoginStart handshake answered, it
+    // just does not get an authenticated identity — mirrors what community relays do.
+    void NetworkManager::denySessionTokenOnFd(int fd, const std::string &reason)
+    {
+        std::vector<uint8_t> payload;
+        LightweightMC::Network::Packet::writeString(payload, reason);
+        payload.push_back(0);
+        sendPacket(fd, 0x04, payload);
     }
 
     // Kick a connected session by username (case-insensitive like login names).
