@@ -21,7 +21,7 @@ the *last* thing printed before exit.
 | `Overworld (id=0) is disabled; refusing to start because every accessor falls back to it when worldId is unknown or inactive.` | `NetworkSocket.cpp:152` | `overworld-active = false` in `server.properties` (see [Configuration](Configuration)). By design, this is fatal: every accessor path falls back to id 0. Turn it back on. |
 | `Failed to initialize SQLite world storage <path>` | `NetworkSocket.cpp:182` | The per-plane world DB (`world.db`, `nether.db`, `end.db`, `aether.db`) cannot be opened. Usually a disk-full or perms issue on the working directory. |
 | `Failed to bind socket to port.` | `NetworkSocket.cpp:212` | `::bind()` on `m_serverFd` returned −1. Most common cause: another process (an earlier `lightweight_mc`, a shell `nc`, or something unrelated) already holds the port. Kill it, or bump `[server] port` in `server.properties`. |
-| `epoll_wait failed: <strerror(errno)>` | `NetworkEvents.cpp:223` | Not a startup refusal — it is logged inside the running tick loop, and the loop simply returns. If you see this repeatedly the epoll fd is dead and the server is not consuming events any more. Usually `EBADF` after `NetworkManager::stop()` was called while the loop was still spinning; treat it as a stop-the-process situation. |
+| `epoll_wait failed: <strerror(errno)>` | `NetworkEvents.cpp:256` | Not a startup refusal — it is logged inside the running tick loop, and the loop simply returns. If you see this repeatedly the epoll fd is dead and the server is not consuming events any more. Usually `EBADF` after `NetworkManager::stop()` was called while the loop was still spinning; treat it as a stop-the-process situation. |
 
 After a successful start the console should end with:
 
@@ -67,10 +67,10 @@ compare a session's `clientProtocol` against `protocolVersion()` — always go t
 | Log line | Where | Cause / fix |
 | --- | --- | --- |
 | `sendPacket: client <fd> packet id=<n> body=<N> bytes exceeds 21-bit wire length limit, dropping.` | `src/network/NetworkFraming.cpp:103` | The semantic packet's body (varint-header + payload) grew past 2 097 151 bytes. 1.8's varint length field caps at 21 bits, so the frame would be truncated on the wire. Either the packet is a legitimate big `MapChunkBulk` — enable the chunk-stream throttle in `Server.cpp::start()` (5 Hz flush, described on [Installation](Installation#running-the-server)) — or a source-side bug forgot to split. |
-| `Client <fd> rxBuffer exceeded cap (<N> bytes), dropping client.` | `src/network/NetworkEvents.cpp:123` | The client sent a stream that grew past `kMaxRxBufferBytes = 4 MiB` before any valid frame boundary was found. The client is force-disconnected. Almost always a spam/malformed-stream client or a proxy that fragmented a big login burst. Kill the client or fix the client's framing. |
-| `Client <fd> read()=0, treating as disconnect.` | `src/network/NetworkEvents.cpp:115` | Peer closed the socket. Normal — this is what you see every time a client exits. |
-| `send() returned 0 for fd=<fd>, treating as disconnect.` | `src/network/NetworkEvents.cpp:378` | Kernel reports a hangup on the send side. Client vanished mid-frame; the server tears it down. |
-| `send() failed for fd=<fd>: <strerror(errno)>, disconnecting.` | `src/network/NetworkEvents.cpp:393` | Real write error (`ECONNRESET`, `ENOTSOCK`, …). The fd is closed. Often paired with a client crash on the other end of a large chunk burst. |
+| `Client <fd> rxBuffer exceeded cap (<N> bytes), dropping client.` | `src/network/NetworkEvents.cpp:125` | The client sent a stream that grew past `kMaxRxBufferBytes = 4 MiB` before any valid frame boundary was found. The client is force-disconnected. Almost always a spam/malformed-stream client or a proxy that fragmented a big login burst. Kill the client or fix the client's framing. |
+| `Client <fd> read()=0, treating as disconnect.` | `src/network/NetworkEvents.cpp:117` | Peer closed the socket. Normal — this is what you see every time a client exits. |
+| `send() returned 0 for fd=<fd>, treating as disconnect.` | `src/network/NetworkEvents.cpp:560` | Kernel reports a hangup on the send side. Client vanished mid-frame; the server tears it down. |
+| `send() failed for fd=<fd>: <strerror(errno)>, disconnecting.` | `src/network/NetworkEvents.cpp:575` | Real write error (`ECONNRESET`, `ENOTSOCK`, …). The fd is closed. Often paired with a client crash on the other end of a large chunk burst. |
 | `[NET RECV] abort fd=<n> — client not in m_clients (skipped read)` | `src/network/NetworkEvents.cpp:80` | Epoll surfaced a socket that was already removed from `m_clients` (double disconnect race). Harmless debug line, not a real failure. |
 
 
@@ -81,13 +81,40 @@ but if you see them *continuously* the connection is dead:
 
 | Log line | Where | Notes |
 | --- | --- | --- |
-| `epoll_wait failed: <strerror(errno)>` | `src/network/NetworkEvents.cpp:223` | `errno != EINTR`; the epoll fd is broken. Check that the process is still the same one that opened it — a `SIGSEGV` handler may have already closed it (see [Installation](Installation#shutdown--signals)). |
+| `epoll_wait failed: <strerror(errno)>` | `src/network/NetworkEvents.cpp:256` | `errno != EINTR`; the epoll fd is broken. Check that the process is still the same one that opened it — a `SIGSEGV` handler may have already closed it (see [Installation](Installation#shutdown--signals)). |
 | `Failed to bind socket to port.` | `src/network/NetworkSocket.cpp:212` | Fatal — see the startup-refusals section above. |
-| `[NET FLUSH] EAGAIN fd=<n> remainingBytes=<k>` (debug) | `src/network/NetworkEvents.cpp:389` | The client's socket is not currently writable; epoll will re-arm it with `EPOLLOUT`. Normal under load. |
+| `[NET FLUSH] EAGAIN fd=<n> remainingBytes=<k>` (debug) | `src/network/NetworkEvents.cpp:571` | The client's socket is not currently writable; epoll will re-arm it with `EPOLLOUT`. Normal under load. |
 
-`NetworkManager::setNonBlocking(fd)` (`NetworkEvents.cpp:64`) strips the `O_NONBLOCK`
+`NetworkManager::setNonBlocking(fd)` (`NetworkEvents.cpp:66`) strips the `O_NONBLOCK`
 lookup failure silently; if a client socket starts returning `send() failed …
 Operation would block` repeatedly, the flag was not set and the epoll thread is stalling.
+
+## Deferred disconnect teardown (`src/network/NetworkEvents.cpp`)
+
+Disconnects are two-stage on purpose. `handleDisconnect(fd)` is the *queueing* half:
+it saves the player once, flips the session to `ClientState::DISCONNECTED`, stamps a
+steady-clock `disconnectedAtMs` ("queued" marker), removes only the epoll registration,
+and logs at **DEBUG** — `[NET DISCONNECT] tombstone queued fd=<n> …` plus
+`Client <fd> (<name>) queued for disconnect teardown. [IP: …]`. It deliberately does **not**
+`close()` the socket and does not erase `m_clients`, so packet sites that already captured a
+reference to the session earlier in the same tick can still resolve their queued writes without
+a dangling entry.
+
+`flushPendingDisconnects(nowMs)` is the *teardown* half, invoked right after the epoll event loop
+in `pollEvents` (and explicitly in `~NetworkManager`, which is why the destructor body is explicit
+now — a stop/terminate must still drain queued saves + closes). It erases every DISCONNECTED handle,
+performs the deferred `::close(fd)`, emits one **DEBUG** `[NET DISCONNECT] flushed tombstone fd=<n> …`
+diagnostic and the single **INFO** line clients' logs key on:
+
+```
+Client <fd> (<username>) disconnected. [IP: <ip>:<port>]
+```
+
+Idempotence matters: an RD-HUP event, a `send()` failure and a `/kick` in the same tick can all call
+`handleDisconnect(fd)`. The first call does the save; later calls short-circuit with a **DEBUG**
+"already queued, skipping re-save" line so player state is never saved twice into the SQLite row and
+epoll registration is never double-deleted. If you see two INFO "disconnected" lines for one client
+in a run, that's a bug — there should be exactly one, printed by the flush pass.
 
 ## AntiScan interference
 

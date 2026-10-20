@@ -220,6 +220,14 @@ namespace LightweightMC::Network
                                     m_clients, m_worldManager, getWorldStorage(session.worldId), m_database,
                                     *this);
                 break;
+            case ClientState::DISCONNECTED:
+                // Tombstone: handleDisconnect parked this session (epoll registration
+                // already dropped, flushPendingDisconnects closes + erases it after the
+                // pass). Frames that arrived before teardown must not reach handlers —
+                // they are discarded so nothing else references a dead PlayerSession.
+                Core::Logger::debug("[NET DISPATCH] DISCONNECTED fd=" + std::to_string(clientFd) +
+                                    " id=" + hexId(packetId) + " dropped (tombstone)");
+                break;
             }
 
             session.rxBuffer.erase(session.rxBuffer.begin(),
@@ -303,6 +311,15 @@ namespace LightweightMC::Network
             if (it == m_clients.end())
                 continue;
 
+            // Tombstone pass: handleDisconnect parked this session as DISCONNECTED
+            // (epoll registration already dropped) and flushPendingDisconnects has
+            // not erased it yet — skip re-dispatch so queued handlers do not touch a
+            // dead client. The session erase itself runs at the end of pollEvents
+            // (or in ~NetworkManager), closing the socket after any send that referenced
+            // this pass' PlayerSession& can still be serviced.
+            if (it->second.state == ClientState::DISCONNECTED)
+                continue;
+
             // Half-close (RDHUP), full close (HUP) or error (ERR) all funnel
             // into the same disconnect path.
             if (events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
@@ -323,6 +340,16 @@ namespace LightweightMC::Network
             if (events & EPOLLIN)
                 handleClientData(clientFd);
         }
+
+        // Drain every disconnect tombstone queued by this pass: the epoll event loop
+        // has already handed off each dead client's session to handlers/flush paths
+        // that may still reference it in this tick (kickSessionByName queues Disconnect 0x00
+        // then handleDisconnect marks a tombstone and ScoreboardManager::tick below iterates
+        // over sessions again). Erase them now before any further consumers see
+        // ClientState::DISCONNECTED handles.
+        flushPendingDisconnects(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count());
 
         // Scoreboard / tab-list cadence: refresh at most once per second so
         // clients that have not moved in the last second do not pay the
@@ -345,9 +372,25 @@ namespace LightweightMC::Network
         }
     }
 
-    // Tear the client down after a socket error, RDHUP, or an explicit
-    // hangup during flushSendBuffer. Persists player state so a re-login
-    // resumes with the same inventory / position.
+    // Wall-clock ms used for disconnect tombstones so queued teardowns line up
+    // with the same steady_clock timeline pollEvents/tick loops read. Not exposed
+    // in the header because only NetworkEvents + flushPendingDisconnects use it.
+    static inline int64_t pendingDisconnectNow()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // Mark the client for teardown instead of erasing m_clients[fd] immediately.
+    // The old design erased + closed in one step, which corrupted callers that still
+    // hold a PlayerSession& or queued packet for fd later in the same tick (sendBuffer
+    // flushes during ScoreboardManager::tick / kick chains read session state after
+    // handleDisconnect already erased it -> use-after-free). Now the session is parked
+    // as ClientState::DISCONNECTED with a timestamp and flushPendingDisconnects erases
+    // m_clients + closes the socket once the pass' pending references have drained. The
+    // fd's epoll registration is dropped right away so pollEvents stops serving dead
+    // clients while close() stays behind the flush so any queued sendPacket(fd, ...)
+    // for this pass still resolves to a live PlayerSession before teardown.
     void NetworkManager::handleDisconnect(int fd)
     {
         std::string username = "Unauthenticated Client";
@@ -357,22 +400,79 @@ namespace LightweightMC::Network
         if (it == m_clients.end())
             return;
 
+        // Idempotent: an RDHUP / send()==0 / kick cascade can reach the same fd twice
+        // before flushPendingDisconnects drains tombstones. The first pass saved the
+        // player, marked the session and dropped the epoll registration, so later passes
+        // must NOT re-save (the row is already persisted) or double-remove from epoll.
+        if (it->second.state == LightweightMC::Player::ClientState::DISCONNECTED)
+        {
+            Core::Logger::debug("[NET DISCONNECT] tombstone fd=" + std::to_string(fd) +
+                                " queuedAtMs=" + std::to_string(it->second.disconnectedAtMs) +
+                                " — already queued, skipping re-save");
+            return;
+        }
+
         if (!it->second.username.empty())
         {
             username = it->second.username;
             Player::PlayerManager::getInstance().savePlayerState(it->second, m_database);
         }
 
-        m_clients.erase(it);
+        it->second.state = LightweightMC::Player::ClientState::DISCONNECTED;
+        it->second.disconnectedAtMs = pendingDisconnectNow();
 
-        Core::Logger::debug("[NET DISCONNECT] before-scoreboard-cache erase fd=" + std::to_string(fd) +
-                            " (ScoreboardManager::removeClientCache)");
+        Core::Logger::debug("[NET DISCONNECT] tombstone queued fd=" + std::to_string(fd) +
+                            " — flushPendingDisconnects erases m_clients after this tick");
         Managers::ScoreboardManager::getInstance().removeClientCache(fd);
         ::epoll_ctl(m_epollFd, EPOLL_CTL_DEL, fd, nullptr);
-        ::close(fd);
 
-        Core::Logger::info("Client " + std::to_string(fd) + " (" + username +
-                            ") disconnected. [IP: " + ipPort + "]");
+        // Queueing stays quiet (DEBUG) so the single INFO "disconnected" line comes
+        // from flushPendingDisconnects when the deferred close() actually runs.
+        Core::Logger::debug("Client " + std::to_string(fd) + " (" + username +
+                            ") queued for disconnect teardown. [IP: " + ipPort + "]");
+    }
+
+    // Erase every ClientState::DISCONNECTED session handleDisconnect parked and close
+    // the deferred socket fds. pollEvents invokes this right after the epoll event loop
+    // (and ~NetworkManager runs it explicitly), so callers never see a DISCONNECTED
+    // handle outside the narrow window between handleDisconnect and the flush pass —
+    // queued packet sites in that window read a valid PlayerSession whose send() hits
+    // a dead socket instead of a dangling reference. `nowMs` documents the flush
+    // window (steady-clock ms) for diagnostics only; iteration goes over a copy of
+    // the pending fds because each erase mutates m_clients mid-pass.
+    void NetworkManager::flushPendingDisconnects(int64_t nowMs)
+    {
+        std::vector<int> pending;
+        for (const auto &[fd, session] : m_clients)
+        {
+            if (session.state == LightweightMC::Player::ClientState::DISCONNECTED)
+                pending.push_back(fd);
+        }
+
+        for (int fd : pending)
+        {
+            auto it = m_clients.find(fd);
+            if (it == m_clients.end())
+                continue;
+
+            // Capture the fields before erasing — reading them after m_clients.erase(it)
+            // would read a dangling PlayerSession.
+            const std::string username = it->second.username.empty()
+                                             ? "Unauthenticated Client"
+                                             : it->second.username;
+            const int64_t queuedAtMs = it->second.disconnectedAtMs;
+            // Socket stays open until this point so ipPort is still resolvable here.
+            const std::string ipPort = Core::getIpAndPortFromFd(fd);
+
+            m_clients.erase(it);
+            ::close(fd);
+
+            Core::Logger::debug("[NET DISCONNECT] flushed tombstone fd=" + std::to_string(fd) +
+                                " queuedAtMs=" + std::to_string(queuedAtMs) +
+                                " flushWindowMs=" + std::to_string(nowMs));
+            Core::Logger::info("Client " + std::to_string(fd) + " (" + username +
+                                ") disconnected. [IP: " + ipPort + "]");
+        }
     }
     // Phase 10 (ban/kick/whitelist). allowLoginGate answers whether
     // `username` may connect right now: explicit bans always win, and when the
