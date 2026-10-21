@@ -287,7 +287,7 @@ namespace LightweightMC::Network
             const double spawnX = ses.hasBedSpawn ? static_cast<double>(ses.bedX) + 0.5
                                                   : static_cast<double>(ses.spawnX) + 0.5;
             const double spawnY = ses.hasBedSpawn ? static_cast<double>(ses.bedY)
-                                                 : static_cast<double>(ses.spawnY);
+                                                  : static_cast<double>(ses.spawnY);
             const double spawnZ = ses.hasBedSpawn ? static_cast<double>(ses.bedZ) + 0.5
                                                   : static_cast<double>(ses.spawnZ) + 0.5;
             const double dx = ses.x - spawnX;
@@ -381,10 +381,10 @@ namespace LightweightMC::Network
                                      static_cast<int32_t>(ses.foodLevel),
                                      ses.foodSaturationLevel);
             sendPacket(fd, 0x06, hp);
-            Core::Logger::debug("[NET REGEN] player=" + ses.username +
-                                " fd=" + std::to_string(fd) +
-                                " hpBefore=" + std::to_string(before) +
-                                " hpAfter=" + std::to_string(ses.health));
+            Core::Logger::warn("[NET REGEN] player=" + ses.username +
+                               " fd=" + std::to_string(fd) +
+                               " hpBefore=" + std::to_string(before) +
+                               " hpAfter=" + std::to_string(ses.health));
         }
     }
 
