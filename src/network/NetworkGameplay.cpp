@@ -374,16 +374,17 @@ namespace LightweightMC::Network
 
     void NetworkManager::tickRegeneration(int64_t nowMs)
     {
-        // Vanilla-1.8 natural_health_regeneration gamerule gates the sweep; PlayerSession::tickRegen
-        // then applies the 5 s no-damage window + foodLevel >= 9 food-gate + full-HP short-circuit internally.
+        // Survival hunger depletion always ticks for live PLAY survival sessions on the fixed 20 Hz loop — independent of natural_health_regeneration. Movement hooks add pending exhaustion via PlayerHandler; drain converts that into saturation + starvation steps, and idle standing still loses saturation at its own wall-clock cadence (wiki/Hunger.md pipeline exhaustion -> saturation -> starvation).
         bool regenEnabled = true;
         World::GameRules::getInstance().getBool("natural_health_regeneration", regenEnabled);
-        if (!regenEnabled)
-            return;
 
         for (auto &[fd, ses] : m_clients)
         {
             if (ses.state != ClientState::PLAY || !ses.alive)
+                continue;
+            // Survival depletion must run on every 20 Hz tick even when HP regen is gamerule-disabled or blocked by hurt/food gates: standing still still accrues saturation loss via pending foodExhaustionLevel + wall-clock pacing inside PlayerSession::tickSurvivalDrain. Movement hooks (handlePlayerMovement) only add to foodExhaustionLevel without draining sat directly — see wiki/Hunger.md pipeline exhaustion->saturation->starvation.
+            ses.tickSurvivalDrain(nowMs);
+            if (!regenEnabled)
                 continue;
             const float before = ses.health;
             if (!ses.tickRegen(nowMs))

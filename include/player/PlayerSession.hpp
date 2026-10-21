@@ -246,6 +246,12 @@ namespace LightweightMC::Player
         double lastMoveZ{0.0};
         int64_t lastMoveMs{0};
 
+        // ---- Survival hunger depletion cadence (session-only, never persisted).
+        // tickSurvivalDrain() advances this wall-clock cursor whenever it
+        // consumes pending foodExhaustionLevel units against saturation/starvation pacing
+        // so idle standing does not stall the drain loop and moving stays additive via handler hook.
+        int64_t lastHungerTickMs{0};
+
         std::vector<uint8_t> rxBuffer{};
         std::vector<uint8_t> sendBuffer{};
 
@@ -287,6 +293,17 @@ namespace LightweightMC::Player
 
         // Resets volatile state (position, health, food, status flags) to fresh-spawn defaults.
         void resetVolatileState();
+
+        // -------------------------------------------------------------
+        // Survival hunger depletion: separate time-driven drain so that
+        // saturation also decays when a player stands still (movement is
+        // not the only pressure source). PlayerHandler movement hooks add
+        // exhaustion ticks to foodExhaustionLevel; tickSurvivalDrain then
+        // converts crossed exhaustion units into saturation loss and fires
+        // the starvation step (foodLevel-- / saturation reset) on its own
+        // elapsed-time cadence — independent of HP regen pacing.
+        void tickSurvivalDrain(int64_t nowMs);
+
 
         // -------------------------------------------------------------
         // Phase 6 (0.0.15) vanilla-1.8 HP / damage / respawn / XP API.

@@ -201,6 +201,9 @@ namespace LightweightMC::Player
         lastMoveZ = z;
         lastMoveMs = 0;
 
+        // Hunger cadence cursor: first tickSurvivalDrain after login/respawn anchors here so idle depletion starts from a full saturation window rather than an epoch-stale elapsed flood.
+        lastHungerTickMs = 0;
+
         // Clear transient per-session container windows: on reconnect a fresh
         // window is opened that re-populates its contents from the SQLite
         // block_entities row for the container's coord.
@@ -228,6 +231,57 @@ namespace LightweightMC::Player
         }
         yaw = 0.0f;
         pitch = 0.0f;
+    }
+
+    // ------------------------------------------------------------
+    // Survival hunger pipeline (wiki/Hunger.md flow, best-effort not byte-exact 1.8 step counters):
+    //   movement / action hooks accrue foodExhaustionLevel (see PlayerHandler.cpp::handlePlayerMovement exhaustion-only hook)
+    //   tickSurvivalDrain consumes pending whole exhaustion units into saturation loss every 20 Hz NetworkGameplay sweep
+    //   plus an idle standing drain floor on its own wall-clock cadence so non-moving survival players still bleed saturation slowly
+    // When saturation bottoms at <=0 AND foodLevel>0: one starvation step --foodLevel, snap saturation back full (20), zero pending exhaustion remainder.
+    // Creative/adventure/spectator short-circuit; gamerule `hunger-decay-rate-percent` scales motion + idle pressure (hidden extensibility hook like other gamerule reads — no ConfigManager key registration churn).
+    void PlayerSession::tickSurvivalDrain(int64_t nowMs)
+    {
+        if (!alive || gamemode != 0) // survival-only depletion; creative/adventure/spectator untouched
+            return;
+
+        auto &rules = LightweightMC::World::GameRules::getInstance();
+        int64_t decayPct = 100;
+        if (!rules.getInt("hunger-decay-rate-percent", decayPct) || decayPct < 0)
+            decayPct = 100;
+        const double rate = static_cast<double>(decayPct) / 100.0;
+
+        // Idle-standing baseline drain even when zero pending exhaustion from movement: wall-clock accumulator so standing still also decays saturation on cadence (first call anchors cursor).
+        if (lastHungerTickMs == 0)
+            lastHungerTickMs = nowMs;
+
+        const int64_t elapsedMs = nowMs - lastHungerTickMs;
+        const int64_t idleTicks = elapsedMs / 50; // 20 Hz loop cadence
+        if (idleTicks > 0)
+        {
+            lastHungerTickMs += idleTicks * 50;
+            const double idlePressure = static_cast<double>(idleTicks) * 0.002 * rate;
+            foodExhaustionLevel += static_cast<float>(idlePressure);
+            if (foodExhaustionLevel > 40.0f)
+                foodExhaustionLevel = 40.0f;
+        }
+
+        // Convert pending whole exhaustion units into saturation loss regardless of whether movement just fired this tick.
+        while (foodExhaustionLevel >= 1.0f && foodLevel >= 0)
+        {
+            foodExhaustionLevel -= 1.0f;
+            if (foodSaturationLevel > 0.0f)
+                foodSaturationLevel = std::max(0.0f, foodSaturationLevel - 1.0f);
+            else if (foodLevel > 0)
+            {
+                // Starvation transition per observed client logs: empty saturation snaps full and burns one whole food unit.
+                --foodLevel;
+                foodSaturationLevel = 20.0f;
+            }
+        }
+
+        if (foodSaturationLevel < 0.0f)
+            foodSaturationLevel = 0.0f;
     }
 
     // ------------------------------------------------------------
@@ -276,7 +330,7 @@ namespace LightweightMC::Player
             return false;
         if (health >= 20.0f)
             return false;
-        if (foodLevel < 9)
+        if (foodLevel < 18)
             return false;
         if (foodSaturationLevel <= 0.0f)
             return false;
@@ -314,13 +368,7 @@ namespace LightweightMC::Player
         // regen window consumed, then (regenTicks * 2000) ms of regen.
         lastHurtMs += regenDelayMs + regenTicks * 2000;
 
-        // Note: saturation drain now belongs to the survival exhaustion hook in
-        // `PlayerHandler.cpp::handlePlayerMovement` (movement-driven depletion
-        // matches the wire model where clients send position deltas, not per-
-        // frame step counters). Regeneration itself only advances HP pacing so
-        // heal ticks stop mutating food state and eliminate the earlier drift
-        // reports ("lose ~3 exhaustion whenever +1 HP", saturation wobbling at
-        // zero-saturation boundaries) observed under live survival sessions.
+        // Note: regeneration strictly advances HP pacing (+0.5 half-hearts per heal event) and re-anchors the hurt window; it no longer touches saturation. Survival depletion lives in PlayerSession::tickSurvivalDrain (called every 20 Hz NetworkGameplay sweep via NetworkManager::tickRegeneration for live PLAY sessions — exhaustion accrual comes from movement hooks, idle pressure uses lastHungerTickMs wall-clock cadence so standing still also drains). Heal ticks no longer compound against saturation drift that caused the "lose ~3 exhaustion whenever +1 HP" reports.
 
         return health > before;
     }
@@ -349,6 +397,8 @@ namespace LightweightMC::Player
             foodSaturationLevel = 5.0f;
             foodExhaustionLevel = 0.0f;
         }
+        // Re-anchor the hunger cadence cursor so starvation pacing restarts fresh on respawn (match resetVolatileState discipline).
+        lastHungerTickMs = 0;
         fallDistance = 0.0f;
         air = 30;
         onFire = false;
