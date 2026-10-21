@@ -296,11 +296,11 @@ namespace LightweightMC::Core
         // GameRules.
         consoleCtx.applyDamageToPlayer = [this](const std::string &name, float amount, int damageTypeCode) -> bool
         {
-            return m_network.applyDamageToPlayer(name, amount, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), damageTypeCode); // nowMs must be real wall-clock ms; damageTypeCode is the 4th arg
+            return m_network.applyDamageToPlayer(name, amount, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(), damageTypeCode); // share NetworkManager's system_clock-ms tick basis so lastHurtMs deltas match tickRegeneration
         };
         consoleCtx.killPlayer = [this](const std::string &name) -> bool
         {
-            return m_network.killPlayer(name, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); // stamp deaths with real clock, not epoch-zero
+            return m_network.killPlayer(name, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()); // same wall-clock basis as autoRespawnDuePlayers/tickRegeneration so respawn delays track deaths
         };
         consoleCtx.respawnPlayer = [this](const std::string &name) -> bool
         {
@@ -569,11 +569,11 @@ namespace LightweightMC::Core
             // offline) instead of just printing a generic ack.
             consoleCtx.applyDamageToPlayer = [network](const std::string &name, float amount, int damageTypeCode) -> bool
             {
-                return network->applyDamageToPlayer(name, amount, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), damageTypeCode); // nowMs must be real wall-clock ms; damageTypeCode is the 4th arg
+                return network->applyDamageToPlayer(name, amount, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(), damageTypeCode); // share NetworkManager's system_clock-ms tick basis so lastHurtMs deltas match tickRegeneration
             };
             consoleCtx.killPlayer = [network](const std::string &name) -> bool
             {
-                return network->killPlayer(name, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); // stamp deaths with real clock, not epoch-zero
+                return network->killPlayer(name, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()); // same wall-clock basis as autoRespawnDuePlayers/tickRegeneration so respawn delays track deaths
             };
             consoleCtx.respawnPlayer = [network](const std::string &name) -> bool
             {

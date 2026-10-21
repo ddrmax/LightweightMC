@@ -136,7 +136,7 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
     - damage path emits S2C Update Health + Death Combat via NetworkGameplay::applyDamageToPlayer;
     - natural regen sweep (tickRegeneration emitting S2C Update Health per healed PLAY session) is now
       driven from Server.cpp's fixed 20 Hz tick loop, gated by the natural_health_regeneration gamerule.
-    - fixed `/damage`/`/kill` console wiring: both Server.cpp contexts now pass real steady-clock ms into NetworkManager's `nowMs` slot (damageTypeCode stays its own argument); feeding code/epoch stamps into lastHurtMs had made tickRegen heal instantly (`hpBefore=1 hpAfter=20`) and blurred consecutive-hit death transitions.
+    - fixed `/damage`/`/kill` console wiring: both Server.cpp contexts now pass real wall-clock ms on the same system_clock basis as NetworkManager's 20 Hz tick (damageTypeCode stays its own argument); feeding damage-code or epoch-zero stamps into lastHurtMs had made tickRegen heal instantly (`hpBefore=1 hpAfter=20`) and blurred consecutive-hit death transitions, and mismatching steady_clock on the stamp side vs system_clock on the regen side kept elapsed enormous even after the arg order was fixed.
     - food/hunger stance stays vanilla-1.8: no walk/run depletion of foodLevel or foodSaturationLevel, `foodExhaustionLevel` defaults untouched — custom per-step exhaustion would be an optional future hook from movement distance, not mimicked now.
   - [ ] PvP and PvE hit detection and knockback calculation.
   - [x] Player respawn flow (`0x07 Respawn`).
