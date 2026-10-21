@@ -191,6 +191,16 @@ namespace LightweightMC::Player
         lastHurtMs = 0;
         respawnAtMs = 0;
 
+        // ---- Phase 14c movement-validation bookkeeping (session-only). Seed the
+        // tracker with the spawn point so the first incoming 0x04/0x06 packet after
+        // login or respawn compares against a legitimate anchor rather than stale
+        // coordinates from a previous plane. lastMoveMs stays 0 to signal "no prior
+        // accepted move yet", which handlePlayerMovement treats as the login burst.
+        lastMoveX = x;
+        lastMoveY = y;
+        lastMoveZ = z;
+        lastMoveMs = 0;
+
         // Clear transient per-session container windows: on reconnect a fresh
         // window is opened that re-populates its contents from the SQLite
         // block_entities row for the container's coord.

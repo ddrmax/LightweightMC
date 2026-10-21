@@ -5,6 +5,7 @@
 #include "network/AntiScan.hpp"
 #include "core/Logger.hpp"
 #include "core/ConfigManager.hpp"
+#include "world/GameRules.hpp"
 #include "core/utils.hpp"
 #include <sstream>
 #include <algorithm>
@@ -341,116 +342,85 @@ namespace PlayerHandler
             session.onGround = (LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd) != 0);
         }
 
-        // 0.0.15 Aether void-fall hook: if the player has dropped below the
-        // Aether plane's y=-16 sky-void (islands live at y=30..100 with a
-        // floating-island underside; anything under -16 has escaped the
-        // island chain and would otherwise fall through to the Overworld
-        // surface far below), teleport them back to the Overworld spawn.
-        //
-        // Critically, NetworkManager::setPlayerWorldAt persists the DEPARTING
-        // plane's session coordinates into player_positions(uuid, oldWorldId)
-        // before loading the arrival plane's row, so if we teleported with
-        // session.y still sitting at y<=-16 that fall position becomes the
-        // authoritative Aether row and the very next /gotor aether restores
-        // the player to y<=-16 -- which re-triggers this hook and locks them
-        // into a teleport loop. So we snap the session to Aether's world
-        // spawn (WorldManager's setWorldSpawn cache, or the plane's
-        // findStandingFeetY on first visit -- which is what setPlayerWorldAt
-        // itself uses for the "no saved row" arrival path) before invoking
-        // setPlayerWorldAt, guaranteeing the departure-plane save records a
-        // safe y. Non-Aether planes keep vanilla gravity semantics -- the
-        // client drives y on its side, so we simply log a diagnostic and let
-        // the existing broadcastPacket(0x18) below carry the low y back to
-        // the client.
-        if (positionChanged && session.y <= -16.0)
+
+        // ---- Phase 14c movement-validation gate ---------------------------------------------
+        if (positionChanged && session.alive)
         {
-            const int32_t aetherPlaneId =
-                ConfigManager::getInstance().get<int32_t>("world", "aether-plane-id", 100);
-            if (session.worldId == aetherPlaneId)
+            const int64_t nowMs = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+
+            // Seed the tracker on the login burst so legit respawns/teleports don't log a noclip hit.
+            if (session.lastMoveMs == 0)
             {
-                // Resolve the safe Aether respawn point. Prefer an explicit
-                // WorldManager::setWorldSpawn entry (a fork / admin tool may
-                // have pinned Aether's spawn on the world_registry column);
-                // otherwise fall back to the plane's standing-feet scan at
-                // (0,0) so the player lands on whatever island sits beneath
-                // the plane's nominal origin.
-                double spawnX = 0.5, spawnY = 64.0, spawnZ = 0.5;
-                if (!worldManager.getWorldSpawn(aetherPlaneId, spawnX, spawnY, spawnZ))
-                {
-                    auto &aetherStorage = worldManager.getWorldStorageFor(aetherPlaneId);
-                    const int feetY = aetherStorage.findStandingFeetY(0, 0, 100);
-                    spawnX = 0.5;
-                    spawnY = (feetY >= 0) ? static_cast<double>(feetY) + 1.0 : 64.0;
-                    spawnZ = 0.5;
-                }
-                // Re-anchor the session before the plane switch so the
-                // Aether-departure save records the safe spawn. Without this
-                // line the fall position (y<=-16) is written into
-                // player_positions(uuid, aetherPlaneId) and the next /gotor
-                // restores the player into the void -- reproducing this hook
-                // on every re-entry.
-                session.x = spawnX;
-                session.y = spawnY;
-                session.z = spawnZ;
-                session.yaw = 0.0;
-                session.pitch = 0.0;
-                LightweightMC::Core::Logger::info("[AetherVoid] " + session.username +
-                                                  " fell below y=-16 on plane id=" +
-                                                  std::to_string(aetherPlaneId) +
-                                                  " (Aether); re-anchored session to plane spawn (" +
-                                                  std::to_string(spawnX) + ", " +
-                                                  std::to_string(spawnY) + ", " +
-                                                  std::to_string(spawnZ) +
-                                                  ") before routing to Overworld via setPlayerWorldId(0)");
-                // setPlayerWorldAt(hasExplicitPosition=false) now writes the
-                // safe Aether spawn into the departure row, then loads the
-                // player's saved Overworld row (or the Overworld default
-                // spawn) and updates session.worldId / x / y / z / yaw /
-                // pitch accordingly. No additional manual session mutation
-                // is needed after this call.
-                net.setPlayerWorldId(session.username, 0);
-                session.onGround = false;
+                session.lastMoveX = session.x;
+                session.lastMoveY = session.y;
+                session.lastMoveZ = session.z;
+                session.lastMoveMs = nowMs;
             }
             else
             {
-                LightweightMC::Core::Logger::info("[Fall] " + session.username +
-                                                  " below y=-16 on plane id=" +
-                                                  std::to_string(session.worldId) +
-                                                  "; letting vanilla gravity handle the descent");
-            }
-        }
+                const double dx = session.x - session.lastMoveX;
+                const double dy = session.y - session.lastMoveY;
+                const double dz = session.z - session.lastMoveZ;
+                const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-        // Mise à jour des chunks SEULEMENT si la position X/Z a réellement changé
-        if (positionChanged)
-        {
-            int pChunkX = static_cast<int>(std::floor(session.x / 16.0));
-            int pChunkZ = static_cast<int>(std::floor(session.z / 16.0));
+                int64_t walkCfg{4};
+                if (!LightweightMC::World::GameRules::getInstance().getInt("walk-speed-bps", walkCfg))
+                    walkCfg = 4;
+                int64_t sprintCfg{8};
+                if (!LightweightMC::World::GameRules::getInstance().getInt("sprint-speed-bps", sprintCfg))
+                    sprintCfg = 8;
 
-            if (pChunkX != session.currentChunkX || pChunkZ != session.currentChunkZ)
-            {
-                auto packetSender = [&net](int f, int32_t p, const std::vector<uint8_t> &b)
+                const double elapsedSec = std::max(0.05, (nowMs - session.lastMoveMs) / 1000.0);
+                double maxBps = static_cast<double>(walkCfg);
+                if (session.sprinting || session.flying)
+                    maxBps = static_cast<double>(sprintCfg);
+
+                const double allowance = std::max(1.5, maxBps * elapsedSec);
+                if (dist > allowance && dist > 0.0)
                 {
-                    net.sendPacket(f, p, b);
-                };
+                    // Clamp the illegal delta back onto a vanilla sprint vector and warn once per jump.
+                    const double scale = allowance / dist;
+                    session.x = session.lastMoveX + dx * scale;
+                    session.y = session.lastMoveY + dy * scale;
+                    session.z = session.lastMoveZ + dz * scale;
 
-                LightweightMC::Core::Logger::info("Player " + session.username + " moved to chunk (" +
-                                                  std::to_string(pChunkX) + ", " + std::to_string(pChunkZ) + ")");
+                    LightweightMC::Core::Logger::warn("noclip/speed exploit on " + session.username +
+                                                          " (packet id 0x" + std::to_string(packetId) + ", dist=" +
+                                                          std::to_string(dist) + ", allowance=" + std::to_string(allowance) + ")");
 
-                worldManager.updateChunksAroundPlayer(clientFd, session, 5, packetSender);
+                    session.lastMoveX = session.x;
+                    session.lastMoveY = session.y;
+                    session.lastMoveZ = session.z;
+                    session.lastMoveMs = nowMs;
+                }
+                else
+                {
+                    // Clean movement accepted: commit the wire coordinates then track falling so a landing
+                    // tick can push fall damage through NetworkManager::applyDamageToPlayer.
+                    if (!session.flying && dy < 0.0)
+                        session.fallDistance += static_cast<float>(-dy);
+
+                    const float threshold = 3.0f; // vanilla 1.8: >3 airborne blocks before touching ground hurts.
+                    if (!session.onGround && session.fallDistance >= threshold)
+                    {
+                        net.applyDamageToPlayer(session.username, session.fallDistance - threshold + 1.0f, nowMs, 1);
+                        session.fallDistance = 0.0f;
+                    }
+                    else if (session.onGround)
+                    {
+                        session.fallDistance = 0.0f;
+                    }
+
+                    session.lastMoveX = session.x;
+                    session.lastMoveY = session.y;
+                    session.lastMoveZ = session.z;
+                    session.lastMoveMs = nowMs;
+                }
             }
         }
 
-        // Broadcast aux autres joueurs
-        std::vector<uint8_t> teleport;
-        LightweightMC::Network::Packet::writeVarInt(teleport, clientFd);
-        LightweightMC::Network::Packet::writeInt(teleport, static_cast<int32_t>(session.x * 32.0));
-        LightweightMC::Network::Packet::writeInt(teleport, static_cast<int32_t>(session.y * 32.0));
-        LightweightMC::Network::Packet::writeInt(teleport, static_cast<int32_t>(session.z * 32.0));
-        teleport.push_back(static_cast<uint8_t>(session.yaw * 256.0f / 360.0f));
-        teleport.push_back(static_cast<uint8_t>(session.pitch * 256.0f / 360.0f));
-        teleport.push_back(session.onGround ? 1 : 0);
-
-        net.broadcastPacket(0x18, teleport, clientFd);
     }
     void handleAnimation(int clientFd, LightweightMC::Network::NetworkManager &net)
     {

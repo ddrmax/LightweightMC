@@ -236,6 +236,16 @@ namespace LightweightMC::Player
         int64_t lastHurtMs{0};
         int64_t respawnAtMs{0};
 
+        // ---- Phase 14c movement-validation bookkeeping (session-only, never persisted).
+        // handlePlayerMovement accepts vanilla deltas (speed/noclip gate + fall-damage
+        // accumulation) against these cached anchors. A zero timestamp sentinel in lastMoveMs
+        // marks the login burst so the very first incoming packet after login or respawn seeds
+        // the tracker without triggering an exploit warning; subsequent moves derive distance/velocity.
+        double lastMoveX{0.0};
+        double lastMoveY{0.0};
+        double lastMoveZ{0.0};
+        int64_t lastMoveMs{0};
+
         std::vector<uint8_t> rxBuffer{};
         std::vector<uint8_t> sendBuffer{};
 

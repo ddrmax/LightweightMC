@@ -129,8 +129,8 @@ High-performance, event-driven C++20 Minecraft server optimized for low end or L
 
 ### 4. ⚔️ Physics, Health & Gameplay Mechanics
 - [ ] **Movement Validation & Collisions**
-  - [ ] Server-side movement verification (`0x04 Player Position`) to prevent noclip/speed exploits.
-  - [ ] Gravity calculation and fall damage tracking.
+  - [x] Server-side movement verification (`0x04 Player Position`) to prevent noclip/speed exploits (Phase 14c speed gate in `PlayerHandler::handlePlayerMovement` against session.lastMove* anchors with walk/sprint allowances).
+  - [x] Gravity calculation and fall damage tracking (`session.fallDistance` accumulates on non-grounded deltas; landing fires NetworkManager::applyDamageToPlayer fall-code).
 - [ ] **Health & Combat System**
   - [x] Health, food, and saturation packet handling (`0x06 Update Health`).
     - damage path emits S2C Update Health + Death Combat via NetworkGameplay::applyDamageToPlayer;

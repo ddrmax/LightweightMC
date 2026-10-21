@@ -227,6 +227,8 @@ Audit of what Phases 6–7 left open: player death→respawn never emits S2C Res
 
 > **14a/14b progress:** difficulty/max-players now config-driven; respawn sweep (`NetworkManager::autoRespawnDuePlayers` on the 20 Hz tick), `keep_inventory`-aware hunger reset in `PlayerSession::respawn()` and `/respawn`+`/r` command shipped (XP kept per softcore rules). Trade/taming state is intentionally untouched because it isn't modelled server-side.
 
+> **14c progress:** `handlePlayerMovement` now gates C2S position deltas via new transient session anchors + GameRules speed budgets (clamps noclip/speed pings, logs WARN once per jump), and accumulates fallDistance into NetworkManager::applyDamageToPlayer (fall code 1) when landing off ≥3-block drops. Knockback impulse on EntityManager::tick velocity remains outstanding because EntityRecord isn't persisted yet — matching roadmap caveat. Build rc=0 boot 0 ERR verified; runner verdict unchanged from prior baseline probes.
+
 ### Phase 15 — vanilla admin-command completion (remaining ack-only backends)
 The wiki/Commands.md status table drifted after Phases 9–10 resplit (`stub` rows for list/msg/say/whitelist/kick/ban/pardon/save-* and `ack-only` rows for seed/setblock/place/setworldspawn/spawnpoint/version now have live backends — fix the doc in this batch first, verified against src/network/BanList.cpp + NetworkManager::saveAllPlanes + world_registry hooks). Residual command backends to wire: `/difficulty`, `/defaultgamemode`, `/give`, `/banlist`, `/publish`, `setidletimeout` + the `/lwmc <chunkinfo|dumpitem|entity list|holderinfo|mobcaps|playermobcaps>` admin introspection verbs (TODO.md PaperMC box).
 
