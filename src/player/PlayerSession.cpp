@@ -397,8 +397,9 @@ namespace LightweightMC::Player
             foodSaturationLevel = 5.0f;
             foodExhaustionLevel = 0.0f;
         }
-        // Re-anchor the hunger cadence cursor so starvation pacing restarts fresh on respawn (match resetVolatileState discipline).
+        // Hunger cadence cursor: first tickSurvivalDrain after login/respawn anchors here so idle depletion starts from a full saturation window rather than an epoch-stale elapsed flood.
         lastHungerTickMs = 0;
+
         fallDistance = 0.0f;
         air = 30;
         onFire = false;
