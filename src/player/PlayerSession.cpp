@@ -260,7 +260,7 @@ namespace LightweightMC::Player
         if (idleTicks > 0)
         {
             lastHungerTickMs += idleTicks * 50;
-            const double idlePressure = static_cast<double>(idleTicks) * 0.002 * rate;
+            const double idlePressure = static_cast<double>(idleTicks) * 0.2 * rate;
             foodExhaustionLevel += static_cast<float>(idlePressure);
             if (foodExhaustionLevel > 40.0f)
                 foodExhaustionLevel = 40.0f;
@@ -383,20 +383,14 @@ namespace LightweightMC::Player
 
     void PlayerSession::respawn()
     {
-        // Phase 14b: hunger reset now honors the keep_inventory gamerule (wiki/Game-Rules.md, Storage::Database persists it). Vanilla softcore never drops XP on death; food only refills when the rule is off — with keep_inventory=true respawn keeps the survivor's hunger snapshot so a same-life re-spawn behaves like carrying food/items over.
-        bool keepInventory = false;
-        LightweightMC::World::GameRules::getInstance().getBool("keep_inventory", keepInventory);
-
+        // Phase 14b + follow-up: keep_inventory no longer gates hunger restoration on death. Vanilla softcore refills food regardless of items carried: reset foodLevel to full (20), snap saturation to the post-starvation baseline (5.0f), and clear pending exhaustion so respawn starts with a clean survival window independent of item persistence (wiki/Game-Rules.md Player category discipline for keep_inventory still governs XP/items elsewhere, not hunger drain here).
         alive = true;
         respawnAtMs = 0;
         lastHurtMs = 0;
         health = 20.0f;
-        if (!keepInventory)
-        {
-            foodLevel = 20;
-            foodSaturationLevel = 5.0f;
-            foodExhaustionLevel = 0.0f;
-        }
+        foodLevel = 20;
+        foodSaturationLevel = 5.0f;
+        foodExhaustionLevel = 0.0f;
         // Hunger cadence cursor: first tickSurvivalDrain after login/respawn anchors here so idle depletion starts from a full saturation window rather than an epoch-stale elapsed flood.
         lastHungerTickMs = 0;
 

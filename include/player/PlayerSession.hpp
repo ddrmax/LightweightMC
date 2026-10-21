@@ -331,16 +331,14 @@ namespace LightweightMC::Player
         //
         //   onDeath(nowMs)
         //     Flips alive=false, bumps deathCount, records respawnAtMs,
-        //     and (unless keep_inventory is on) will be paired with a
-        //     respawn() at the spawn point by the caller after respawnAtMs
-        //     becomes legal per respawn_radius / immediate_respawn /
-        //     respawnwaves.
-        //
+        //     and is paired with a respawn() at the spawn point by the caller after respawnAtMs becomes legal per respawn_radius / immediate_respawn / respawnwaves.
+
         //   respawn()
         //     Moves the session to spawnX/Y/Z (bed spawn first if hasBed
         //     Spawn, then world spawn), sets HP to 20.0f, clears fallDist
         //     ance/fire/onGround, resets alive=true and clears lastHurt
-        //     Ms/respawnAtMs.
+        //     Ms/respawnAtMs, and always restores survival food to full
+        //     (foodLevel=20 / saturation=5 / exhaustion=0) — independent of keep_inventory.
         //
         //   grantXp(amount)
         //     Adds `amount` XP to totalExperience, updates
