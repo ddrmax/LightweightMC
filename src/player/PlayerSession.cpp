@@ -246,8 +246,10 @@ namespace LightweightMC::Player
         // PvP / fall / drowning / fire / freeze gating is the caller's
         // responsibility -- see NetworkManager::applyDamageToPlayer and
         // EntityManager::tick which consult GameRules for each damage type.
-        if (!alive || amount <= 0.0f) return false;
-        if (gamemode == 1 || gamemode == 3) return false; // creative / spectator invuln
+        if (!alive || amount <= 0.0f)
+            return false;
+        if (gamemode == 1 || gamemode == 3)
+            return false; // creative / spectator invuln
 
         health -= amount;
         lastHurtMs = nowMs;
@@ -270,16 +272,22 @@ namespace LightweightMC::Player
     // across polls without double-counting.
     bool PlayerSession::tickRegen(int64_t nowMs)
     {
-        if (!alive) return false;
-        if (health >= 20.0f) return false;
-        if (foodLevel < 9) return false;
-        if (foodSaturationLevel <= 0.0f) return false;
+        if (!alive)
+            return false;
+        if (health >= 20.0f)
+            return false;
+        if (foodLevel < 9)
+            return false;
+        if (foodSaturationLevel <= 0.0f)
+            return false;
 
         // Skip regen while on fire or drowning. fire / air counters are
         // maintained elsewhere (fire ticks decrement in a future PR;
         // air decrement happens on movement).
-        if (onFire) return false;
-        if (air <= 0) return false;
+        if (onFire)
+            return false;
+        if (air <= 0)
+            return false;
 
         // Optional hidden trigger: `regen-delay-ticks` scales the vanilla-1.8
         // ~5 s no-damage window through the 20 Hz tick loop (default 100 ticks
@@ -291,29 +299,28 @@ namespace LightweightMC::Player
         const int64_t regenDelayMs = delayTicks * 20;
 
         const int64_t elapsed = nowMs - lastHurtMs;
-        if (elapsed < regenDelayMs) return false;
+        if (elapsed < regenDelayMs)
+            return false;
         const int64_t regenWindow = elapsed - regenDelayMs;
         const int64_t regenTicks = regenWindow / 2000;
-        if (regenTicks <= 0) return false;
+        if (regenTicks <= 0)
+            return false;
 
         const float before = health;
-        health += static_cast<float>(regenTicks);
-        if (health > 20.0f) health = 20.0f;
+        health += 0.5; // static_cast<float>(regenTicks);
+        if (health > 20.0f)
+            health = 20.0f;
         // Re-anchor lastHurtMs so the 2 s cadence carries across calls:
         // regen window consumed, then (regenTicks * 2000) ms of regen.
         lastHurtMs += regenDelayMs + regenTicks * 2000;
 
-        // Vanilla-ish side effect observed near-regeneration sweeps carry light saturation drain tied to food exhaustion bookkeeping kept separate from HP math above so damage/respawn timing unchanged (wiki Hunger & Health article models use similar coupling; see wiki/*.md cite when extending survival sim later).
-        if (foodSaturationLevel > 0.0f)
-        {
-            auto &gr2 = rules;
-            int64_t decayPct = 100; // percent of nominal saturation drain applied per regen event -- hidden mod hook via gamerule
-            if (!gr2.getInt("hunger-decay-rate-percent", decayPct) || decayPct < 0)
-                decayPct = 100;
-            const double satStep = 0.1 * (static_cast<double>(decayPct) / 100.0);
-            foodSaturationLevel -= static_cast<float>(satStep);
-            if (foodSaturationLevel < 0.0f) foodSaturationLevel = 0.0f;
-        }
+        // Note: saturation drain now belongs to the survival exhaustion hook in
+        // `PlayerHandler.cpp::handlePlayerMovement` (movement-driven depletion
+        // matches the wire model where clients send position deltas, not per-
+        // frame step counters). Regeneration itself only advances HP pacing so
+        // heal ticks stop mutating food state and eliminate the earlier drift
+        // reports ("lose ~3 exhaustion whenever +1 HP", saturation wobbling at
+        // zero-saturation boundaries) observed under live survival sessions.
 
         return health > before;
     }
@@ -322,34 +329,35 @@ namespace LightweightMC::Player
     {
         alive = false;
         respawnAtMs = nowMs;
-        if (deathCount < 255) ++deathCount;
+        if (deathCount < 255)
+            ++deathCount;
     }
 
     void PlayerSession::respawn()
-{
-    // Phase 14b: hunger reset now honors the keep_inventory gamerule (wiki/Game-Rules.md, Storage::Database persists it). Vanilla softcore never drops XP on death; food only refills when the rule is off — with keep_inventory=true respawn keeps the survivor's hunger snapshot so a same-life re-spawn behaves like carrying food/items over.
-    bool keepInventory = false;
-    LightweightMC::World::GameRules::getInstance().getBool("keep_inventory", keepInventory);
-
-    alive = true;
-    respawnAtMs = 0;
-    lastHurtMs = 0;
-    health = 20.0f;
-    if (!keepInventory)
     {
-        foodLevel = 20;
-        foodSaturationLevel = 5.0f;
-        foodExhaustionLevel = 0.0f;
-    }
-    fallDistance = 0.0f;
-    air = 30;
-    onFire = false;
-    fire = 0;
-    onGround = false;
-    sleeping = false;
-    sleepTimer = 0;
-    flying = false;
-    sprinting = false;
+        // Phase 14b: hunger reset now honors the keep_inventory gamerule (wiki/Game-Rules.md, Storage::Database persists it). Vanilla softcore never drops XP on death; food only refills when the rule is off — with keep_inventory=true respawn keeps the survivor's hunger snapshot so a same-life re-spawn behaves like carrying food/items over.
+        bool keepInventory = false;
+        LightweightMC::World::GameRules::getInstance().getBool("keep_inventory", keepInventory);
+
+        alive = true;
+        respawnAtMs = 0;
+        lastHurtMs = 0;
+        health = 20.0f;
+        if (!keepInventory)
+        {
+            foodLevel = 20;
+            foodSaturationLevel = 5.0f;
+            foodExhaustionLevel = 0.0f;
+        }
+        fallDistance = 0.0f;
+        air = 30;
+        onFire = false;
+        fire = 0;
+        onGround = false;
+        sleeping = false;
+        sleepTimer = 0;
+        flying = false;
+        sprinting = false;
         // Same priority order as resetVolatileState: bed first, then world
         // spawn, else literal (0.5, 7.0, 0.5).
         if (hasBedSpawn)
@@ -372,18 +380,18 @@ namespace LightweightMC::Player
         }
     }
 
-
-
     // Vanilla Java Edition 1.8 XP curve (see minecraft.wiki /w/XP):
     // linear 1000 XP per level up to level 15. Levels above 15 are not
     // tracked; totalExperience still accumulates so /experience <set>
     // can push arbitrary totals.
     int PlayerSession::grantXp(int32_t amount)
     {
-        if (amount == 0) return 0;
+        if (amount == 0)
+            return 0;
         const int32_t prevLevel = experienceLevel;
         totalExperience += amount;
-        if (totalExperience < 0) totalExperience = 0;
+        if (totalExperience < 0)
+            totalExperience = 0;
         experienceLevel = std::min(15, totalExperience / 1000);
         const int remainder = totalExperience - experienceLevel * 1000;
         experienceProgress = static_cast<float>(remainder) / 1000.0f;
@@ -402,21 +410,24 @@ namespace LightweightMC::Player
     {
         uint32_t nonEmpty = 0;
         for (const auto &it : items)
-            if (it.id != -1 && it.count > 0) ++nonEmpty;
+            if (it.id != -1 && it.count > 0)
+                ++nonEmpty;
 
         uint32_t v = nonEmpty;
         do
         {
             uint8_t b = static_cast<uint8_t>(v & 0x7FU);
             v >>= 7;
-            if (v) b |= 0x80;
+            if (v)
+                b |= 0x80;
             out.push_back(b);
         } while (v);
 
         for (int i = 0; i < static_cast<int>(items.size()); ++i)
         {
             const ItemStack &it = items[i];
-            if (it.id == -1 || it.count == 0) continue;
+            if (it.id == -1 || it.count == 0)
+                continue;
             const int16_t slotId = static_cast<int16_t>(i);
             out.push_back(static_cast<uint8_t>((slotId >> 8) & 0xFF));
             out.push_back(static_cast<uint8_t>(slotId & 0xFF));
@@ -434,7 +445,8 @@ namespace LightweightMC::Player
     {
         out.assign(expectedSlotCount > 0 ? expectedSlotCount : 0,
                    ItemStack{-1, 0, 0});
-        if (blob.empty()) return;
+        if (blob.empty())
+            return;
 
         size_t pos = 0;
         uint32_t count = 0;
@@ -443,23 +455,26 @@ namespace LightweightMC::Player
         {
             uint8_t b = blob[pos++];
             count |= static_cast<uint32_t>(b & 0x7FU) << shift;
-            if ((b & 0x80) == 0) break;
+            if ((b & 0x80) == 0)
+                break;
             shift += 7;
-            if (shift > 28) break;
+            if (shift > 28)
+                break;
         }
 
         for (uint32_t i = 0; i < count; ++i)
         {
-            if (pos + 7 > blob.size()) break;
+            if (pos + 7 > blob.size())
+                break;
             uint16_t slot = static_cast<uint16_t>((static_cast<uint16_t>(blob[pos]) << 8) | blob[pos + 1]);
             pos += 2;
             ItemStack it;
             it.id = static_cast<int16_t>((static_cast<int16_t>(static_cast<uint16_t>(blob[pos]) << 8)) |
-                                          static_cast<uint16_t>(blob[pos + 1]));
+                                         static_cast<uint16_t>(blob[pos + 1]));
             pos += 2;
             it.count = blob[pos++];
             it.damage = static_cast<int16_t>((static_cast<int16_t>(static_cast<uint16_t>(blob[pos]) << 8)) |
-                                              static_cast<uint16_t>(blob[pos + 1]));
+                                             static_cast<uint16_t>(blob[pos + 1]));
             pos += 2;
             // `slot` comes off the wire as a uint16_t, so a `slot >= 0` test
             // is always true (-Wtype-limits). out was sized to

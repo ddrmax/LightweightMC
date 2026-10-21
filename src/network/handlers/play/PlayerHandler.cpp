@@ -413,7 +413,7 @@ namespace PlayerHandler
                         session.fallDistance = 0.0f;
                     }
 
-                    // Approximate vanilla-1.8 survival depletion hook: distance travelled through accepted movement packets accrues into foodExhaustionLevel. Wire packets carry position deltas not step counters, so this is best-effort pacing modeled on survival hunger rather than byte-exact per-step 1.8 motion accounting (see wiki/Hunger-style docs when extending). Creative sessions keep starvation off to match vanilla invulnerability intent; sprinting/flying accrue faster like running drains quicker.
+                    // Approximate vanilla-ish depletion driven by accepted wire-position deltas (clients send movement vectors, not step counters — see wiki/Protocol-and-Clients.md). Food model layers exhaustion -> saturation -> starvation rather than eating HP heal side effects directly: each accumulated >=1.0 exhaustion unit consumes one point of foodSaturationLevel scaled implicitly by optional hidden gamerule `hunger-decay-rate-percent` (default 100), and carries leftover fraction forward. Once saturation bottoms at <=0 the session drops one whole foodLevel unit and snaps saturation back to full (20.0f), matching observed client starvation transitions while remaining best-effort pacing since per-motion-class exhaustion weights in vanilla 1.8 are not derivable strictly from C2S packets.
                     if (session.gamemode == 0 && dist > 0.0)
                     {
                         auto &rules = LightweightMC::World::GameRules::getInstance();
@@ -421,18 +421,24 @@ namespace PlayerHandler
                         if (!rules.getInt("hunger-decay-rate-percent", decayPct) || decayPct < 0)
                             decayPct = 100;
 
-                        double perBlock = 0.01; // nominal exhaustion units gained per world block walked
+                        double perBlock = 0.01f;
                         if (session.sprinting || session.flying)
                             perBlock *= 2.0;
                         else if (!session.onGround)
-                            perBlock *= 0.5; // airborne/jumping drains less per horizontal delta in this approximation
+                            perBlock *= 0.5;
 
                         session.foodExhaustionLevel += static_cast<float>(dist * perBlock * (static_cast<double>(decayPct) / 100.0));
-                        if (session.foodExhaustionLevel >= 1.0f)
+
+                        // Crossed exhaustion units first drain saturation, then trigger a clean starvation step when saturations run dry.
+                        while (session.foodExhaustionLevel >= 1.0f)
                         {
-                            const int whole = static_cast<int>(session.foodExhaustionLevel);
-                            session.foodExhaustionLevel -= static_cast<float>(whole);
-                            session.foodLevel = static_cast<int8_t>(std::max(0, static_cast<int>(session.foodLevel) - whole));
+                            session.foodExhaustionLevel -= 1.0f;
+                            session.foodSaturationLevel = std::max(0.0f, session.foodSaturationLevel - 1.0f);
+                            if (session.foodSaturationLevel <= 0.0f && session.foodLevel > 0)
+                            {
+                                --session.foodLevel;
+                                session.foodSaturationLevel = 20.0f;
+                            }
                         }
                     }
 
