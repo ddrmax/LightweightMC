@@ -334,7 +334,7 @@ namespace LightweightMC::Core
         consoleCtx.saveAllPlanes = [this]() -> bool
         {
             const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                                    std::chrono::system_clock::now().time_since_epoch()).count();
             return m_network.saveAllPlanes(nowMs);
         };
         consoleCtx.setAutosaveEnabled = [this](bool enabled) -> void
@@ -606,11 +606,12 @@ namespace LightweightMC::Core
             // threaded console loop -- same pattern as the single-threaded
             // block above. The steady_clock reference in this function's
             // outer scope already lives in the same compilation unit so
-            // std::chrono::steady_clock is unambiguously visible here.
+            // std::chrono::system_clock is unambiguously visible here and
+            // matches the wall-clock basis NetworkGameplay regen/respawn gates use.
             consoleCtx.saveAllPlanes = [network]() -> bool
             {
                 const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                                        std::chrono::system_clock::now().time_since_epoch()).count();
                 return network->saveAllPlanes(nowMs);
             };
             consoleCtx.setAutosaveEnabled = [network](bool enabled) -> void

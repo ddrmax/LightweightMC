@@ -76,6 +76,8 @@ namespace LightweightMC::Network
             if (ses.state != ClientState::PLAY || ses.username != playerName)
                 continue;
             const float before = ses.health;
+            const int64_t prevLastHurtMs = ses.lastHurtMs;
+            const int64_t elapsedBeforeDamage = nowMs - prevLastHurtMs;
             const bool applied = ses.applyDamage(amount, nowMs, damageTypeCode);
             if (!applied)
             {
@@ -98,13 +100,23 @@ namespace LightweightMC::Network
                                         ses.username + " has died");
                 sendPacket(fd, 0x42, death);
             }
-            Core::Logger::debug("[NET DAMAGE] player=" + playerName +
+            Core::Logger::warn("[NET DAMAGE] player=" + playerName +
                                 " fd=" + std::to_string(fd) +
                                 " amount=" + std::to_string(amount) +
                                 " type=" + std::to_string(damageTypeCode) +
                                 " hpBefore=" + std::to_string(before) +
                                 " hpAfter=" + std::to_string(ses.health) +
-                                " alive=" + (ses.alive ? "yes" : "no"));
+                                " alive=" + (ses.alive ? "yes" : "no") +
+                                " prevLastHurtMs=" + std::to_string(prevLastHurtMs) +
+                                " elapsedBeforeDamage=" + std::to_string(elapsedBeforeDamage) +
+                                " nextTickGate5000=" + std::string(elapsedBeforeDamage >= 5000 ? "open" : "closed") +
+                                " respawnAtMs=" + std::to_string(ses.respawnAtMs) +
+                                " deathCount=" + std::to_string(ses.deathCount) +
+                                " foodLevel=" + std::to_string(static_cast<int>(ses.foodLevel)) +
+                                " saturation=" + std::to_string(ses.foodSaturationLevel) +
+                                " exhaustion=" + std::to_string(ses.foodExhaustionLevel) +
+                                " onFire=" + (ses.onFire ? "yes" : "no") +
+                                " air=" + std::to_string(ses.air));
             return true;
         }
         Storage::PlayerData data;
@@ -381,10 +393,20 @@ namespace LightweightMC::Network
                                      static_cast<int32_t>(ses.foodLevel),
                                      ses.foodSaturationLevel);
             sendPacket(fd, 0x06, hp);
+            const int64_t elapsedMs = nowMs - ses.lastHurtMs;
             Core::Logger::warn("[NET REGEN] player=" + ses.username +
                                " fd=" + std::to_string(fd) +
                                " hpBefore=" + std::to_string(before) +
-                               " hpAfter=" + std::to_string(ses.health));
+                               " hpAfter=" + std::to_string(ses.health) +
+                               " lastHurtMs=" + std::to_string(ses.lastHurtMs) +
+                               " elapsedSinceHurt=" + std::to_string(elapsedMs) +
+                               " respawnAtMs=" + std::to_string(ses.respawnAtMs) +
+                               " alive=yes" +
+                               " foodLevel=" + std::to_string(static_cast<int>(ses.foodLevel)) +
+                               " saturation=" + std::to_string(ses.foodSaturationLevel) +
+                               " exhaustion=" + std::to_string(ses.foodExhaustionLevel) +
+                               " onFire=" + (ses.onFire ? "yes" : "no") +
+                               " air=" + std::to_string(ses.air));
         }
     }
 

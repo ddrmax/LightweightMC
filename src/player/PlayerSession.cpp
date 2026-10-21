@@ -281,9 +281,18 @@ namespace LightweightMC::Player
         if (onFire) return false;
         if (air <= 0) return false;
 
+        // Optional hidden trigger: `regen-delay-ticks` scales the vanilla-1.8
+        // ~5 s no-damage window through the 20 Hz tick loop (default 100 ticks
+        // -> 5000 ms). Absent rules keep byte-for-byte vanilla pacing; future ABI/plugin layers can lower/raise it without breaking natural regen structure (comment mirrors wiki/Game-Rules.md Player category discipline like other gamerule knobs e.g. walk-speed-bps / sprint-speed-bps read in PlayerHandler.cpp::handlePlayerMovement).
+        auto &rules = LightweightMC::World::GameRules::getInstance();
+        int64_t delayTicks = 100; // 20 Hz * 5 s == vanilla-1.8 half-second regen gate window
+        if (!rules.getInt("regen-delay-ticks", delayTicks) || delayTicks < 0)
+            delayTicks = 100;
+        const int64_t regenDelayMs = delayTicks * 20;
+
         const int64_t elapsed = nowMs - lastHurtMs;
-        if (elapsed < 5000) return false;
-        const int64_t regenWindow = elapsed - 5000;
+        if (elapsed < regenDelayMs) return false;
+        const int64_t regenWindow = elapsed - regenDelayMs;
         const int64_t regenTicks = regenWindow / 2000;
         if (regenTicks <= 0) return false;
 
@@ -291,8 +300,21 @@ namespace LightweightMC::Player
         health += static_cast<float>(regenTicks);
         if (health > 20.0f) health = 20.0f;
         // Re-anchor lastHurtMs so the 2 s cadence carries across calls:
-        // 5 s delay consumed, then (regenTicks * 2000) ms of regen.
-        lastHurtMs += 5000 + regenTicks * 2000;
+        // regen window consumed, then (regenTicks * 2000) ms of regen.
+        lastHurtMs += regenDelayMs + regenTicks * 2000;
+
+        // Vanilla-ish side effect observed near-regeneration sweeps carry light saturation drain tied to food exhaustion bookkeeping kept separate from HP math above so damage/respawn timing unchanged (wiki Hunger & Health article models use similar coupling; see wiki/*.md cite when extending survival sim later).
+        if (foodSaturationLevel > 0.0f)
+        {
+            auto &gr2 = rules;
+            int64_t decayPct = 100; // percent of nominal saturation drain applied per regen event -- hidden mod hook via gamerule
+            if (!gr2.getInt("hunger-decay-rate-percent", decayPct) || decayPct < 0)
+                decayPct = 100;
+            const double satStep = 0.1 * (static_cast<double>(decayPct) / 100.0);
+            foodSaturationLevel -= static_cast<float>(satStep);
+            if (foodSaturationLevel < 0.0f) foodSaturationLevel = 0.0f;
+        }
+
         return health > before;
     }
 

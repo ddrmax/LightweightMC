@@ -413,6 +413,29 @@ namespace PlayerHandler
                         session.fallDistance = 0.0f;
                     }
 
+                    // Approximate vanilla-1.8 survival depletion hook: distance travelled through accepted movement packets accrues into foodExhaustionLevel. Wire packets carry position deltas not step counters, so this is best-effort pacing modeled on survival hunger rather than byte-exact per-step 1.8 motion accounting (see wiki/Hunger-style docs when extending). Creative sessions keep starvation off to match vanilla invulnerability intent; sprinting/flying accrue faster like running drains quicker.
+                    if (session.gamemode == 0 && dist > 0.0)
+                    {
+                        auto &rules = LightweightMC::World::GameRules::getInstance();
+                        int64_t decayPct = 100;
+                        if (!rules.getInt("hunger-decay-rate-percent", decayPct) || decayPct < 0)
+                            decayPct = 100;
+
+                        double perBlock = 0.01; // nominal exhaustion units gained per world block walked
+                        if (session.sprinting || session.flying)
+                            perBlock *= 2.0;
+                        else if (!session.onGround)
+                            perBlock *= 0.5; // airborne/jumping drains less per horizontal delta in this approximation
+
+                        session.foodExhaustionLevel += static_cast<float>(dist * perBlock * (static_cast<double>(decayPct) / 100.0));
+                        if (session.foodExhaustionLevel >= 1.0f)
+                        {
+                            const int whole = static_cast<int>(session.foodExhaustionLevel);
+                            session.foodExhaustionLevel -= static_cast<float>(whole);
+                            session.foodLevel = static_cast<int8_t>(std::max(0, static_cast<int>(session.foodLevel) - whole));
+                        }
+                    }
+
                     session.lastMoveX = session.x;
                     session.lastMoveY = session.y;
                     session.lastMoveZ = session.z;
