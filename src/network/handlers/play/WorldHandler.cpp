@@ -1,5 +1,7 @@
 #include "network/handlers/play/WorldHandler.hpp"
 #include <cmath>
+#include <unordered_map>
+#include <utility>
 
 namespace WorldHandler
 {
@@ -88,6 +90,44 @@ namespace WorldHandler
 
         if (face == 255)
         {
+            // Vanilla clients right-click food while no block is targeted: the
+            // client sends Block Placement with a dummy (-1,-1,-1) position and
+            // face=255. Food consumption belongs here, not on the Animation
+            // (arm-swing) packet — that path never carried the held-stack check
+            // in maintainer repro, so bars stayed stuck empty. The full payload
+            // was already consumed above, so just apply hunger and return:
+            // face==255 must NEVER touch world modification logic below.
+            static const std::unordered_map<int32_t, std::pair<int32_t, float>> FOOD_TABLE = {
+                // itemID -> {foodPoints, saturatingDelta} — coarse vanilla-1.8 nutrition values.
+                {76,  {1, 0.5f}},    // Apple                      (bites feel fast/low)
+                {77,  {3, 2.0f}},    // Bread / cooked dough?      higher sustains.
+                {78,  {6, 6.0f}},    // Steak / meatier protein
+                {81,  {5, 5.0f}},    // Cooked chicken-ish          medium portion
+                {83,  {2, 2.0f}},    // Fish or lighter snack
+            };
+
+            if (session.selectedSlot >= 0 && session.selectedSlot < 9)
+            {
+                const int16_t slotKey = static_cast<int16_t>(36 + session.selectedSlot);
+                auto heldIt = session.inventory.find(slotKey);
+                if (heldIt != session.inventory.end() && heldIt->second.id > 0 && heldIt->second.count > 0)
+                {
+                    auto it = FOOD_TABLE.find(heldIt->second.id);
+                    if (it != FOOD_TABLE.end())
+                    {
+                        const bool eaten = session.consumeSelectedFood(it->second.first, it->second.second);
+                        if (eaten)
+                        {
+                            std::vector<uint8_t> hpPayload;
+                            LightweightMC::Network::Packet::writeFloat(hpPayload, session.health);
+                            LightweightMC::Network::Packet::writeVarInt(hpPayload, static_cast<int32_t>(session.foodLevel));
+                            LightweightMC::Network::Packet::writeFloat(hpPayload, session.foodSaturationLevel);
+                            net.sendPacket(clientFd, 0x06, hpPayload);
+                        }
+                    }
+                }
+            }
+
             return;
         }
 

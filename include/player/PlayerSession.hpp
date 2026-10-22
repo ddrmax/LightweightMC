@@ -358,9 +358,12 @@ namespace LightweightMC::Player
         //     ancement_messages when > 0.
         //
         //   consumeSelectedFood(foodPoints, saturatingPoints)
-        //     Slot-bar eating hook used by InventoryHandler::handleHeldItemChange
-        //     (and Creative click handler). Looks up the hotbar stack behind
-        //     PlayerSession::selectedSlot (slots live at inventory[36..44]),
+        //     Slot-bar eating hook driven by WorldHandler::handleBlockPlacement's
+        //     face==255 right-click sentinel branch (vanilla clients send Block
+        //     Placement with a dummy (-1,-1,-1) position and face=255 to signal
+        //     "interact with the currently-held consumable" — the old Animation
+        //     arm-swing hook never fired for eating). Looks up the hotbar stack
+        //     behind PlayerSession::selectedSlot (slots live at inventory[36..44]),
         //     applies vanilla-1.8 food math (food += foodPoints clamped to [0,20],
         //     saturation folds into saturating via saturating += satMod, capped by
         //     current foodLevel per vanilla's min(food,sat) rule), and consumes

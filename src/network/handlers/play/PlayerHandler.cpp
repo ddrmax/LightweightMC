@@ -323,6 +323,8 @@ namespace PlayerHandler
     void handlePlayerMovement(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd, int32_t packetId,
                               LightweightMC::World::WorldManager &worldManager, LightweightMC::Network::NetworkManager &net)
     {
+        (void)clientFd;
+        (void)worldManager;
         bool positionChanged = false;
 
         if (packetId == 0x04 || packetId == 0x06) // Position OR Position+Look
@@ -452,41 +454,14 @@ namespace PlayerHandler
         LightweightMC::Network::Packet::writeVarInt(animPacket, clientFd);
         animPacket.push_back(0);
 
-        // Vanilla-style eating hook: clients send Animation (0x0A) whenever the
-        // arm swings while a held stack occupies the selected hotbar slot. If that
-        // stack is an edible item (food IDs from vanilla-1.8 tables) we consume one
-        // unit, bump foodLevel + saturation and immediately re-send Update Health
-        // (0x06) so the in-game bars move even before the client asks for HIC again.
-        static const std::unordered_map<int32_t, std::pair<int32_t, float>> FOOD_TABLE = {
-            // itemID -> {foodPoints, saturatingDelta} — coarse vanilla-1.8 nutrition values.
-            {76,  {1, 0.5f}},    // Apple                      (bites feel fast/low)
-            {77,  {3, 2.0f}},    // Bread / cooked dough?      higher sustains.
-            {78,  {6, 6.0f}},    // Steak / meatier protein
-            {81,  {5, 5.0f}},    // Cooked chicken-ish          medium portion
-            {83,  {2, 2.0f}},    // Fish or lighter snack
-        };
-
-        if (session.selectedSlot >= 0 && session.selectedSlot < 9)
-        {
-            const int16_t slotKey = static_cast<int16_t>(36 + session.selectedSlot);
-            auto heldIt = session.inventory.find(slotKey);
-            if (heldIt != session.inventory.end() && heldIt->second.id > 0 && heldIt->second.count > 0)
-            {
-                auto it = FOOD_TABLE.find(heldIt->second.id);
-                if (it != FOOD_TABLE.end())
-                {
-                    const bool eaten = session.consumeSelectedFood(it->second.first, it->second.second);
-                    if (eaten)
-                    {
-                        std::vector<uint8_t> hpPayload;
-                        LightweightMC::Network::Packet::writeFloat(hpPayload, session.health);
-                        LightweightMC::Network::Packet::writeVarInt(hpPayload, static_cast<int32_t>(session.foodLevel));
-                        LightweightMC::Network::Packet::writeFloat(hpPayload, session.foodSaturationLevel);
-                        net.sendPacket(clientFd, 0x06, hpPayload);
-                    }
-                }
-            }
-        }
+        // NOTE: the eating hook that used to live here (consuming one unit off
+        // the selected hotbar stack whenever an arm-swing packet arrived) was
+        // wrong — vanilla clients right-click food through Block Placement
+        // (C2S 0x08 PLACE_BLOCK, face==255 sentinel), never through Animation.
+        // Food consumption now runs in WorldHandler::handleBlockPlacement's
+        // face==255 branch. Animation keeps its original arm-swing echo only.
+        (void)session;
+        (void)session;
 
         net.broadcastPacket(0x0B, animPacket, clientFd);
     }
