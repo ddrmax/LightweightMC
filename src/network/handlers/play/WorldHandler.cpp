@@ -98,12 +98,41 @@ namespace WorldHandler
             // was already consumed above, so just apply hunger and return:
             // face==255 must NEVER touch world modification logic below.
             static const std::unordered_map<int32_t, std::pair<int32_t, float>> FOOD_TABLE = {
-                // itemID -> {foodPoints, saturatingDelta} — coarse vanilla-1.8 nutrition values.
-                {76,  {1, 0.5f}},    // Apple                      (bites feel fast/low)
-                {77,  {3, 2.0f}},    // Bread / cooked dough?      higher sustains.
-                {78,  {6, 6.0f}},    // Steak / meatier protein
-                {81,  {5, 5.0f}},    // Cooked chicken-ish          medium portion
-                {83,  {2, 2.0f}},    // Fish or lighter snack
+                // ID -> {foodPoints, saturationRatio} — Vanilla 1.8 Protocol 47 Nutrition
+
+                // Basic Produce & Staples
+                {260, {4, 0.3f}}, // Apple (ID 260) -> 4 food (2 shanks), 2.4 saturation
+                {282, {6, 0.6f}}, // Mushroom Stew (ID 282) -> 6 food, 7.2 saturation
+                {297, {5, 0.6f}}, // Bread (ID 297) -> 5 food, 6.0 saturation
+                {357, {2, 0.1f}}, // Cookie (ID 357) -> 2 food, 0.4 saturation
+                {360, {2, 0.3f}}, // Melon Slice (ID 360) -> 2 food, 1.2 saturation
+                {391, {4, 0.6f}}, // Carrot (ID 391) -> 4 food, 4.8 saturation
+                {392, {1, 0.3f}}, // Potato (ID 392) -> 1 food, 0.6 saturation
+                {393, {6, 0.6f}}, // Baked Potato (ID 393) -> 6 food, 7.2 saturation
+                {394, {2, 0.3f}}, // Poisonous Potato (ID 394) -> 2 food, 1.2 saturation
+                {400, {8, 0.3f}}, // Pumpkin Pie (ID 400) -> 8 food, 4.8 saturation
+
+                // Meats (Raw & Cooked)
+                {319, {3, 0.3f}},  // Raw Porkchop (ID 319) -> 3 food, 1.8 saturation
+                {320, {8, 0.8f}},  // Cooked Porkchop (ID 320) -> 8 food, 12.8 saturation
+                {363, {3, 0.3f}},  // Raw Beef (ID 363) -> 3 food, 1.8 saturation
+                {364, {8, 0.8f}},  // Steak (Cooked Beef - ID 364) -> 8 food, 12.8 saturation
+                {365, {2, 0.3f}},  // Raw Chicken (ID 365) -> 2 food, 1.2 saturation
+                {366, {6, 0.6f}},  // Cooked Chicken (ID 366) -> 6 food, 7.2 saturation
+                {367, {4, 0.1f}},  // Rotten Flesh (ID 367) -> 4 food, 0.8 saturation
+                {411, {3, 0.3f}},  // Raw Rabbit (ID 411) -> 3 food, 1.8 saturation
+                {412, {5, 0.6f}},  // Cooked Rabbit (ID 412) -> 5 food, 6.0 saturation
+                {413, {10, 0.6f}}, // Rabbit Stew (ID 413) -> 10 food, 12.0 saturation
+                {423, {2, 0.3f}},  // Raw Mutton (ID 423) -> 2 food, 1.2 saturation
+                {424, {6, 0.8f}},  // Cooked Mutton (ID 424) -> 6 food, 9.6 saturation
+
+                // Fish (ID 349 Raw Fish, ID 350 Cooked Fish - metadata differentiates types if needed)
+                {349, {2, 0.1f}}, // Raw Fish (Cod - ID 349) -> 2 food, 0.4 saturation
+                {350, {5, 0.6f}}, // Cooked Fish (Cod - ID 350) -> 5 food, 6.0 saturation
+
+                // Golden Foods
+                {322, {4, 1.2f}}, // Golden Apple (ID 322) -> 4 food, 9.6 saturation
+                {396, {6, 1.2f}}  // Golden Carrot (ID 396) -> 6 food, 14.4 saturation
             };
 
             if (session.selectedSlot >= 0 && session.selectedSlot < 9)
@@ -275,7 +304,7 @@ namespace WorldHandler
                 // both halves map to the same SQLite row.
                 // ----------------------------------------------------
                 int keyChunkX = targetChunkX, keyChunkZ = targetChunkZ;
-                int keyRelX = targetRelX,   keyRelZ = targetRelZ;
+                int keyRelX = targetRelX, keyRelZ = targetRelZ;
                 if (container.slots == 54)
                 {
                     auto isChestId = [](uint16_t raw)
@@ -288,7 +317,8 @@ namespace WorldHandler
                     int lr = (targetRelX + 15) & 15;
                     if (isChestId(worldStorage.getBlockAt(lc, targetChunkZ, lr, targetY, targetRelZ)))
                     {
-                        keyChunkX = lc; keyRelX = lr;
+                        keyChunkX = lc;
+                        keyRelX = lr;
                     }
                     else
                     {
@@ -297,7 +327,8 @@ namespace WorldHandler
                         int dr = (targetRelZ + 15) & 15;
                         if (isChestId(worldStorage.getBlockAt(targetChunkX, dz, targetRelX, targetY, dr)))
                         {
-                            keyChunkZ = dz; keyRelZ = dr;
+                            keyChunkZ = dz;
+                            keyRelZ = dr;
                         }
                     }
                 }
@@ -307,18 +338,15 @@ namespace WorldHandler
                 if (database.loadContainer(keyChunkX, keyChunkZ, keyRelX, targetY, keyRelZ,
                                            persistedType, persistedBlob))
                 {
-                    LightweightMC::Core::Logger::info("[Container] Loaded saved contents for row ("
-                        + std::to_string(keyChunkX) + ", " + std::to_string(keyChunkZ) + ", "
-                        + std::to_string(keyRelX) + ", " + std::to_string(targetY) + ", "
-                        + std::to_string(keyRelZ) + ")");
+                    LightweightMC::Core::Logger::info("[Container] Loaded saved contents for row (" + std::to_string(keyChunkX) + ", " + std::to_string(keyChunkZ) + ", " + std::to_string(keyRelX) + ", " + std::to_string(targetY) + ", " + std::to_string(keyRelZ) + ")");
                 }
 
                 LightweightMC::Player::WindowInfo &win = session.openWindows[winId];
                 win.chunkX = static_cast<int16_t>(keyChunkX);
                 win.chunkZ = static_cast<int16_t>(keyChunkZ);
-                win.relX   = static_cast<int16_t>(keyRelX);
-                win.y      = static_cast<int16_t>(targetY);
-                win.relZ   = static_cast<int16_t>(keyRelZ);
+                win.relX = static_cast<int16_t>(keyRelX);
+                win.y = static_cast<int16_t>(targetY);
+                win.relZ = static_cast<int16_t>(keyRelZ);
                 win.blockType = existingBlockData;
                 LightweightMC::Player::deserializeContainerItems(persistedBlob,
                                                                  static_cast<int>(container.slots),
@@ -568,8 +596,10 @@ namespace WorldHandler
         int32_t signX = static_cast<int32_t>(val >> 38);
         int32_t signY = LightweightMC::Network::Packet::decodeModernY(val);
         int32_t signZ = static_cast<int32_t>(val << 38 >> 38);
-        if (signX >= (1 << 25)) signX -= (1 << 26);
-        if (signZ >= (1 << 25)) signZ -= (1 << 26);
+        if (signX >= (1 << 25))
+            signX -= (1 << 26);
+        if (signZ >= (1 << 25))
+            signZ -= (1 << 26);
 
         const std::string s1 = LightweightMC::Network::Packet::readStringBounded(data, offset, packetEnd);
         const std::string s2 = LightweightMC::Network::Packet::readStringBounded(data, offset, packetEnd);
