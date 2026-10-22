@@ -48,7 +48,7 @@ namespace PlayHandler
             InventoryHandler::handleHeldItemChange(clientFd, session, data, offset, packetEnd, net);
             break;
         case 0x0A: // Animation (Arm Swing)
-            PlayerHandler::handleAnimation(clientFd, net);
+            PlayerHandler::handleAnimation(clientFd, net, session);
             break;
         case 0x0B: // Entity Action (start/stop following)
             EntityHandler::handleEntityAction(clientFd, session, data, offset, packetEnd, clients);

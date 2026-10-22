@@ -340,17 +340,38 @@ namespace LightweightMC::Player
         //     Ms/respawnAtMs, and always restores survival food to full
         //     (foodLevel=20 / saturation=5 / exhaustion=0) — independent of keep_inventory.
         //
+        //   restoreHungerForRespawn()
+        //     Companion helper called directly from onDeath(): snap the live
+        //     session to the same post-death survival window respawn() will
+        //     land on (food 20 / saturation 5 / exhaustion 0) and zero lastHungerTickMs.
+        //     This keeps keep_inventory orthogonal — it still governs XP/item
+        //     persistence policy elsewhere, but vanilla softcore always refills food
+        //     the instant a player dies so the Update Health packet following death
+        //     already carries restored hunger even before autoRespawnDuePlayers moves
+        //     the avatar to spawn.
+        //
         //   grantXp(amount)
         //     Adds `amount` XP to totalExperience, updates
         //     experienceLevel + experienceProgress using the vanilla-1.8
         //     linear curve (1000 XP per level, level cap 15). Returns the
         //     number of levels gained (0-15) so callers can emit show_adv
         //     ancement_messages when > 0.
-        // -------------------------------------------------------------
+        //
+        //   consumeSelectedFood(foodPoints, saturatingPoints)
+        //     Slot-bar eating hook used by InventoryHandler::handleHeldItemChange
+        //     (and Creative click handler). Looks up the hotbar stack behind
+        //     PlayerSession::selectedSlot (slots live at inventory[36..44]),
+        //     applies vanilla-1.8 food math (food += foodPoints clamped to [0,20],
+        //     saturation folds into saturating via saturating += satMod, capped by
+        //     current foodLevel per vanilla's min(food,sat) rule), and consumes
+        //     one unit off the held stack. Returns true iff something was eaten.
+
         bool applyDamage(float amount, int64_t nowMs, int damageTypeCode = 0);
         bool tickRegen(int64_t nowMs);
         void onDeath(int64_t nowMs);
         void respawn();
+        void restoreHungerForRespawn();
+        bool consumeSelectedFood(int32_t foodPoints, float saturatingPoints);
         int  grantXp(int32_t amount);
     };
 }

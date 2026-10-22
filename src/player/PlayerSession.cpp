@@ -379,6 +379,16 @@ namespace LightweightMC::Player
         respawnAtMs = nowMs;
         if (deathCount < 255)
             ++deathCount;
+
+        // Phase 14 hunger-on-death correction: vanilla softcore refreshes the
+        // survival window the moment a session goes dead, not only when it lands
+        // back at spawn. Callers such as NetworkManager::killPlayer broadcast an
+        // Update Health (0x06) immediately after onDeath(), so without this snap
+        // they keep shipping stale food=starving bars until autoRespawnDuePlayers
+        // eventually runs respawn(). Calling restoreHungerForRespawn() here makes
+        // death unconditional for hunger regardless of keep_inventory; respawn()
+        // repeats the same values at spawn for consistency and movement bookkeeping.
+        restoreHungerForRespawn();
     }
 
     void PlayerSession::respawn()
@@ -425,10 +435,68 @@ namespace LightweightMC::Player
         }
     }
 
+    // Companion to onDeath()/respawn(): vanilla-1.8 softcore survival semantics
+    // say the hunger meter is refilled whenever a session becomes dead (client
+    // immediately sees Update Health 0x06 with full bars) and again when respawn()
+    // drops them at spawn. keep_inventory continues to control XP/item persistence
+    // via other paths — it never suppresses this food reset.
+    void PlayerSession::restoreHungerForRespawn()
+    {
+        foodLevel = 20;
+        foodSaturationLevel = 5.0f;
+        foodExhaustionLevel = 0.0f;
+        // Hunger cadence cursor: first tickSurvivalDrain after login/respawn anchors here so idle depletion starts from a full saturation window rather than an epoch-stale elapsed flood.
+        lastHungerTickMs = 0;
+    }
+
+    bool PlayerSession::consumeSelectedFood(int32_t foodPoints, float saturatingPoints)
+    {
+        if (selectedSlot < 0 || selectedSlot > 8)
+            return false;
+
+        const int16_t slotKey = static_cast<int16_t>(36 + selectedSlot);
+        auto it = inventory.find(slotKey);
+        if (it == inventory.end() || it->second.id <= 0 || it->second.count == 0)
+            return false;
+
+        // Vanilla-1.8 survival math: food level is a small integer 0..20 and
+        // saturating floats are clamped by current food once full ("min(food, sat)"
+        // rule used by tickSurvivalDrain/starvation). Feeding adds raw points and
+        // saturation gain but stays within legal ranges so clients don't see ghost bars.
+        const int32_t previousFood = foodLevel;
+        int32_t newFood = previousFood + foodPoints;
+        if (newFood < 0)
+            newFood = 0;
+        else if (newFood > 20)
+            newFood = 20;
+        foodLevel = static_cast<int8_t>(newFood);
+
+        float satGain = saturatingPoints;
+        if (satGain < 0.0f)
+            satGain = 0.0f;
+        // Cap saturation by the lesser of remaining room to next starvation step
+        // and vanilla max tied to foodLevel as used in tickSurvivalDrain checks.
+        const float cap = static_cast<float>(std::min(20, newFood));
+        foodSaturationLevel = std::min(cap, foodSaturationLevel + satGain);
+        if (foodExhaustionLevel < 0.0f)
+            foodExhaustionLevel = 0.0f;
+
+        // Consume exactly one held unit; drop the slot when empty so later
+        // clicks don't retrigger eating on a phantom item and inventory[36..44]
+        // matches what handleHeldItemChange would show next equip packet.
+        if (it->second.count > 0)
+            --it->second.count;
+
+        if (it->second.count > 0)
+            --it->second.count;
+        return true;
+    }
+
     // Vanilla Java Edition 1.8 XP curve (see minecraft.wiki /w/XP):
     // linear 1000 XP per level up to level 15. Levels above 15 are not
     // tracked; totalExperience still accumulates so /experience <set>
     // can push arbitrary totals.
+
     int PlayerSession::grantXp(int32_t amount)
     {
         if (amount == 0)

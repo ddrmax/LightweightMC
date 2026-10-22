@@ -45,7 +45,8 @@ namespace PlayerHandler
                               LightweightMC::World::WorldManager &worldManager,
                               LightweightMC::Network::NetworkManager &net);
 
-    void handleAnimation(int clientFd, LightweightMC::Network::NetworkManager &net);
+    void handleAnimation(int clientFd, LightweightMC::Network::NetworkManager &net,
+                         LightweightMC::Player::PlayerSession &session);
 
     // 0x03 Flying — C2S packet carrying only the "on ground" flag. Sent by
     // the client every frame while the player is airborne (creative /
