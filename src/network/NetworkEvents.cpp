@@ -30,6 +30,7 @@
 #include <sstream>
 #include <iomanip>
 #include "network/BanList.hpp"
+#include <malloc.h>
 
 namespace LightweightMC::Network
 {
@@ -123,8 +124,8 @@ namespace LightweightMC::Network
         if (session.rxBuffer.size() > kMaxRxBufferBytes)
         {
             Core::Logger::warn("Client " + std::to_string(clientFd) +
-                                " rxBuffer exceeded cap (" + std::to_string(session.rxBuffer.size()) +
-                                " bytes), dropping client.");
+                               " rxBuffer exceeded cap (" + std::to_string(session.rxBuffer.size()) +
+                               " bytes), dropping client.");
             handleDisconnect(clientFd);
             return;
         }
@@ -150,8 +151,13 @@ namespace LightweightMC::Network
             bool hasSlash = false;
             const size_t scanLen = session.rxBuffer.size() < 64 ? session.rxBuffer.size() : 64;
             for (size_t i = 3; i < scanLen; ++i)
-                if (session.rxBuffer[i] == '/') { hasSlash = true; break; }
-            if (verbMatch && hasSlash)            {
+                if (session.rxBuffer[i] == '/')
+                {
+                    hasSlash = true;
+                    break;
+                }
+            if (verbMatch && hasSlash)
+            {
                 Core::Logger::info("[NET BROWSER] fd=" + std::to_string(clientFd) +
                                    " GET-prefix request, emitting server-info datagram");
                 ServerBrowser::handleFromBuffer(session.rxBuffer.data(),
@@ -388,7 +394,8 @@ namespace LightweightMC::Network
     static inline int64_t pendingDisconnectNow()
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch()).count();
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
     }
 
     // Mark the client for teardown instead of erasing m_clients[fd] immediately.
@@ -414,6 +421,7 @@ namespace LightweightMC::Network
         // before flushPendingDisconnects drains tombstones. The first pass saved the
         // player, marked the session and dropped the epoll registration, so later passes
         // must NOT re-save (the row is already persisted) or double-remove from epoll.
+
         if (it->second.state == LightweightMC::Player::ClientState::DISCONNECTED)
         {
             Core::Logger::debug("[NET DISCONNECT] tombstone fd=" + std::to_string(fd) +
@@ -440,6 +448,13 @@ namespace LightweightMC::Network
         // from flushPendingDisconnects when the deferred close() actually runs.
         Core::Logger::debug("Client " + std::to_string(fd) + " (" + username +
                             ") queued for disconnect teardown. [IP: " + ipPort + "]");
+        // Reclaim memory back to Linux kernel if no clients are connected
+        if (m_clients.empty())
+        {
+            // sqlite3_db_release_memory(m_database.);
+            getWorldStorage(0).releaseMemory();
+            ::malloc_trim(0);
+        }
     }
 
     // Erase every ClientState::DISCONNECTED session handleDisconnect parked and close
@@ -476,12 +491,13 @@ namespace LightweightMC::Network
 
             m_clients.erase(it);
             ::close(fd);
+            malloc_trim(0);
 
             Core::Logger::debug("[NET DISCONNECT] flushed tombstone fd=" + std::to_string(fd) +
                                 " queuedAtMs=" + std::to_string(queuedAtMs) +
                                 " flushWindowMs=" + std::to_string(nowMs));
             Core::Logger::info("Client " + std::to_string(fd) + " (" + username +
-                                ") disconnected. [IP: " + ipPort + "]");
+                               ") disconnected. [IP: " + ipPort + "]");
         }
     }
     // Phase 10 (ban/kick/whitelist). allowLoginGate answers whether
@@ -537,7 +553,7 @@ namespace LightweightMC::Network
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         for (auto &[fd, session] : m_clients)
         {
-            if (session.state != LightweightMC::Player::ClientState::PLAY && 
+            if (session.state != LightweightMC::Player::ClientState::PLAY &&
                 session.username.empty())
                 continue;
             std::string candidate = session.username;
@@ -547,7 +563,7 @@ namespace LightweightMC::Network
                 continue;
             const std::string resolved = session.username;
             std::vector<uint8_t> payload;
-            LightweightMC::Network::Packet::writeString(payload, 
+            LightweightMC::Network::Packet::writeString(payload,
                                                         R"({"reason":")" + Core::escapeChatJson(reason) + R"("})");
             payload.push_back(0);
             sendPacket(fd, 0x00, payload);
@@ -556,7 +572,6 @@ namespace LightweightMC::Network
         }
         return {};
     }
-
 
     // Push the pending bytes in session.sendBuffer out of the socket. Loops
     // until drained or until send() reports EAGAIN (in which case we set
@@ -584,7 +599,7 @@ namespace LightweightMC::Network
                 // Linux send() returning 0 signals a hangup; treat as a
                 // disconnect rather than looping forever.
                 Core::Logger::warn("send() returned 0 for fd=" + std::to_string(session.fd) +
-                                    ", treating as disconnect.");
+                                   ", treating as disconnect.");
                 handleDisconnect(session.fd);
                 return;
             }
@@ -599,7 +614,7 @@ namespace LightweightMC::Network
                 return;
             }
             Core::Logger::warn("send() failed for fd=" + std::to_string(session.fd) +
-                                ": " + std::string(std::strerror(errno)) + ", disconnecting.");
+                               ": " + std::string(std::strerror(errno)) + ", disconnecting.");
             handleDisconnect(session.fd);
             return;
         }

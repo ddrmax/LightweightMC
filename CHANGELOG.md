@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 
 - **Difficulty byte wired to config** (`src/managers/PlayerManager.cpp`, `src/network/NetworkWorlds.cpp`, `include/core/ConfigManager.hpp`): canonical `[gameplay] difficulty` key (default 1 Easy; 0 peaceful, 2 normal, 3 hard) auto-backfilled via `forEachCanonicalDefault`; JoinGame (0x01) byte and the Respawn (0x07) difficulty byte in the plane-swap flow now read `ConfigManager::getInstance().get<int>("gameplay","difficulty",1)` clamped 0–3 instead of hardcoded literals, so `/difficulty <mode>` updates the same key both spawn-info packets consult. Verified via boot log (no `ERR]` regressions) + incremental build (`make lightweight_mc`).
 
+### Appendix — SQLite memory & chunk bulk allocation (unreleased)
+- `WorldStorage::init()`: `PRAGMA cache_size = -32;` (~32 KB SQLite page cache).
+- `WorldStorage::releaseMemory()`: calls `sqlite3_db_release_memory(m_db)` then `sqlite3_release_memory(1024 * 1024)`.
+- `NetworkEvents.cpp` disconnect path now calls `getWorldStorage(0).releaseMemory()` instead of direct `sqlite3_release_memory(1024 * 1024)`, retains `malloc_trim(0)`.
+- `NetworkEvents.cpp`: m_clients.empty() guard retained.
 - **XP / ExperienceCommand verified end-to-end**: `include/commands/PlayerCommands.hpp::ExperienceCommand` (alias `/xp`, add|remove|query|set verbs, implicit-add fallback for bare `<target> <amount>`), console + threaded-console + PlayerHandler `grantXpToPlayer` hooks → `NetworkManager::grantPlayerXp` (XP Store totals persisted via `Database::savePlay(db, session)` columns `experienceLevel/experienceProgress/totalExperience`), S2C Experience 0x1f level-up emission gated on the `show_advancement_messages` gamerule. No new XP work shipped this commit — audit only; the path was already live from the Phase 6 backends hotfix.
 
 - **`server.properties` auto-backfill** for the two new `[world]` keys via `ConfigManager::forEachCanonicalDefault` (covers fresh + legacy-schema files).

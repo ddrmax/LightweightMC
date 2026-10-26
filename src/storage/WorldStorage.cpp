@@ -593,7 +593,8 @@ namespace LightweightMC::Storage
         // Enable WAL mode and NORMAL synchronization for optimal I/O performance
         sqlite3_exec(m_db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
         sqlite3_exec(m_db, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
-
+        sqlite3_exec(m_db, "PRAGMA cache_size = -32;", nullptr, nullptr, nullptr);
+        sqlite3_exec(m_db, "PRAGMA temp_store = MEMORY;", nullptr, nullptr, nullptr);
         const char *sqlTables = R"(
         CREATE TABLE IF NOT EXISTS chunks (
             chunk_x INT, chunk_z INT, 
@@ -663,7 +664,7 @@ namespace LightweightMC::Storage
             return;
 
         // Same statement guard as saveBlockChange: whoever holds m_saveStmt
-        //Mutex wins against a concurrent generation-worker insert, and the
+        // Mutex wins against a concurrent generation-worker insert, and the
         // chunk blob is re-read under it (readChunkBlob takes m_getStmtMutex
         // first, matching the existing read-after-write ordering).
         std::lock_guard<std::recursive_mutex> saveLock(m_saveStmtMutex);
@@ -1175,7 +1176,7 @@ namespace LightweightMC::Storage
             const void *blob = sqlite3_column_blob(stmt, 2);
             const int blobBytes = sqlite3_column_bytes(stmt, 2);
             fn(cx, cz, static_cast<const uint8_t *>(blob),
-                static_cast<std::size_t>(blobBytes < 0 ? 0 : blobBytes));
+               static_cast<std::size_t>(blobBytes < 0 ? 0 : blobBytes));
             rc = sqlite3_step(stmt);
         }
         sqlite3_finalize(stmt);
@@ -1203,9 +1204,9 @@ namespace LightweightMC::Storage
         {
             sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
             Core::Logger::warn("WorldStorage: saveRawChunkBlob at (" +
-                                std::to_string(chunkX) + "," +
-                                std::to_string(chunkZ) + ") failed: " +
-                                sqlite3_errmsg(m_db));
+                               std::to_string(chunkX) + "," +
+                               std::to_string(chunkZ) + ") failed: " +
+                               sqlite3_errmsg(m_db));
             return false;
         }
         // Mark the plane's chunk as pre-generated so subsequent WorldStorage
@@ -1224,5 +1225,12 @@ namespace LightweightMC::Storage
         sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
         return true;
     }
-
+    void WorldStorage::releaseMemory()
+    {
+        if (m_db)
+        {
+            sqlite3_db_release_memory(m_db);
+        }
+        sqlite3_release_memory(1024 * 1024);
+    }
 } // namespace LightweightMC::Storage

@@ -331,6 +331,10 @@ namespace LightweightMC::Storage
         bool saveRawChunkBlob(int chunkX, int chunkZ,
                               const uint8_t *compressedBlob,
                               std::size_t blobBytes);
+        // Release SQLite connection memory and trim the global heap. Intended for
+        // last-client disconnect cleanup.
+        void releaseMemory();
+
     };
 
 } // namespace LightweightMC::Storage
