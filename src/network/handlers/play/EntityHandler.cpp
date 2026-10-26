@@ -1,4 +1,5 @@
 #include "network/handlers/play/EntityHandler.hpp"
+#include "versions/v1_8/combat.hpp"
 #include "core/Logger.hpp"
 #include "network/Packet.hpp"
 #include "world/EntityManager.hpp"

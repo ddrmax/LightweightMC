@@ -151,6 +151,7 @@ namespace LightweightMC::World
         bool applyPlayerAttack(int32_t entityId, int32_t attackerFd,
                                int64_t nowMs, int32_t meleeDamage = 0,
                                int knockbackStrength = KNOCKBACK_NONE);
+        void applyPlayerAttack(uint32_t attackerId, float attackerYaw, LightweightMC::Player::PlayerSession& targetSession, int knockbackLevel = 0);
         bool applyPlayerFollow(int32_t entityId, int32_t followerFd);
         bool applyPlayerUnfollow(int32_t entityId);
 

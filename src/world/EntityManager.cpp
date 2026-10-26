@@ -477,6 +477,8 @@ namespace LightweightMC::World
     void EntityManager::tick(const std::unordered_map<int, LightweightMC::Player::PlayerSession> &clients,
                              int64_t nowMs)
     {
+
+        Core::Logger::warn("EntityManager::tick");
         refreshRuleCache();
         std::vector<int32_t> toDestroy;
 
@@ -1171,6 +1173,19 @@ namespace LightweightMC::World
     void EntityManager::setLeashRadius(double r) { m_leashRadius = r; }
     void EntityManager::setAttackCooldownMs(int64_t ms) { m_attackCooldownMs = ms; }
     void EntityManager::setMaxTotal(int32_t cap) { m_maxTotal = cap; }
+    void EntityManager::applyPlayerAttack(uint32_t attackerId, float attackerYaw, LightweightMC::Player::PlayerSession &targetSession, int knockbackLevel)
+    {
+        std::vector<uint8_t> payload;
+        Network::Packet::writeVarInt(payload, static_cast<int32_t>(attackerId));
+        const int16_t vel = static_cast<int16_t>(knockbackLevel * 100);
+        Network::Packet::writeShort(payload, vel);
+        Network::Packet::writeShort(payload, 0);
+        Network::Packet::writeShort(payload, vel);
+        (void)attackerYaw;
+        (void)targetSession.fd;
+        (void)payload;
+    }
+
     void EntityManager::setNetworkSync(bool enabled) { m_networkSync = enabled; }
 
 } // namespace LightweightMC::World

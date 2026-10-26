@@ -110,6 +110,9 @@ private:
         // /difficulty updates this key so a single gamerule drives all
         // wire sites (no per-packet hardcoded literals left).
         emit("gameplay", "difficulty", "1");
+        // [gameplay]
+        // Version behaviour selector...
+        emit("gameplay", "version-behaviour", "1.8");
         emit("server", "motd", "LightweightMC C++ Engine");
 
         // [security]

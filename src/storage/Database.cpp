@@ -25,9 +25,11 @@ namespace LightweightMC::Storage
             return false;
         }
 
-        // Enable WAL mode and NORMAL synchronous setting for performance
-        sqlite3_exec(m_db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
+        // Enable a minimal page cache and DELETE journal (no WAL/shm) to keep
+        // resident memory low; WAL mode's -shm/-wal mappings cost ~1-4 MB per DB.
+        sqlite3_exec(m_db, "PRAGMA journal_mode = DELETE;", nullptr, nullptr, nullptr);
         sqlite3_exec(m_db, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
+        sqlite3_exec(m_db, "PRAGMA cache_size = 256;", nullptr, nullptr, nullptr);
 
         const char *sql = R"(
         CREATE TABLE IF NOT EXISTS books (

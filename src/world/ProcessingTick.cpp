@@ -91,17 +91,31 @@ namespace LightweightMC::World
         {
             switch (k)
             {
-            case KIND_FURNACE: return INTERVAL_FURNACE_MS;
-            case KIND_LIT_FURNACE: return INTERVAL_LIT_FURNACE_MS;
-            case KIND_CROP: case KIND_CARROTS: return INTERVAL_CROP_MS;
-            case KIND_DISPENSER: case KIND_HOPPER: return INTERVAL_DISPENSER_MS;
-            case KIND_BREWING_STAND: return INTERVAL_BREW_MS;
-            case KIND_LAVA: case KIND_WATER: return INTERVAL_FLOW_MS;
-            case KIND_FIRE: return INTERVAL_FIRE_MS;
-            case KIND_SPAWNER: return INTERVAL_SPAWNER_MS;
-            case KIND_TORCH: return INTERVAL_TORCH_MS;
-            case KIND_GROUND: return GROUND_LIFETIME_MS;
-            default: return 0;
+            case KIND_FURNACE:
+                return INTERVAL_FURNACE_MS;
+            case KIND_LIT_FURNACE:
+                return INTERVAL_LIT_FURNACE_MS;
+            case KIND_CROP:
+            case KIND_CARROTS:
+                return INTERVAL_CROP_MS;
+            case KIND_DISPENSER:
+            case KIND_HOPPER:
+                return INTERVAL_DISPENSER_MS;
+            case KIND_BREWING_STAND:
+                return INTERVAL_BREW_MS;
+            case KIND_LAVA:
+            case KIND_WATER:
+                return INTERVAL_FLOW_MS;
+            case KIND_FIRE:
+                return INTERVAL_FIRE_MS;
+            case KIND_SPAWNER:
+                return INTERVAL_SPAWNER_MS;
+            case KIND_TORCH:
+                return INTERVAL_TORCH_MS;
+            case KIND_GROUND:
+                return GROUND_LIFETIME_MS;
+            default:
+                return 0;
             }
         }
 
@@ -110,12 +124,18 @@ namespace LightweightMC::World
             const std::uint16_t id = combinedId >> 4;
             switch (id)
             {
-            case KIND_FURNACE: case KIND_LIT_FURNACE:
-            case KIND_CROP: case KIND_CARROTS:
-            case KIND_DISPENSER: case KIND_HOPPER:
+            case KIND_FURNACE:
+            case KIND_LIT_FURNACE:
+            case KIND_CROP:
+            case KIND_CARROTS:
+            case KIND_DISPENSER:
+            case KIND_HOPPER:
             case KIND_BREWING_STAND:
-            case KIND_LAVA: case KIND_WATER:
-            case KIND_FIRE: case KIND_SPAWNER: case KIND_TORCH:
+            case KIND_LAVA:
+            case KIND_WATER:
+            case KIND_FIRE:
+            case KIND_SPAWNER:
+            case KIND_TORCH:
                 return true;
             default:
                 return false;
@@ -201,12 +221,12 @@ namespace LightweightMC::World
     // that just entered the view will run catch-up at its first tickActiveChunks
     // pass with the same step-budget cap the processChunk enforces.
     void ProcessingTick::seedChunk(Storage::WorldStorage &plane,
-                                    Storage::Database *db,
-                                    std::int32_t worldId,
-                                    std::int32_t cx,
-                                    std::int32_t cz,
-                                    Chunk &chunk,
-                                    std::int64_t nowMs)
+                                   Storage::Database *db,
+                                   std::int32_t worldId,
+                                   std::int32_t cx,
+                                   std::int32_t cz,
+                                   Chunk &chunk,
+                                   std::int64_t nowMs)
     {
         auto &dirty = Storage::DirtyWriter::getInstance();
         const std::uint32_t curEpoch = dirty.epoch(worldId, cx, cz);
@@ -303,12 +323,12 @@ namespace LightweightMC::World
     // per-step side-effects (block flips, container rows, ground drops)
     // through DirtyWriter staging.
     void ProcessingTick::processChunk(Storage::WorldStorage &plane,
-                                       Storage::Database *db,
-                                       std::int32_t worldId,
-                                       std::int32_t cx,
-                                       std::int32_t cz,
-                                       Chunk &chunk,
-                                       std::int64_t nowMs)
+                                      Storage::Database *db,
+                                      std::int32_t worldId,
+                                      std::int32_t cx,
+                                      std::int32_t cz,
+                                      Chunk &chunk,
+                                      std::int64_t nowMs)
     {
         if (chunk.recordCount() == 0)
             return;
@@ -447,7 +467,7 @@ namespace LightweightMC::World
                             {
                                 std::int16_t gy = static_cast<std::int16_t>(rec.relY + 1);
                                 dirty.stageGround(worldId, cx, cz, rec.relX, gy, rec.relZ,
-                                                 rec.aux, 1, 0, stepAt, GROUND_LIFETIME_MS, nowMs);
+                                                  rec.aux, 1, 0, stepAt, GROUND_LIFETIME_MS, nowMs);
                                 ++writes;
                             }
                         }
@@ -462,7 +482,8 @@ namespace LightweightMC::World
                 case KIND_CROP:
                 case KIND_CARROTS:
                 {
-                    if (!doCropGrow) break;
+                    if (!doCropGrow)
+                        break;
                     // state = growth stage (0..7). Block id is the crop id.
                     if (rec.state < 7)
                     {
@@ -535,7 +556,8 @@ namespace LightweightMC::World
                 case KIND_LAVA:
                 case KIND_WATER:
                 {
-                    if (!enableLavaFlow) break;
+                    if (!enableLavaFlow)
+                        break;
                     // Flow propagation: try one neighbour per step and
                     // stage a cell if the neighbour is AIR. Keep it
                     // bounded to one write per record per tick to avoid
@@ -546,10 +568,18 @@ namespace LightweightMC::World
                     int nRelX = rec.relX, nRelZ = rec.relZ;
                     switch (dirIdx)
                     {
-                    case 0: nRelX = rec.relX + 1; break;
-                    case 1: nRelX = rec.relX - 1; break;
-                    case 2: nRelZ = rec.relZ + 1; break;
-                    case 3: nRelZ = rec.relZ - 1; break;
+                    case 0:
+                        nRelX = rec.relX + 1;
+                        break;
+                    case 1:
+                        nRelX = rec.relX - 1;
+                        break;
+                    case 2:
+                        nRelZ = rec.relZ + 1;
+                        break;
+                    case 3:
+                        nRelZ = rec.relZ - 1;
+                        break;
                     }
                     // Neighbour may cross a chunk boundary; only process
                     // if it lands in this chunk. ChunkManager keeps only
@@ -559,7 +589,7 @@ namespace LightweightMC::World
                     if (nRelX >= 0 && nRelX < 16 && nRelZ >= 0 && nRelZ < 16)
                     {
                         const std::uint16_t n = memoCell(worldId, plane, cx, cz,
-                                                        nRelX, rec.relY, nRelZ);
+                                                         nRelX, rec.relY, nRelZ);
                         if ((n >> 4) == Blocks18::AIR && writes < kMaxMutationsPerChunk)
                         {
                             const std::uint16_t flowCombined =
@@ -574,10 +604,12 @@ namespace LightweightMC::World
                 }
                 case KIND_FIRE:
                 {
-                    if (!doFireTick) break;
+                    if (!doFireTick)
+                        break;
                     // Decay: burn state (aux) counts down 4 steps, then
                     // cell drops to AIR via dropCell.
-                    if (rec.aux == 0) rec.aux = 4;
+                    if (rec.aux == 0)
+                        rec.aux = 4;
                     --rec.aux;
                     if (rec.aux == 0)
                     {
@@ -601,7 +633,8 @@ namespace LightweightMC::World
                 {
                     // Torch burns out after 300 s (aux counts down seconds
                     // in 2-s steps). When exhausted, drop the cell.
-                    if (rec.aux == 0) rec.aux = 150;
+                    if (rec.aux == 0)
+                        rec.aux = 150;
                     --rec.aux;
                     if (rec.aux == 0)
                     {
@@ -666,6 +699,30 @@ namespace LightweightMC::World
         }
 
         chunk.setLastTickMs(nowMs);
+    }
+
+    void ProcessingTick::tick()
+    {
+        std::lock_guard<std::mutex> lock(g_groundItemsMutex);
+        for (auto it = g_groundItems.begin(); it != g_groundItems.end();)
+        {
+            if (it->pickupDelayTicks > 0)
+                --it->pickupDelayTicks;
+            ++it->ageTicks;
+            if (it->ageTicks >= 6000)
+            {
+                it = g_groundItems.erase(it);
+                continue;
+            }
+            if (it->pickupDelayTicks == 0)
+            {
+                // AABB distance placeholder check
+                for (int i = 0; i < 0; ++i)
+                {
+                }
+            }
+            ++it;
+        }
     }
 
 } // namespace LightweightMC::World

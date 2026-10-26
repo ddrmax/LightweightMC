@@ -3,9 +3,24 @@
 #include "storage/Database.hpp"
 #include "storage/WorldStorage.hpp"
 #include <cstdint>
+#include <vector>
+#include <mutex>
 
 namespace LightweightMC::World
 {
+    struct GroundItem
+    {
+        int32_t entityId;
+        int32_t itemId;
+        uint8_t count;
+        uint16_t damage;
+        double x, y, z;
+        uint32_t pickupDelayTicks;
+        uint32_t ageTicks;
+    };
+    inline std::vector<GroundItem> g_groundItems;
+    inline std::mutex g_groundItemsMutex;
+
     // ------------------------------------------------------------------
     // ProcessingTick -- the world-processing tick over sparse registries.
     //
@@ -46,6 +61,7 @@ namespace LightweightMC::World
         static constexpr std::uint16_t KIND_GROUND = 0x200;
 
         void init(Storage::Database *db);
+        static void tick();
         Storage::Database *database() const { return m_db; }
 
         // Bring a chunk into the view: seed its record map from the persisted

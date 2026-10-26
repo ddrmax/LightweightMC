@@ -1,4 +1,5 @@
 #include "network/handlers/play/WorldHandler.hpp"
+#include "versions/v1_8/food.hpp"
 #include <cmath>
 #include <unordered_map>
 #include <utility>
@@ -141,10 +142,10 @@ namespace WorldHandler
                 auto heldIt = session.inventory.find(slotKey);
                 if (heldIt != session.inventory.end() && heldIt->second.id > 0 && heldIt->second.count > 0)
                 {
-                    auto it = FOOD_TABLE.find(heldIt->second.id);
-                    if (it != FOOD_TABLE.end())
+                    auto n = LightweightMC::Versions::V1_8::Food::forItem(heldIt->second.id);
+                    if (n.foodPoints > 0)
                     {
-                        const bool eaten = session.consumeSelectedFood(it->second.first, it->second.second);
+                        const bool eaten = session.consumeSelectedFood(n.foodPoints, n.saturation);
                         if (eaten)
                         {
                             std::vector<uint8_t> hpPayload;

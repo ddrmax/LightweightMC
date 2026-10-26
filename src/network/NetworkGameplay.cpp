@@ -183,13 +183,12 @@ namespace LightweightMC::Network
                 continue;
             ses.respawn();
             std::vector<uint8_t> pos;
-            Packet::writeVarInt(pos, fd);
-            Packet::writeInt(pos, static_cast<int32_t>(ses.x * 32.0));
-            Packet::writeInt(pos, static_cast<int32_t>(ses.y * 32.0));
-            Packet::writeInt(pos, static_cast<int32_t>(ses.z * 32.0));
-            pos.push_back(0); // yaw
-            pos.push_back(0); // pitch
-            pos.push_back(1); // onGround
+            Packet::writeDouble(pos, ses.x);
+            Packet::writeDouble(pos, ses.y);
+            Packet::writeDouble(pos, ses.z);
+            Packet::writeFloat(pos, static_cast<float>(ses.yaw));
+            Packet::writeFloat(pos, static_cast<float>(ses.pitch));
+            pos.push_back(0); // flags
             sendPacket(fd, 0x08, pos);
             std::vector<uint8_t> hp;
             writeUpdateHealthPayload(hp, ses.health,

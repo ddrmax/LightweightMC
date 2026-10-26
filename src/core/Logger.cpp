@@ -3,6 +3,7 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 
 namespace LightweightMC::Core
 {
@@ -34,19 +35,22 @@ namespace LightweightMC::Core
         switch (level)
         {
         case LogLevel::INFO:
-            std::cout << "[" << timestamp << "] \033[32m[INFO]\033[0m " << msg << "\n";
+            std::cout << "[" << timestamp << "] \033[32m[INFO]\033[0m  " << msg << "\n";
             break;
-        case LogLevel::WARNING:
-            std::cout << "[" << timestamp << "] \033[33m[WARN]\033[0m " << msg << "\n";
+        case LogLevel::WARN:
+            std::cout << "[" << timestamp << "] \033[33m[WARN]\033[0m  " << msg << "\n";
             break;
         case LogLevel::ERROR:
-            std::cerr << "[" << timestamp << "] \033[31m[ERR]\033[0m  " << msg << "\n";
+            std::cerr << "[" << timestamp << "] \033[31m[ERR]\033[0m   " << msg << "\n";
             break;
         case LogLevel::DEBUG:
-            std::cout << "[" << timestamp << "] \033[34m[DBG]\033[0m  " << msg << "\n";
+            std::cout << "[" << timestamp << "] \033[34m[DBG]\033[0m   " << msg << "\n";
             break;
         case LogLevel::BENCH:
-            std::cout << "[" << timestamp << "] \033[35m[BENCH]\033[0m  " << msg << "\n";
+            std::cout << "[" << timestamp << "] \033[35m[BENCH]\033[0m " << msg << "\n";
+            break;
+        case LogLevel::TRACE:
+            std::cout << "[" << timestamp << "] \033[36m[TRC]\033[0m   " << msg << "\n";
             break;
         }
     }

@@ -72,4 +72,10 @@ namespace InventoryHandler
                            size_t &offset,
                            size_t packetEnd);
 
+    // Atomic inventory mutation helpers (Phase 7/12).
+    void setItem(LightweightMC::Player::PlayerSession &session, int slot, const LightweightMC::Player::ItemStack &item);
+    void removeItem(LightweightMC::Player::PlayerSession &session, int slot);
+    void decreaseCount(LightweightMC::Player::PlayerSession &session, int slot, int amount);
+    void applyToolDamage(LightweightMC::Player::PlayerSession &session, int slot, int amount);
+
 } // namespace InventoryHandler

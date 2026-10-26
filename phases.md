@@ -73,7 +73,7 @@ I'm interpreting "vanilla server 1.8" as the pre-1.9 Java Edition reference serv
 | Server sends `0x01 Login (Access Token)`; client replies `0x03 KeepAlive`/`0x04 Disconnect`; server does `POST https://login.minecraft.net/verify?token=` (or `/profile/player`) with SHA-1-signed or token-based identity, then sends `0x02 Login Success` with the account's UUID. | **Absent** — server sends `0x02 Login Success` immediately with a locally-generated UUID; no HTTP, no crypto, no rejection path. |
 | AES-128 CFB session encryption once auth succeeds (all subsequent packets encrypted with the shared session key). | **Absent** — `BaseProtocol::encodeFrame` writes plain varint framing; a comment mentions an "RPC XOR era framer if you flip it on" but there is no vanilla AES path. |
 | Server-browser master-server ping (short HTTP `GET` to `http://host:port//` returning `\xFE\xFD…` with server name/MOTD/player counts). | **Absent**. `motd`, `max-players`, `port` are read from config but no HTTP-side response is built, and `/ping` is `ack-only`. |
-| `banned-players.txt`, `banned-ips.txt`, `banned-agents.txt`, `whitelist.txt`, `server_name.txt`, `users.dat`-style persistence files. | **Absent** — the ban/kick/whitelist commands are stubs (see §1.3). |
+| `banned-players.txt`, `banned-ips.txt`, `banned-agents.txt`, `whitelist.txt`, `server_name.txt`, `users.dat`-style persistence files. | **Partial** — ban/kick/whitelist implemented in `src/network/BanList.cpp` using `banned-players.json` + `banned-ips.json` + `whitelist.json` sidecars (rewrite-on-change, boot import); `banned-agents.txt`/`server_name.txt`/`users.dat` still absent. |
 
 ### 2.2 Core gameplay simulation
 

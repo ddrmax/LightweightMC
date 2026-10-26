@@ -126,7 +126,7 @@ namespace PlayerHandler
             // 0.0.16 world-control hooks: /setworldspawn, /seed, /setblock,
             // /place and /spawnpoint issued from the in-game chat. /setblock
             // and /place write on the caller's current plane (PlayerSession:
-            //:worldId) so a chat command from a Nether-logged player edits
+            //: worldId) so a chat command from a Nether-logged player edits
             // Nether rather than the Overworld.
             ctx.senderWorldId = session.worldId;
             ctx.setWorldSpawn = [&net](const std::string &worldName, double x, double y, double z) -> bool
@@ -205,7 +205,8 @@ namespace PlayerHandler
             ctx.saveAllPlanes = [&net]() -> bool
             {
                 const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       std::chrono::steady_clock::now().time_since_epoch()).count();
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count();
                 return net.saveAllPlanes(nowMs);
             };
             ctx.setAutosaveEnabled = [&net](bool enabled) -> void
@@ -346,13 +347,13 @@ namespace PlayerHandler
             session.onGround = (LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd) != 0);
         }
 
-
         // ---- Phase 14c movement-validation gate ---------------------------------------------
         if (positionChanged && session.alive)
         {
             const int64_t nowMs = static_cast<int64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count());
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
 
             // Seed the tracker on the login burst so legit respawns/teleports don't log a noclip hit.
             if (session.lastMoveMs == 0)
@@ -391,8 +392,8 @@ namespace PlayerHandler
                     session.z = session.lastMoveZ + dz * scale;
 
                     LightweightMC::Core::Logger::warn("noclip/speed exploit on " + session.username +
-                                                          " (packet id 0x" + std::to_string(packetId) + ", dist=" +
-                                                          std::to_string(dist) + ", allowance=" + std::to_string(allowance) + ")");
+                                                      " (packet id 0x" + std::to_string(packetId) + ", dist=" +
+                                                      std::to_string(dist) + ", allowance=" + std::to_string(allowance) + ")");
 
                     session.lastMoveX = session.x;
                     session.lastMoveY = session.y;
@@ -445,7 +446,6 @@ namespace PlayerHandler
                 }
             }
         }
-
     }
     void handleAnimation(int clientFd, LightweightMC::Network::NetworkManager &net,
                          LightweightMC::Player::PlayerSession &session)
@@ -532,15 +532,21 @@ namespace PlayerHandler
         (void)clientFd;
     }
 
-    void handleClientCommand(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd)
+    void handleClientCommand(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd,
+                             LightweightMC::Network::NetworkManager &net)
     {
         // Wire: byte commandId, then int32 parameter (4 raw bytes).
-        const int32_t commandId = LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd);
-        for (int i = 0; i < 4 && offset < packetEnd; ++i)
-            ++offset;
+        const int32_t commandId = LightweightMC::Network::Packet::readVarIntBounded(data, offset, packetEnd, 1);
 
         LightweightMC::Core::Logger::info("[ClientCommand] " + session.username +
                                           " id=" + std::to_string(commandId));
+        if (commandId == 0)
+        {
+            // session.respawn();
+            net.respawnPlayer(session.username);
+            net.setPlayerWorldId(session.username, 0);
+            LightweightMC::Core::Logger::info("[Respawn] " + session.username + " respawned via death screen");
+        }
         (void)clientFd;
     }
 

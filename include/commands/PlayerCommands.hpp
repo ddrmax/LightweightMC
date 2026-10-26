@@ -299,7 +299,13 @@ public:
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Object given.");
+        std::string target = args[0];
+        std::string item = args[1];
+        int count = (args.size() >= 3) ? std::stoi(args[2]) : 1;
+        if (ctx.giveItemHook(target, item, count))
+            ctx.reply("Object given.");
+        else
+            ctx.reply("Failed to give item.");
     }
 };
 

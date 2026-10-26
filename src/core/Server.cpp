@@ -1,4 +1,5 @@
 #include "core/Server.hpp"
+#include <malloc.h>
 #include "core/Logger.hpp"
 #include <iostream>
 #include <algorithm>
@@ -17,7 +18,7 @@
 #include "network/Packet.hpp"
 #include "core/utils.hpp"
 #include "network/BanList.hpp"
-#include "plugins/PluginManager.hpp"
+#include "network/RconServer.hpp"
 
 #include <termios.h>
 #include <unistd.h>
@@ -122,9 +123,9 @@ namespace LightweightMC::Core
         cmdMgr.registerCommand(std::make_shared<WorldCommand>());
         // Phase 8 (0.0.16) world-model trigger: /import-world and /export-
         // world consult CommandContext::importWorldFromPath / exportWorldTo
-        //Path closures that Server.cpp wires to NetworkManager. See
-        //include/commands/WorldCommands.hpp for the two command classes and
-        //src/network/NetworkWorlds.cpp for the sqlite backend implementation.
+        // Path closures that Server.cpp wires to NetworkManager. See
+        // include/commands/WorldCommands.hpp for the two command classes and
+        // src/network/NetworkWorlds.cpp for the sqlite backend implementation.
         cmdMgr.registerCommand(std::make_shared<ImportWorldCommand>());
         cmdMgr.registerCommand(std::make_shared<ExportWorldCommand>());
 
@@ -334,7 +335,8 @@ namespace LightweightMC::Core
         consoleCtx.saveAllPlanes = [this]() -> bool
         {
             const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch()).count();
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
             return m_network.saveAllPlanes(nowMs);
         };
         consoleCtx.setAutosaveEnabled = [this](bool enabled) -> void
@@ -395,7 +397,6 @@ namespace LightweightMC::Core
             Network::whitelistRemove(name);
             return true;
         };
-
 
         CommandManager::getInstance().executeCommand(consoleCtx, inputLine);
     }
@@ -611,7 +612,8 @@ namespace LightweightMC::Core
             consoleCtx.saveAllPlanes = [network]() -> bool
             {
                 const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::system_clock::now().time_since_epoch()).count();
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
                 return network->saveAllPlanes(nowMs);
             };
             consoleCtx.setAutosaveEnabled = [network](bool enabled) -> void
@@ -622,57 +624,56 @@ namespace LightweightMC::Core
             {
                 return network->autosaveEnabled();
             };
-        consoleCtx.banPlayerHook = [](const std::string &name, const std::string &reason) -> bool
-        {
-            Network::banPlayer(name, reason);
-            return true;
-        };
-        consoleCtx.unbanPlayerHook = [](const std::string &name) -> bool
-        {
-            Network::unbanPlayer(name);
-            return true;
-        };
-        consoleCtx.banIpHook = [](const std::string &ip, const std::string &reason) -> bool
-        {
-            Network::banIp(ip, reason);
-            return true;
-        };
-        consoleCtx.unbanIpHook = [](const std::string &ip) -> bool
-        {
-            Network::unbanIp(ip);
-            return true;
-        };
-        consoleCtx.isPlayerBannedHook = [](const std::string &name) -> bool
-        {
-            return Network::isPlayerBanned(name);
-        };
-        consoleCtx.isIpBannedHook = [](const std::string &ip) -> bool
-        {
-            return Network::isIpBanned(ip);
-        };
-        consoleCtx.kickSessionByName = [network](const std::string &name) -> std::string
-        {
-            return network->kickSessionByName(name, "Kicked from the server.");
-        };
-        consoleCtx.setWhitelistEnabledHook = [](bool enabled) -> bool
-        {
-            return Network::setWhitelistEnabled(enabled);
-        };
-        consoleCtx.getWhitelistModeHook = []() -> bool
-        {
-            return Network::getWhitelistEnabled();
-        };
-        consoleCtx.whitelistAddHook = [](const std::string &name) -> bool
-        {
-            Network::whitelistAdd(name);
-            return true;
-        };
-        consoleCtx.whitelistRemoveHook = [](const std::string &name) -> bool
-        {
-            Network::whitelistRemove(name);
-            return true;
-        };
-
+            consoleCtx.banPlayerHook = [](const std::string &name, const std::string &reason) -> bool
+            {
+                Network::banPlayer(name, reason);
+                return true;
+            };
+            consoleCtx.unbanPlayerHook = [](const std::string &name) -> bool
+            {
+                Network::unbanPlayer(name);
+                return true;
+            };
+            consoleCtx.banIpHook = [](const std::string &ip, const std::string &reason) -> bool
+            {
+                Network::banIp(ip, reason);
+                return true;
+            };
+            consoleCtx.unbanIpHook = [](const std::string &ip) -> bool
+            {
+                Network::unbanIp(ip);
+                return true;
+            };
+            consoleCtx.isPlayerBannedHook = [](const std::string &name) -> bool
+            {
+                return Network::isPlayerBanned(name);
+            };
+            consoleCtx.isIpBannedHook = [](const std::string &ip) -> bool
+            {
+                return Network::isIpBanned(ip);
+            };
+            consoleCtx.kickSessionByName = [network](const std::string &name) -> std::string
+            {
+                return network->kickSessionByName(name, "Kicked from the server.");
+            };
+            consoleCtx.setWhitelistEnabledHook = [](bool enabled) -> bool
+            {
+                return Network::setWhitelistEnabled(enabled);
+            };
+            consoleCtx.getWhitelistModeHook = []() -> bool
+            {
+                return Network::getWhitelistEnabled();
+            };
+            consoleCtx.whitelistAddHook = [](const std::string &name) -> bool
+            {
+                Network::whitelistAdd(name);
+                return true;
+            };
+            consoleCtx.whitelistRemoveHook = [](const std::string &name) -> bool
+            {
+                Network::whitelistRemove(name);
+                return true;
+            };
 
             std::vector<std::string> history;
 
@@ -800,6 +801,7 @@ namespace LightweightMC::Core
         m_running = true;
         Logger::info("SQLite Database Init...");
         m_database.init();
+        malloc_trim(0);
         // Phase 10 (ban/kick/whitelist): load vanilla-compatible sidecars
         // banned-players.json + banned-ips.json + whitelist.json (missing files
         // = empty lists like vanilla assumes). [security] whitelist-enabled gates
@@ -816,6 +818,8 @@ namespace LightweightMC::Core
 
         Logger::info("Starting Network Manager (epoll)...");
         m_network.start(port);
+        LightweightMC::Network::RconServer rcon(25575, "password");
+        rcon.start();
 
         // Bind the world-processing tick singleton to Server.cpp's
         // Database so seedChunk/processChunk can reach saveTickState /
@@ -849,13 +853,19 @@ namespace LightweightMC::Core
         constexpr auto tickInterval = 50ms; // 20 TPS
         while (m_running)
         {
+            // Logger::info("Server is pooling ");
+            //            Core::Logger::trace("Server will pool");
             m_network.pollEvents(10); // small slice => input stays responsive
-
+            //            Core::Logger::trace("Server is pooling");
             auto now = std::chrono::steady_clock::now();
             while (now - lastTick >= tickInterval)
             {
+                Core::Logger::trace("Server is Ticking");
                 if (!m_running)
+                {
+                    Core::Logger::trace("Server is blocking");
                     break;
+                }
 
                 // Absolute unix-ms timestamp (wall clock, monotonic across
                 // restarts when combined with SQLite-persisted nextTickMs)
@@ -878,14 +888,14 @@ namespace LightweightMC::Core
                     m_chunkManager.registerPlane(pid, &m_network.getWorldStorage(pid));
 
                 m_chunkManager.tickActiveChunks(nowMs);
-
+                Core::Logger::trace("Server is Ticking Active Chunks");
                 // Natural-HP regeneration sweep (0x06 refresh per healed session).
                 // Fixed at the same 20 Hz cadence as the world tick so regen timing stays close to vanilla without a second accumulator.
                 m_network.tickRegeneration(nowMs);
                 // Auto-respawn sweep (Phase 14b): dead PLAY sessions revive per immediate_respawn / respawn_radius / respawnwaves gamerules so clients don't stay stuck on the death HUD; emits the same 0x08 Position + 0x06 UpdateHealth burst as an explicit /respawn.
-
+                Core::Logger::trace("Server is Ticking Regeneration");
                 m_network.autoRespawnDuePlayers(nowMs);
-
+                Core::Logger::trace("Server is Ticking Auto Respawn");
                 // Periodic 1.8+ chunk-stream flush. Fires at 5 Hz (throttle
                 // by running every 4th 50ms tick) so the async WorldStorage
                 // generation worker's outputs reach idle or slow-moving
@@ -900,11 +910,14 @@ namespace LightweightMC::Core
                 if ((++chunkStreamThrottle & 0x3) == 0)
                     m_network.tickChunkStreaming(5);
                 lastTick += tickInterval;
-
+                Core::Logger::trace("Server ticking");
                 // If we are more than 5 ticks behind (server stalled), snap
                 // the accumulator to now so we do not run a catch-up burst.
                 if (std::chrono::steady_clock::now() - lastTick > 5 * tickInterval)
+                {
+                    Logger::warn("Server can't keep up");
                     lastTick = std::chrono::steady_clock::now();
+                }
             }
         }
     }

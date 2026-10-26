@@ -29,3 +29,4 @@ san_build/
 .clinerules/
 tests/
 .baseline_tmp/
+MISSING_IMPLEMENTATIONS.md

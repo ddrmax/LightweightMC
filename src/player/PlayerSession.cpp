@@ -1,4 +1,5 @@
 #include "player/PlayerSession.hpp"
+#include "versions/v1_8/health.hpp"
 #include "storage/Database.hpp"
 #include "world/GameRules.hpp"
 #include <algorithm>
@@ -170,9 +171,9 @@ namespace LightweightMC::Player
 
     void PlayerSession::resetVolatileState()
     {
-        health = 20.0f;
-        foodLevel = 20;
-        foodSaturationLevel = 5.0f;
+        health = LightweightMC::Versions::V1_8::MAX_HEALTH;
+        foodLevel = LightweightMC::Versions::V1_8::MAX_FOOD;
+        foodSaturationLevel = 5.0f; /* V1_8 default */
         foodExhaustionLevel = 0.0f;
         fallDistance = 0.0f;
         air = 30;
@@ -363,7 +364,7 @@ namespace LightweightMC::Player
         const float before = health;
         health += 0.5; // static_cast<float>(regenTicks);
         if (health > 20.0f)
-            health = 20.0f;
+            health = LightweightMC::Versions::V1_8::MAX_HEALTH;
         // Re-anchor lastHurtMs so the 2 s cadence carries across calls:
         // regen window consumed, then (regenTicks * 2000) ms of regen.
         lastHurtMs += regenDelayMs + regenTicks * 2000;
@@ -397,9 +398,9 @@ namespace LightweightMC::Player
         alive = true;
         respawnAtMs = 0;
         lastHurtMs = 0;
-        health = 20.0f;
-        foodLevel = 20;
-        foodSaturationLevel = 5.0f;
+        health = LightweightMC::Versions::V1_8::MAX_HEALTH;
+        foodLevel = LightweightMC::Versions::V1_8::MAX_FOOD;
+        foodSaturationLevel = 5.0f; /* V1_8 default */
         foodExhaustionLevel = 0.0f;
         // Hunger cadence cursor: first tickSurvivalDrain after login/respawn anchors here so idle depletion starts from a full saturation window rather than an epoch-stale elapsed flood.
         lastHungerTickMs = 0;
@@ -442,8 +443,8 @@ namespace LightweightMC::Player
     // via other paths — it never suppresses this food reset.
     void PlayerSession::restoreHungerForRespawn()
     {
-        foodLevel = 20;
-        foodSaturationLevel = 5.0f;
+        foodLevel = LightweightMC::Versions::V1_8::MAX_FOOD;
+        foodSaturationLevel = 5.0f; /* V1_8 default */
         foodExhaustionLevel = 0.0f;
         // Hunger cadence cursor: first tickSurvivalDrain after login/respawn anchors here so idle depletion starts from a full saturation window rather than an epoch-stale elapsed flood.
         lastHungerTickMs = 0;

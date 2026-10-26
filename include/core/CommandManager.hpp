@@ -337,6 +337,14 @@ struct CommandContext
     // the console thread defaults to 0 = Overworld unless the caller
     // explicitly passes a plane name). CommandManager::executeCommand
     // populates this before calling cmd->execute().
+    // Optional hook used by /give to grant an item to a player. Defaults to no-op.
+    std::function<bool(const std::string &target, const std::string &item, int count)> giveItemHook =
+        [](const std::string &, const std::string &, int) -> bool { return false; };
+    // know which plane to write on when the invocation comes from a chat
+    // context (the caller's live session knows its PlayerSession::worldId;
+    // the console thread defaults to 0 = Overworld unless the caller
+    // explicitly passes a plane name). CommandManager::executeCommand
+    // populates this before calling cmd->execute().
     int32_t senderWorldId{0};
 };
 

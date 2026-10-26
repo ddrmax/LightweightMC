@@ -132,7 +132,7 @@ namespace PlayHandler
             PlayerHandler::handleClientSettings(clientFd, session, data, offset, packetEnd);
             break;
         case 0x16: // Client Command
-            PlayerHandler::handleClientCommand(clientFd, session, data, offset, packetEnd);
+            PlayerHandler::handleClientCommand(clientFd, session, data, offset, packetEnd, net);
             break;
         case 0x17: // Custom Payload
             PlayerHandler::handleCustomPayload(clientFd, session, data, offset, packetEnd);

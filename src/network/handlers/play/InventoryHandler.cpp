@@ -469,4 +469,99 @@ namespace InventoryHandler
                                            " (enchanting model pending)");
     }
 
+    void setItem(LightweightMC::Player::PlayerSession &session, int slot, const LightweightMC::Player::ItemStack &item)
+    {
+        if (slot < 0 || slot >= 45) return;
+        session.inventory[slot] = item;
+
+        std::vector<uint8_t> buf;
+        buf.push_back(0); // window id
+        LightweightMC::Network::Packet::writeShort(buf, static_cast<int16_t>(slot));
+        LightweightMC::Network::Packet::writeShort(buf, item.id);
+        if (item.id != -1)
+        {
+            buf.push_back(item.count);
+            LightweightMC::Network::Packet::writeShort(buf, item.damage);
+            buf.push_back(0);
+        }
+        // NetworkManager::sendPacket(session.fd, 0x29, buf); // transmit via caller net
+    }
+
+    void removeItem(LightweightMC::Player::PlayerSession &session, int slot)
+    {
+        if (slot < 0 || slot >= 45) return;
+        session.inventory.erase(slot);
+
+        std::vector<uint8_t> buf;
+        buf.push_back(0);
+        LightweightMC::Network::Packet::writeShort(buf, static_cast<int16_t>(slot));
+        LightweightMC::Network::Packet::writeShort(buf, -1);
+        // NetworkManager::sendPacket(session.fd, 0x29, buf); // transmit via caller net
+    }
+
+    void decreaseCount(LightweightMC::Player::PlayerSession &session, int slot, int amount)
+    {
+        if (slot < 0 || slot >= 45) return;
+        auto it = session.inventory.find(slot);
+        if (it == session.inventory.end()) return;
+        it->second.count -= static_cast<uint8_t>(amount);
+        if (it->second.count <= 0) session.inventory.erase(it);
+
+        std::vector<uint8_t> buf;
+        buf.push_back(0);
+        LightweightMC::Network::Packet::writeShort(buf, static_cast<int16_t>(slot));
+        auto it2 = session.inventory.find(slot);
+        if (it2 != session.inventory.end())
+        {
+            LightweightMC::Network::Packet::writeShort(buf, it2->second.id);
+            buf.push_back(it2->second.count);
+            LightweightMC::Network::Packet::writeShort(buf, it2->second.damage);
+            buf.push_back(0);
+        }
+        else
+        {
+            LightweightMC::Network::Packet::writeShort(buf, -1);
+        }
+        // NetworkManager::sendPacket(session.fd, 0x29, buf); // transmit via caller net
+    }
+
+    uint16_t getMaxDurability(int32_t itemId)
+    {
+        // Vanilla 1.8 tool/armor durability lookup (simplified).
+        switch (itemId)
+        {
+            // Swords
+            case 268: case 272: case 267: case 276: case 283: return 59; // wood/stone? approximate
+            default: return 1000;
+        }
+    }
+    void applyToolDamage(LightweightMC::Player::PlayerSession &session, int slot, int amount)
+    {
+        if (slot < 0 || slot >= 45) return;
+        auto it = session.inventory.find(slot);
+        if (it == session.inventory.end()) return;
+        uint16_t maxDur = getMaxDurability(it->second.id);
+        it->second.damage += static_cast<int16_t>(amount);
+        if (it->second.damage >= static_cast<int16_t>(maxDur))
+        {
+            session.inventory.erase(it);
+        }
+
+        std::vector<uint8_t> buf;
+        buf.push_back(0);
+        LightweightMC::Network::Packet::writeShort(buf, static_cast<int16_t>(slot));
+        auto it2 = session.inventory.find(slot);
+        if (it2 != session.inventory.end())
+        {
+            LightweightMC::Network::Packet::writeShort(buf, it2->second.id);
+            buf.push_back(it2->second.count);
+            LightweightMC::Network::Packet::writeShort(buf, it2->second.damage);
+            buf.push_back(0);
+        }
+        else
+        {
+            LightweightMC::Network::Packet::writeShort(buf, -1);
+        }
+        // NetworkManager::sendPacket(session.fd, 0x29, buf); // transmit via caller net
+    }
 } // namespace InventoryHandler

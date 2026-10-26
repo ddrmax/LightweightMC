@@ -1056,7 +1056,14 @@ namespace LightweightMC::Network
             pos.push_back(0x00); // Flags = 0x00 (absolute coords, no teleport ID trailer on 1.8)
             sendPacket(kv.first, 0x08, pos);
 
-            // 4. Rest of the world: prefetch+emit every chunk in the render
+            // 4. Update Health (0x06): sync hunger/health state.
+            std::vector<uint8_t> health;
+            Network::Packet::writeFloat(health, session.health);
+            Network::Packet::writeVarInt(health, session.foodLevel);
+            Network::Packet::writeFloat(health, session.foodSaturationLevel);
+            sendPacket(kv.first, 0x06, health);
+
+            // 5. Rest of the world: prefetch+emit every chunk in the render
             //    box around the new position. updateChunksAroundPlayer skips
             //    the drop-point chunk via loadedChunks (sendMapChunkBulk
             //    inserted it during step 2), and enqueues the remaining

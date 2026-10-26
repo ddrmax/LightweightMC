@@ -77,6 +77,45 @@ namespace LightweightMC::Network
             return (rawY >= 2048) ? rawY - 4096 : rawY;
         }
 
+        static inline void writeByte(std::vector<uint8_t> &vec, uint8_t val) { vec.push_back(val); }
+        static inline void writeSpawnObject(std::vector<uint8_t> &vec, int32_t entityId, double x, double y, double z) {
+            writeVarInt(vec, 0x0E);
+            writeVarInt(vec, entityId);
+            vec.push_back(2);
+            writeInt(vec, static_cast<int32_t>(x * 32));
+            writeInt(vec, static_cast<int32_t>(y * 32));
+            writeInt(vec, static_cast<int32_t>(z * 32));
+            vec.push_back(0); vec.push_back(0);
+            writeInt(vec, 1);
+            writeShort(vec, 0); writeShort(vec, 0); writeShort(vec, 0);
+        }
+        static inline void writeEntityMetadataItem(std::vector<uint8_t> &vec, int32_t entityId, int16_t itemId, uint8_t count, uint16_t damage) {
+            writeVarInt(vec, 0x1C);
+            writeVarInt(vec, entityId);
+            vec.push_back((5 << 5) | 10);
+            writeShort(vec, itemId);
+            vec.push_back(count);
+            writeShort(vec, static_cast<int16_t>(damage));
+            vec.push_back(0);
+            vec.push_back(0x7F);
+        }
+        static inline void writeCollectItem(std::vector<uint8_t> &vec, int32_t collectedId, int32_t collectorId) {
+            writeVarInt(vec, 0x0D);
+            writeVarInt(vec, collectedId);
+            writeVarInt(vec, collectorId);
+        }
+        static inline void writeDestroyEntities(std::vector<uint8_t> &vec, int32_t entityId) {
+            writeVarInt(vec, 0x13);
+            writeVarInt(vec, 1);
+            writeVarInt(vec, entityId);
+        }
+        static inline void writeSetSlot(std::vector<uint8_t> &vec, uint8_t windowId, int16_t slot, int16_t itemId, uint8_t count, int16_t damage) {
+            writeVarInt(vec, 0x29);
+            vec.push_back(windowId);
+            writeShort(vec, slot);
+            writeShort(vec, itemId);
+            if (itemId != -1) { vec.push_back(count); writeShort(vec, damage); vec.push_back(0); }
+        }
         static inline int floorDiv(int a, int b)
         {
             return (a < 0) ? ((a - b + 1) / b) : (a / b);

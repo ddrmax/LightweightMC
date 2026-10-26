@@ -93,7 +93,8 @@ namespace PlayerHandler
                              LightweightMC::Player::PlayerSession &session,
                              const uint8_t *data,
                              size_t &offset,
-                             size_t packetEnd);
+                             size_t packetEnd,
+                             LightweightMC::Network::NetworkManager &net);
 
     // 0x17 CustomPayload — C2S packet: channel string + opaque byte blob.
     // Plugins and ViaVersion use these to tunnel version-specific data.
