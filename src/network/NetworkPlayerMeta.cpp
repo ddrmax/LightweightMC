@@ -7,10 +7,14 @@
 
 #include "network/NetworkManager.hpp"
 #include "network/Packet.hpp"
+#include "network/protocol/ProtocolTranslator.hpp"
 #include "core/Logger.hpp"
+#include "core/utils.hpp"
 #include "managers/PlayerManager.hpp"
 #include "storage/Database.hpp"
+#include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -162,6 +166,204 @@ namespace LightweightMC::Network
             }
         }
         Core::Logger::debug("[NET TELEPORT] target=" + targetName + " NOT ONLINE — no packet emitted");
+        return false;
+    }
+
+    namespace
+    {
+        // Item-name → LWMC item-ID lookup for /give. Accepts canonical
+        // Items18 names plus vanilla-style aliases. All keys lowercased.
+        struct ItemEntry
+        {
+            const char *name;
+            int16_t id;
+        };
+
+        static const ItemEntry kItemTable[] = {
+            {"leather",       0},
+            {"bread",         50},
+            {"meat",          1},
+            {"raw_beef",      1},
+            {"cooked_meat",   51},
+            {"cooked_beef",   51},
+            {"cooked_pork",   51},
+            {"cooked_chicken",51},
+            {"fish",          52},
+            {"cooked_fish",   52},
+            {"stew",          53},
+            {"salad",         54},
+            {"juice",         55},
+            {"broth",         56},
+            {"grog",          57},
+            {"medicine",      58},
+            {"twig",          11},
+            {"stick",         11},
+            {"flint",         12},
+            {"reed",          13},
+            {"clay",          14},
+            {"charcoal",      15},
+            {"coal",          15},
+            {"oak_plank",     20},
+            {"planks",        20},
+            {"crafting_table",23},
+            {"chest",         24},
+            {"furnace",       25},
+            {"brewing_stand", 26},
+            {"hopper",        27},
+            {"dispenser",     28},
+            {"torch",         29},
+            {"hatchet",       80},
+            {"axe",           80},
+            {"machete",       81},
+            {"spike",         82},
+            {"sword",         82},
+            {"adze",          83},
+            {"hoe",           84},
+            {"mattock",       85},
+            {"pickaxe",       85},
+            {"chisel",        86},
+            {"hammer",        87},
+            {"scythe",        88},
+            {"wool",          3},
+            {"feather",       4},
+            {"bone",          8},
+            {"hide",          9},
+            {"pelt",          6},
+            {"rabbit_foot",   10},
+        };
+
+        int16_t lookupItemByName(const std::string &name)
+        {
+            std::string lower;
+            lower.resize(name.size());
+            std::transform(name.begin(), name.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            for (const auto &entry : kItemTable)
+            {
+                if (lower == entry.name)
+                    return entry.id;
+            }
+            return -1;
+        }
+    }
+
+    // Grant an item to a player's inventory. See NetworkManager.hpp header
+    // doc for the full contract.
+    bool NetworkManager::giveItem(const std::string &playerName,
+                                  const std::string &itemName,
+                                  int count)
+    {
+        const int16_t itemId = lookupItemByName(itemName);
+        if (itemId < 0)
+        {
+            Core::Logger::warn("[NET GIVE] unknown item name '" + itemName +
+                                "' for target=" + playerName);
+            return false;
+        }
+
+        for (auto &[fd, ses] : m_clients)
+        {
+            if (ses.state != ClientState::PLAY || ses.username != playerName)
+                continue;
+
+            int granted = 0;
+            int remaining = count;
+
+            // Helper: send a Set Slot packet (S2C 0x2F) so the client sees
+            // the updated item slot immediately. Window 0 = player inventory.
+            auto sendSetSlot = [&](int16_t slot, const Player::ItemStack &stack)
+            {
+                std::vector<uint8_t> buf;
+                buf.push_back(0); // windowId 0 = player inventory
+                Packet::writeShort(buf, static_cast<int16_t>(slot));
+                auto tr = Protocol::ProtocolTranslator::translateItemToClient(
+                    ses.clientProtocol, stack.id);
+                Packet::writeShort(buf, tr.id);
+                buf.push_back(stack.count);
+                Packet::writeShort(buf, stack.damage);
+                if (ses.clientProtocol >= 47)
+                    buf.push_back(0); // NBT end tag (1.8+)
+                sendPacket(fd, 0x2F, buf);
+            };
+
+            // 1. Merge into existing stacks of the same item first
+            //    (slots 0..44: hotbar 0..8 + main inventory 9..35).
+            for (int slot = 0; slot < 45 && remaining > 0; ++slot)
+            {
+                auto it = ses.inventory.find(slot);
+                if (it == ses.inventory.end() || it->second.id == -1)
+                    continue;
+                if (it->second.id == itemId && it->second.damage == 0)
+                {
+                    const int space = 64 - it->second.count;
+                    if (space > 0)
+                    {
+                        const int addCount = std::min(remaining, space);
+                        it->second.count = static_cast<uint8_t>(it->second.count + addCount);
+                        ses.inventory[slot] = it->second;
+                        sendSetSlot(slot, it->second);
+                        granted += addCount;
+                        remaining -= addCount;
+                    }
+                }
+            }
+
+            // 2. Fill free slots: hotbar first (slots 0..8), then main
+            //    inventory (slots 9..35). Each stack is capped at 64 items.
+            for (int slot = 0; slot < 9 && remaining > 0; ++slot)
+            {
+                auto it = ses.inventory.find(slot);
+                if (it != ses.inventory.end() && it->second.id != -1)
+                    continue;
+
+                const int giveCount = std::min(remaining, 64);
+                Player::ItemStack stack;
+                stack.id = itemId;
+                stack.count = static_cast<uint8_t>(giveCount);
+                stack.damage = 0;
+                ses.inventory[slot] = stack;
+
+                sendSetSlot(slot, stack);
+
+                granted += giveCount;
+                remaining -= giveCount;
+            }
+
+            if (remaining > 0)
+            {
+                for (int slot = 9; slot < 36 && remaining > 0; ++slot)
+                {
+                    auto it = ses.inventory.find(slot);
+                    if (it != ses.inventory.end() && it->second.id != -1)
+                        continue;
+
+                    const int giveCount = std::min(remaining, 64);
+                    Player::ItemStack stack;
+                    stack.id = itemId;
+                    stack.count = static_cast<uint8_t>(giveCount);
+                    stack.damage = 0;
+                    ses.inventory[slot] = stack;
+
+                    sendSetSlot(slot, stack);
+
+                    granted += giveCount;
+                    remaining -= giveCount;
+                }
+            }
+
+            if (granted > 0)
+            {
+                Core::Logger::info("[NET GIVE] gave " + std::to_string(granted) +
+                                   "x " + itemName + " (id=" + std::to_string(itemId) +
+                                   ") to " + playerName + " fd=" + std::to_string(fd));
+                return true;
+            }
+
+            Core::Logger::warn("[NET GIVE] inventory full for " + playerName);
+            return false;
+        }
+
+        Core::Logger::debug("[NET GIVE] player=" + playerName + " NOT ONLINE");
         return false;
     }
 

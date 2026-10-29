@@ -105,7 +105,7 @@ namespace EntityHandler
         if (action == 0)
         {
             // Held-item melee mapping: read the hotbar slot PlayerSession::
-            // selectedSlot last pointed at (hotbar slots live at 36..44 in
+            // selectedSlot last pointed at (hotbar slots live at 0..8 in
             // session.inventory per InventoryHandler::handleHeldItemChange),
             // translate via heldCombatFor and hand the damage + knockback
             // strength to EntityManager so the mob HP model, XP-on-kill path
@@ -115,7 +115,7 @@ namespace EntityHandler
             int attackKnockback = LightweightMC::World::EntityManager::KNOCKBACK_NONE;
             if (session.selectedSlot >= 0 && session.selectedSlot < 9)
             {
-                auto held = session.inventory.find(36 + session.selectedSlot);
+                auto held = session.inventory.find(session.selectedSlot);
                 if (held != session.inventory.end() &&
                     held->second.id != -1 && held->second.count > 0)
                 {

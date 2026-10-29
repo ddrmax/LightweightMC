@@ -261,7 +261,7 @@ namespace LightweightMC::Player
         if (idleTicks > 0)
         {
             lastHungerTickMs += idleTicks * 50;
-            const double idlePressure = static_cast<double>(idleTicks) * 0.02 * rate;
+            const double idlePressure = static_cast<double>(idleTicks) * 0.001 * rate;
             foodExhaustionLevel += static_cast<float>(idlePressure);
             if (foodExhaustionLevel > 40.0f)
                 foodExhaustionLevel = 40.0f;
@@ -455,7 +455,7 @@ namespace LightweightMC::Player
         if (selectedSlot < 0 || selectedSlot > 8)
             return false;
 
-        const int16_t slotKey = static_cast<int16_t>(36 + selectedSlot);
+        const int16_t slotKey = static_cast<int16_t>(selectedSlot);
         auto it = inventory.find(slotKey);
         if (it == inventory.end() || it->second.id <= 0 || it->second.count == 0)
             return false;
@@ -483,7 +483,7 @@ namespace LightweightMC::Player
             foodExhaustionLevel = 0.0f;
 
         // Consume exactly one held unit; drop the slot when empty so later
-        // clicks don't retrigger eating on a phantom item and inventory[36..44]
+        // clicks don't retrigger eating on a phantom item and inventory
         // matches what handleHeldItemChange would show next equip packet.
         if (it->second.count > 0)
             --it->second.count;

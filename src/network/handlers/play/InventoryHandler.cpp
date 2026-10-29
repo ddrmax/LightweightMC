@@ -1,5 +1,6 @@
 #include "network/handlers/play/InventoryHandler.hpp"
 #include "core/Logger.hpp"
+#include "managers/PlayerManager.hpp"
 
 #include <chrono>
 #include <unordered_map>
@@ -20,7 +21,7 @@ namespace InventoryHandler
         // a default {0,0,0} entry for empty hotbar slots (block id 0 would
         // be reported to other players as "Air" instead of "empty").
         int16_t itemId = -1;
-        int16_t itemSlot = 36 + slot;
+        int16_t itemSlot = slot;
         if (slot >= 0 && slot < 36)
         {
             auto it = session.inventory.find(itemSlot);
@@ -95,48 +96,124 @@ namespace InventoryHandler
                                                      ? session.inventory[slot]
                                                      : Player::ItemStack{-1, 0, 0};
                 Player::ItemStack after = before;
+                bool skipSetSlot = false;
                 if (mode == 0) // grab (client already picked it up locally)
                 {
                     after = {-1, 0, 0};
                     accepted = true;
                 }
-                else if (mode == 1) // place
+                else if (mode == 1) // shift-click
                 {
-                    if (hasItem)
+                    const Player::ItemStack clicked = before;
+                    if (clicked.id != -1 && clicked.count > 0)
                     {
-                        auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
-                            translateItemFromClient(session.clientProtocol, itemId, itemCount, itemDamage);
-                        after = {tr.id, tr.count, tr.damage};
+                        // Vanilla 1.8 layout: 0..8 = hotbar, 9..35 = main inventory.
+                        int targetStart = 0, targetEnd = 0;
+                        if (slot >= 0 && slot < 9)
+                        {
+                            targetStart = 9;  targetEnd = 36; // hotbar → main inventory
+                        }
+                        else if (slot >= 9 && slot < 36)
+                        {
+                            targetStart = 0;  targetEnd = 9;  // main inventory → hotbar
+                        }
+                        else
+                        {
+                            // Slots 36..44 (armor/off-hand): do not shift-click.
+                            accepted = false;
+                        }
+
+                        if (accepted)
+                        {
+                            const int kMaxStack = 64;
+                            int remaining = static_cast<int>(clicked.count);
+
+                            // Merge into matching stacks in target region
+                            for (auto &kv : session.inventory)
+                            {
+                                if (kv.first >= targetStart && kv.first < targetEnd &&
+                                    kv.second.id == clicked.id &&
+                                    kv.second.damage == clicked.damage &&
+                                    kv.second.count < static_cast<uint8_t>(kMaxStack))
+                                {
+                                    int space = kMaxStack - static_cast<int>(kv.second.count);
+                                    int add = std::min(remaining, space);
+                                    kv.second.count = static_cast<uint8_t>(kv.second.count + add);
+                                    remaining -= add;
+                                    if (remaining == 0)
+                                        break;
+                                }
+                            }
+
+                            // Fill empty slots in target region
+                            for (int i = targetStart; i < targetEnd && remaining > 0; ++i)
+                            {
+                                if (session.inventory.find(i) == session.inventory.end())
+                                {
+                                    int give = std::min(remaining, kMaxStack);
+                                    session.inventory[i] = {clicked.id, static_cast<uint8_t>(give), clicked.damage};
+                                    remaining -= give;
+                                }
+                            }
+
+                            // Update source slot
+                            if (remaining > 0)
+                            {
+                                session.inventory[slot] = {clicked.id, static_cast<uint8_t>(remaining), clicked.damage};
+                            }
+                            else
+                            {
+                                session.inventory.erase(slot);
+                            }
+
+                            // Full inventory sync replaces per-slot Set Slot
+                            sendPlayerInventoryWindowItems(clientFd, session, net);
+                            // Persist shift-click changes so they survive reconnect
+                            Player::PlayerManager::getInstance().savePlayerState(session, database);
+                        }
                     }
                     else
                     {
-                        after = {-1, 0, 0};
+                        accepted = true;
                     }
-                    accepted = true;
+                    skipSetSlot = true;
                 }
                 else if (mode == 2 || mode == 3) // throw to world / destroy
                 {
                     after = {-1, 0, 0};
                     accepted = true;
                 }
-
-                session.inventory[slot] = after;
-
-                std::vector<uint8_t> setSlot;
-                setSlot.push_back(windowId);
-                LightweightMC::Network::Packet::writeShort(
-                    setSlot, static_cast<int16_t>(slot));
-                auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
-                    translateItemToClient(session.clientProtocol, after.id);
-                LightweightMC::Network::Packet::writeShort(setSlot, tr.id);
-                if (tr.id != -1)
+                else if (mode >= 5 && mode <= 7) // mouse drag (start/mid/end)
                 {
-                    setSlot.push_back(after.count);
-                    LightweightMC::Network::Packet::writeShort(setSlot, after.damage);
-                    if (session.clientProtocol >= 47)
-                        setSlot.push_back(0); // NBT end-of-compound
+                    // Client manages the drag state locally; we just need to
+                    // acknowledge the transaction so the UI doesn't show items
+                    // as "despawned" (drag fell through to default which erased
+                    // the slot). Don't mutate the slot — the drag's final
+                    // redistribution is a subsequent click that we handle.
+                    accepted = true;
+                    skipSetSlot = true;
                 }
-                net.sendPacket(clientFd, 0x2F, setSlot);
+
+                if (!skipSetSlot)
+                {
+                    session.inventory[slot] = after;
+
+                    std::vector<uint8_t> setSlot;
+                    setSlot.push_back(windowId);
+                    LightweightMC::Network::Packet::writeShort(
+                        setSlot, static_cast<int16_t>(slot));
+                    auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
+                        translateItemToClient(session.clientProtocol, after.id);
+                    LightweightMC::Network::Packet::writeShort(setSlot, tr.id);
+                    if (tr.id != -1)
+                    {
+                        setSlot.push_back(after.count);
+                        LightweightMC::Network::Packet::writeShort(setSlot, after.damage);
+                        if (session.clientProtocol >= 47)
+                            setSlot.push_back(0); // NBT end-of-compound
+                    }
+                    net.sendPacket(clientFd, 0x2F, setSlot);
+                }
 
                 std::vector<uint8_t> confirm;
                 confirm.push_back(windowId);
@@ -185,56 +262,60 @@ namespace InventoryHandler
                         translateItemFromClient(session.clientProtocol, itemId, itemCount, itemDamage);
                     taken = {tr.id, tr.count, tr.damage};
                 }
-                // Move into player inventory: stack on a matching stack (cap
-                // 12 per MC 1.8 stack), else first empty slot in 0..44.
+                // Move into player inventory via the shared merge helper.
+                // Items that can't fit remain in the container slot.
                 if (taken.id != -1 && taken.count > 0)
                 {
-                    bool merged = false;
-                    for (auto &kv : session.inventory)
+                    int remaining = mergeItemIntoInventory(
+                        session, taken.id, taken.count, taken.damage);
+                    if (remaining > 0)
                     {
-                        if (kv.first >= 0 && kv.first < 45 &&
-                            kv.second.id == taken.id &&
-                            kv.second.damage == taken.damage &&
-                            int(kv.second.count) + int(taken.count) <= 12)
-                        {
-                            kv.second.count = static_cast<uint8_t>(kv.second.count + taken.count);
-                            merged = true;
-                            break;
-                        }
+                        after = {taken.id, static_cast<uint8_t>(remaining), taken.damage};
                     }
-                    if (!merged)
+                    else
                     {
-                        for (int i = 0; i < 45; ++i)
-                        {
-                            if (session.inventory.find(i) == session.inventory.end())
-                            {
-                                session.inventory[i] = taken;
-                                merged = true;
-                                break;
-                            }
-                        }
+                        after = {-1, 0, 0};
                     }
-                    // If inventory is completely full we intentionally drop
-                    // the item: MC 1.8 would throw it at the player's feet,
-                    // but we don't model ground drops yet, so the item is
-                    // silently discarded (mirrors other servers' fallback).
-                }
-                after = {-1, 0, 0};
-                accepted = true;
-            }
-            else if (mode == 1) // place item from cursor into container slot
-            {
-                if (hasItem)
-                {
-                    auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
-                        translateItemFromClient(session.clientProtocol, itemId, itemCount, itemDamage);
-                    after = {tr.id, tr.count, tr.damage};
+
+                    // Sync player inventory to the client. Without this the
+                    // client never sees items pulled from a container, which
+                    // manifests as "items lost" until reconnect.
+                    sendPlayerInventoryWindowItems(clientFd, session, net);
+                    Player::PlayerManager::getInstance().savePlayerState(session, database);
                 }
                 else
                 {
                     after = {-1, 0, 0};
                 }
                 accepted = true;
+            }
+            else if (mode == 1) // shift-click (MC 1.8 protocol: mode 1 = shift)
+            {
+                // Shift-click moves the entire stack from the container slot
+                // into the player's inventory. Matching stacks are merged,
+                // empty slots fill in, and any remainder stays in the slot.
+                const Player::ItemStack clicked = win.items[slot];
+                if (clicked.id != -1 && clicked.count > 0)
+                {
+                    int remaining = mergeItemIntoInventory(
+                        session, clicked.id, clicked.count, clicked.damage);
+
+                    if (remaining == 0)
+                    {
+                        after = {-1, 0, 0};
+                    }
+                    else
+                    {
+                        after = {clicked.id, static_cast<uint8_t>(remaining), clicked.damage};
+                    }
+                    win.items[slot] = after;
+                    win.dirty = true;
+
+                    // Full inventory sync — the player's inventory changed.
+                    sendPlayerInventoryWindowItems(clientFd, session, net);
+                    Player::PlayerManager::getInstance().savePlayerState(session, database);
+                    accepted = true;
+                }
             }
             else if (mode == 2 || mode == 3) // throw to world / destroy
             {
@@ -391,7 +472,7 @@ namespace InventoryHandler
             }
         }
 
-        if (slot == (36 + session.selectedSlot))
+        if (slot == session.selectedSlot)
         {
             std::vector<uint8_t> equipPacket;
             LightweightMC::Network::Packet::writeVarInt(equipPacket, clientFd);
@@ -527,41 +608,150 @@ namespace InventoryHandler
 
     uint16_t getMaxDurability(int32_t itemId)
     {
-        // Vanilla 1.8 tool/armor durability lookup (simplified).
+        // LWMC tool class - the item ids used by this codebase live in
+        // world/MC18ItemIds.hpp: HATCHET=80 ... SCYTHE=88. Durability values
+        // mirror the vanilla 1.8 tier pattern (weakest ~45, sturdiest tool
+        // ~100 uses) scaled into the LWMC item space; every other item
+        // returns 0 so wear logic can gate on the zero sentinel.
         switch (itemId)
         {
-            // Swords
-            case 268: case 272: case 267: case 276: case 283: return 59; // wood/stone? approximate
-            default: return 1000;
+            case 80: return 60;  // HATCHET
+            case 81: return 55;  // MACHETE
+            case 82: return 45;  // SPIKE
+            case 83: return 70;  // ADZE
+            case 84: return 90;  // HOE
+            case 85: return 65;  // MATTOCK
+            case 86: return 80;  // CHISEL
+            case 87: return 100; // HAMMER
+            case 88: return 75;  // SCYTHE
+            default: return 0;   // not durability-bearing
         }
     }
-    void applyToolDamage(LightweightMC::Player::PlayerSession &session, int slot, int amount)
+    void applyToolDamage(LightweightMC::Network::NetworkManager &net, int clientFd, LightweightMC::Player::PlayerSession &session, int16_t slotKey, int amount)
     {
-        if (slot < 0 || slot >= 45) return;
-        auto it = session.inventory.find(slot);
+        if (slotKey < 0 || slotKey >= 45) return;
+        auto it = session.inventory.find(slotKey);
         if (it == session.inventory.end()) return;
+
         uint16_t maxDur = getMaxDurability(it->second.id);
-        it->second.damage += static_cast<int16_t>(amount);
-        if (it->second.damage >= static_cast<int16_t>(maxDur))
+        if (maxDur == 0) return; // not durability-bearing — no wear
+
+        bool broken = static_cast<uint16_t>(it->second.damage + amount) >= maxDur;
+        if (broken)
         {
             session.inventory.erase(it);
         }
-
-        std::vector<uint8_t> buf;
-        buf.push_back(0);
-        LightweightMC::Network::Packet::writeShort(buf, static_cast<int16_t>(slot));
-        auto it2 = session.inventory.find(slot);
-        if (it2 != session.inventory.end())
-        {
-            LightweightMC::Network::Packet::writeShort(buf, it2->second.id);
-            buf.push_back(it2->second.count);
-            LightweightMC::Network::Packet::writeShort(buf, it2->second.damage);
-            buf.push_back(0);
-        }
         else
+        {
+            it->second.damage += static_cast<int16_t>(amount);
+        }
+
+        // Mirror the slot with an S2C Set Slot packet using the same wire
+        // layout handleClickWindow emits at runtime: windowId byte, short
+        // slot, short item (-1 when empty; otherwise count + damage + NBT
+        // end tag for protocol 47). Send id follows the in-repo convention
+        // (0x2F) that the python probes assert on, not the dead 0x29 path.
+        std::vector<uint8_t> buf;
+        buf.push_back(0); // windowId 0 = player inventory / hotbar window
+        LightweightMC::Network::Packet::writeShort(buf, slotKey);
+        auto cur = session.inventory.find(slotKey);
+        if (cur == session.inventory.end())
         {
             LightweightMC::Network::Packet::writeShort(buf, -1);
         }
-        // NetworkManager::sendPacket(session.fd, 0x29, buf); // transmit via caller net
+        else
+        {
+            auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::translateItemToClient(session.clientProtocol, cur->second.id);
+            LightweightMC::Network::Packet::writeShort(buf, tr.id);
+            buf.push_back(cur->second.count);
+            LightweightMC::Network::Packet::writeShort(buf, cur->second.damage);
+            if (session.clientProtocol >= 47)
+                buf.push_back(0); // NBT end-of-compound tag (1.8 only)
+        }
+        net.sendPacket(clientFd, 0x2F, buf);
+
+        if (broken)
+            LightweightMC::Core::Logger::info("Tool in slot " + std::to_string(slotKey) + " shattered for player " + session.username);
+    }
+
+    // --- Inventory merge / sync helpers ----------------------------------------
+
+    int mergeItemIntoInventory(LightweightMC::Player::PlayerSession &session,
+                               int16_t itemId, uint8_t count, int16_t damage)
+    {
+        const int kMaxStack = 64; // vanilla 1.8 protocol 47 stack cap
+        int remaining = static_cast<int>(count);
+
+        // 1. Merge into existing matching stacks (slots 0..35: hotbar 0..8 + main inv 9..35)
+        for (auto &kv : session.inventory)
+        {
+            if (kv.first < 0 || kv.first >= 36)
+                continue;
+            if (kv.second.id == itemId && kv.second.damage == damage &&
+                kv.second.count < static_cast<uint8_t>(kMaxStack))
+            {
+                const int space = kMaxStack - static_cast<int>(kv.second.count);
+                const int add = std::min(remaining, space);
+                if (add > 0)
+                {
+                    kv.second.count = static_cast<uint8_t>(kv.second.count + add);
+                    remaining -= add;
+                    if (remaining == 0)
+                        return 0;
+                }
+            }
+        }
+
+        // 2. Fill empty slots (hotbar 0..8 first, then main inv 9..35)
+        for (int slot = 0; slot < 9 && remaining > 0; ++slot)
+        {
+            if (session.inventory.find(slot) == session.inventory.end())
+            {
+                const int give = std::min(remaining, kMaxStack);
+                session.inventory[slot] = {itemId, static_cast<uint8_t>(give), damage};
+                remaining -= give;
+            }
+        }
+        for (int slot = 9; slot < 36 && remaining > 0; ++slot)
+        {
+            if (session.inventory.find(slot) == session.inventory.end())
+            {
+                const int give = std::min(remaining, kMaxStack);
+                session.inventory[slot] = {itemId, static_cast<uint8_t>(give), damage};
+                remaining -= give;
+            }
+        }
+
+        return remaining;
+    }
+
+    void sendPlayerInventoryWindowItems(int clientFd,
+                                        LightweightMC::Player::PlayerSession &session,
+                                        LightweightMC::Network::NetworkManager &net)
+    {
+        std::vector<uint8_t> payload;
+        payload.push_back(0); // windowId 0 = player inventory
+        LightweightMC::Network::Packet::writeShort(payload, static_cast<int16_t>(45));
+
+        for (int16_t i = 0; i < 45; ++i)
+        {
+            auto it = session.inventory.find(i);
+            if (it != session.inventory.end() && it->second.id != -1 && it->second.count > 0)
+            {
+                auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
+                    translateItemToClient(session.clientProtocol, it->second.id,
+                                          it->second.count, it->second.damage);
+                LightweightMC::Network::Packet::writeShort(payload, tr.id);
+                payload.push_back(tr.count);
+                LightweightMC::Network::Packet::writeShort(payload, tr.damage);
+                if (session.clientProtocol >= 47)
+                    payload.push_back(0); // NBT end-of-compound tag
+            }
+            else
+            {
+                LightweightMC::Network::Packet::writeShort(payload, static_cast<int16_t>(-1));
+            }
+        }
+        net.sendPacket(clientFd, 0x30, payload);
     }
 } // namespace InventoryHandler

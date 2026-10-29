@@ -3,12 +3,15 @@
 #include <cmath>
 #include <unordered_map>
 #include <utility>
+#include "network/handlers/play/InventoryHandler.hpp"
+#include "world/MC18ItemIds.hpp"
+#include "managers/PlayerManager.hpp"
 
 namespace WorldHandler
 {
 
     void handleDigging(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd,
-                       LightweightMC::Storage::WorldStorage &worldStorage, LightweightMC::Network::NetworkManager &net)
+                       LightweightMC::Storage::WorldStorage &worldStorage, LightweightMC::Storage::Database &database, LightweightMC::Network::NetworkManager &net)
     {
         int32_t status = LightweightMC::Network::Packet::readVarIntBounded(data, offset, packetEnd, 1);
         uint64_t val = LightweightMC::Network::Packet::readUInt64Bounded(data, offset, packetEnd);
@@ -34,6 +37,11 @@ namespace WorldHandler
             int relX = LightweightMC::Network::Packet::floorMod(x, 16.0);
             int relZ = LightweightMC::Network::Packet::floorMod(z, 16.0);
 
+            // Read the existing block before we overwrite it so block-breaking
+            // drops (Bug 4 fix) can be resolved from the real block type.
+            uint16_t oldBlockData = worldStorage.getBlockAt(chunkX, chunkZ, relX, y, relZ);
+            uint16_t oldBlockId = oldBlockData >> 4;
+
             worldStorage.saveBlockChange(chunkX, chunkZ, relX, y, relZ, 0);
 
             std::vector<uint8_t> blockChange;
@@ -46,6 +54,61 @@ namespace WorldHandler
             LightweightMC::Network::Packet::writeVarInt(blockChange, 0); // Air
 
             net.broadcastPacket(0x23, blockChange, clientFd);
+
+            // Block-breaking drops (Bug 4 fix). Status 2 == successful
+            // destruction in vanilla protocol 47. Non-air stone-type blocks
+            // drop themselves as a single item unit, which is then offered to
+            // the player's inventory. Matching stacks are merged first, then
+            // empty slots fill in; if nothing fits the item is logged as lost
+            // server-side (future improvement: spawn a ground entity instead).
+            if (status == 2 && oldBlockId > 0 && oldBlockId != 7 /* bedrock */)
+            {
+                const int16_t dropId = static_cast<int16_t>(oldBlockId);
+                int remaining = InventoryHandler::mergeItemIntoInventory(
+                    session, dropId, 1, 0);
+                if (remaining > 0)
+                {
+                    LightweightMC::Core::Logger::warn(
+                        "[World] No inventory space for dropped block id " +
+                        std::to_string(oldBlockId) + " at (" +
+                        std::to_string(x) + "," + std::to_string(y) + "," +
+                        std::to_string(z) + ") for player " + session.username);
+                }
+
+                // Sync the full player inventory so the client sees the new
+                // stack or merged count immediately.
+                InventoryHandler::sendPlayerInventoryWindowItems(
+                    clientFd, session, net);
+            }
+
+            // Tool wear: the client sends Digging with status 0 (start) and
+            // status 2 (successful destruction). Only successful destructions
+            // consume durability, mirroring vanilla. The held item lives in
+            // the hotbar band at inventory[selectedSlot]; tools are the
+            // LWMC durability class (ids 80..88) and getMaxDurability == 0
+            // marks everything else as bearing no wear. applyToolDamage also
+            // clears a shattered stack and mirrors both outcomes with an S2C
+            // Set Slot packet so the client UI shows crack progression or the
+            // emptied slot. Particles / breakage sounds are not broadcast:
+            // this codebase maps neither entity-status nor sound-effect S2C
+            // packets, so the shatter is logged server-side inside the helper.
+            if (status == 2 && session.selectedSlot >= 0 && session.selectedSlot < 9)
+            {
+                const int16_t hotbarKey = static_cast<int16_t>(session.selectedSlot);
+                const auto held = session.inventory.find(hotbarKey);
+                if (held != session.inventory.end() && InventoryHandler::getMaxDurability(held->second.id) > 0)
+                {
+                    InventoryHandler::applyToolDamage(net, clientFd, session, hotbarKey, 1);
+
+                    // Persist inventory changes (including tool damage)
+                    // immediately so they survive a crash — Bug 2 fix. The
+                    // normal disconnect path (handleDisconnect → savePlayerState)
+                    // already covers graceful logoff, but crashes or plane
+                    // switches between dig events would otherwise lose the
+                    // durability increment.
+                    Player::PlayerManager::getInstance().savePlayerState(session, database);
+                }
+            }
         }
     }
 
@@ -138,7 +201,7 @@ namespace WorldHandler
 
             if (session.selectedSlot >= 0 && session.selectedSlot < 9)
             {
-                const int16_t slotKey = static_cast<int16_t>(36 + session.selectedSlot);
+                const int16_t slotKey = static_cast<int16_t>(session.selectedSlot);
                 auto heldIt = session.inventory.find(slotKey);
                 if (heldIt != session.inventory.end() && heldIt->second.id > 0 && heldIt->second.count > 0)
                 {
@@ -574,6 +637,52 @@ namespace WorldHandler
         LightweightMC::Network::Packet::writeVarInt(blockChange, blockData);
 
         net.broadcastPacket(0x23, blockChange);
+
+        // Block placement discount (Bug 3 fix). After a successful block
+        // placement the held item's stack is decremented by one. When the
+        // count reaches zero the slot is cleared. A Set Slot packet (S2C
+        // 0x2F) is sent so the client's local copy of the held item matches
+        // the server immediately — without this the client keeps an
+        // inflated count until the next full inventory sync (e.g. on
+        // reconnect), at which point the phantom block re-appears and
+        // players can duplicate blocks indefinitely.
+        if (session.selectedSlot >= 0 && session.selectedSlot < 9)
+        {
+            const int16_t heldSlotKey = static_cast<int16_t>(session.selectedSlot);
+            auto heldIt = session.inventory.find(heldSlotKey);
+            if (heldIt != session.inventory.end() && heldIt->second.id != -1 && heldIt->second.count > 0)
+            {
+                if (heldIt->second.count > 1)
+                {
+                    --heldIt->second.count;
+                }
+                else
+                {
+                    session.inventory.erase(heldIt);
+                }
+
+                // Mirror the updated slot to the client's hotbar window.
+                std::vector<uint8_t> setSlot;
+                setSlot.push_back(0); // windowId 0 = player inventory
+                LightweightMC::Network::Packet::writeShort(setSlot, heldSlotKey);
+                auto cur = session.inventory.find(heldSlotKey);
+                if (cur == session.inventory.end())
+                {
+                    LightweightMC::Network::Packet::writeShort(setSlot, -1);
+                }
+                else
+                {
+                    auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
+                        translateItemToClient(session.clientProtocol, cur->second.id, cur->second.count, cur->second.damage);
+                    LightweightMC::Network::Packet::writeShort(setSlot, tr.id);
+                    setSlot.push_back(cur->second.count);
+                    LightweightMC::Network::Packet::writeShort(setSlot, cur->second.damage);
+                    if (session.clientProtocol >= 47)
+                        setSlot.push_back(0); // NBT end-of-compound tag
+                }
+                net.sendPacket(clientFd, 0x2F, setSlot);
+            }
+        }
     }
 
     // ---------------------------------------------------------------------
