@@ -93,6 +93,30 @@ namespace PlayerHandler
                 return net.teleportToPlayer(mover, target);
             };
 
+            // 0.0.15 phase 8b: /give, /list, /msg, /tell issued from
+            // in-game chat route through NetworkManager so live sessions
+            // feel the mutation (hotbar Set Slot 0x2F, online-name list,
+            // private whisper 0x02). /give targets the named player's
+            // inventory; /msg targets the recipient.
+            ctx.giveItemHook = [&net](const std::string &target,
+                                      const std::string &item, int count) -> bool
+            {
+                return net.giveItem(target, item, count);
+            };
+            ctx.listOnlinePlayersHook = [&net]() -> std::vector<std::string>
+            {
+                return net.listOnlinePlayers();
+            };
+            ctx.sendPrivateChatHook = [&net](const std::string &target,
+                                             const std::string &message) -> bool
+            {
+                return net.sendPrivateChat(target, message);
+            };
+            ctx.maxPlayersHook = [&net]() -> int
+            {
+                return net.getMaxPlayers();
+            };
+
             // Chat /gotor and /world: dimension-plane management via the
             // same NetworkManager hooks the console wires.
             ctx.switchPlayerWorld = [&net](const std::string &playerName, const std::string &worldName) -> bool

@@ -115,6 +115,11 @@ namespace LightweightMC::Network
         // correct player count.
         int countOnline() const;
 
+        // Returns the server's configured maximum player capacity from the
+        // [server] max-players config key. Defaults to the vanilla-1.8
+        // standard of 20 when unset. Used by /list and the server browser.
+        int getMaxPlayers() const;
+
         // Update a player's op level: update the live session (if online) and
         // persist to the database. Returns true if the player is online or
         // the data was persisted successfully.
@@ -307,6 +312,17 @@ namespace LightweightMC::Network
         // Returns the number of levels gained (0-15) so the /experience
         // command can decide whether to fire show_advancement_messages.
         int grantPlayerXp(const std::string &playerName, int32_t amount);
+
+        // Grant an item to a player's inventory. Resolves `itemName` through
+        // a lookup table (accepting both LWMC canonical names like "bread"
+        // and vanilla aliases where practical), adds one or more ItemStack
+        // entries to the target's hotbar inventory (slots 36..44), splits
+        // stacks at the 64-count cap, and pushes a Set Slot packet (0x2F)
+        // to the client so the new item appears immediately. Returns true
+        // when at least one item was granted (player online + name resolved).
+        bool giveItem(const std::string &playerName,
+                      const std::string &itemName,
+                      int count);
 
         // Natural-HP sweep driven from Server.cpp's fixed 20 Hz tick loop.
         // Consults natural_health_regeneration gamerule (skip when false); per-session PlayerSession::tickRegen gates the vanilla

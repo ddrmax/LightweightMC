@@ -228,12 +228,27 @@ public:
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
         (void)args;
-        // TODO: Replace with call to PlayerManager
-        size_t onlineCount = 0;
-        size_t maxPlayers = 20;
+        std::vector<std::string> names = ctx.listOnlinePlayersHook();
+        size_t onlineCount = names.size();
+        int maxPlayers = ctx.maxPlayersHook();
 
-        ctx.reply("There is " + std::to_string(onlineCount) + "/" + std::to_string(maxPlayers) + " online players.");
-        // TODO: List player names
+        if (onlineCount == 0)
+        {
+            ctx.reply("There are no online players.");
+            return;
+        }
+
+        // Build a comma-separated name list (vanilla 1.8 lists names joined by ", ")
+        std::string nameList;
+        for (size_t i = 0; i < names.size(); ++i)
+        {
+            if (i > 0)
+                nameList += ", ";
+            nameList += names[i];
+        }
+
+        ctx.reply(std::to_string(onlineCount) + "/" + std::to_string(maxPlayers) +
+                  " online players: " + nameList);
     }
 };
 
@@ -257,7 +272,7 @@ public:
 
         const std::string &target = args[0];
 
-        // Reconstruction of the message from the 2nd argument
+        // Reconstruction of the message from the 2nd argument onwards
         std::string message;
         for (size_t i = 1; i < args.size(); ++i)
         {
@@ -266,15 +281,22 @@ public:
             message += args[i];
         }
 
-        ctx.reply("[Me -> " + target + "] " + message);
-        // Chat-only command: no game-state change. Echo to the server
-        // console only when the request originated there so in-game chat
-        // traffic does not spam the log.
-        if (ctx.isConsole)
+        // Actually deliver the whisper to the target's client via the
+        // NetworkManager hook (Chat Message S2C 0x02 with position byte 2
+        // = system whisper). Echo the outgoing message back to the sender
+        // only when the delivery succeeds.
+        if (ctx.sendPrivateChatHook(target, message))
         {
-            LightweightMC::Core::Logger::info("[private message] " + ctx.sender + " > " + target + ": " + message);
+            ctx.reply("[Me -> " + target + "] " + message);
+            if (ctx.isConsole)
+            {
+                LightweightMC::Core::Logger::info("[private message] " + ctx.sender + " > " + target + ": " + message);
+            }
         }
-        // TODO: Send the packet to the `target` recipient
+        else
+        {
+            ctx.reply("Failed to send message: player '" + target + "' is not online or does not exist.");
+        }
     }
 };
 

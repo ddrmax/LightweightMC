@@ -39,7 +39,7 @@ namespace PlayHandler
             PlayerHandler::handlePlayerMovement(clientFd, session, data, offset, packetEnd, packetId, worldManager, net);
             break;
         case 0x07: // Player Digging
-            WorldHandler::handleDigging(clientFd, session, data, offset, packetEnd, worldStorage, net);
+            WorldHandler::handleDigging(clientFd, session, data, offset, packetEnd, worldStorage, database, net);
             break;
         case 0x08: // Block Placement / Container Interaction
             WorldHandler::handleBlockPlacement(clientFd, session, data, offset, packetEnd, worldStorage, database, net);

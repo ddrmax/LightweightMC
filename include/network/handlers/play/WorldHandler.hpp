@@ -29,6 +29,7 @@ namespace WorldHandler
                        size_t &offset,
                        size_t packetEnd,
                        LightweightMC::Storage::WorldStorage &worldStorage,
+                       LightweightMC::Storage::Database &database,
                        LightweightMC::Network::NetworkManager &net);
 
     void handleBlockPlacement(int clientFd,

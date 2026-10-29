@@ -30,3 +30,5 @@ san_build/
 tests/
 .baseline_tmp/
 MISSING_IMPLEMENTATIONS.md
+tools/check_blockentities.cpp
+repro_durability.py

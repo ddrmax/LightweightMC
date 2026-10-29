@@ -11,6 +11,7 @@
 #include "network/protocol/EraAdapter.hpp"
 #include "network/protocol/BaseProtocol.hpp"
 #include "core/Logger.hpp"
+#include "core/ConfigManager.hpp"
 #include <vector>
 #include <cstdint>
 #include <sstream>
@@ -175,6 +176,13 @@ namespace LightweightMC::Network
             if (ses.state == ClientState::PLAY)
                 ++n;
         return n;
+    }
+
+    int NetworkManager::getMaxPlayers() const
+    {
+        // Reads [server] max-players from the central config (same key the
+        // server-browser ping uses). Vanilla-1.8 default when absent.
+        return ConfigManager::getInstance().get<int>("server", "max-players", 20);
     }
 
 } // namespace LightweightMC::Network

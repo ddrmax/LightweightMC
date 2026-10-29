@@ -223,6 +223,31 @@ namespace LightweightMC::Core
             return m_network.teleportToPlayer(mover, target);
         };
 
+        // 0.0.15 phase 8b: /give, /list, /msg, /tell wire up to the
+        // NetworkManager backends so console commands actually mutate
+        // live state instead of falling through to the CommandManager no-op
+        // lambdas. Each hook delegates to the corresponding NetworkManager
+        // entry point declared in NetworkManager.hpp.
+        consoleCtx.giveItemHook = [this](const std::string &target,
+                                         const std::string &item,
+                                         int count) -> bool
+        {
+            return m_network.giveItem(target, item, count);
+        };
+        consoleCtx.listOnlinePlayersHook = [this]() -> std::vector<std::string>
+        {
+            return m_network.listOnlinePlayers();
+        };
+        consoleCtx.sendPrivateChatHook = [this](const std::string &target,
+                                                const std::string &message) -> bool
+        {
+            return m_network.sendPrivateChat(target, message);
+        };
+        consoleCtx.maxPlayersHook = [this]() -> int
+        {
+            return ConfigManager::getInstance().get<int>("server", "max-players", 100);
+        };
+
         // Multiworld: /gotor <worldName> moves a live session to the named
         // plane. The NetworkManager implementation resolves the name via the
         // world_registry SQLite table, snaps to the target plane's surface,
@@ -533,6 +558,28 @@ namespace LightweightMC::Core
                 return network->teleportToPlayer(mover, target);
             };
 
+            // 0.0.15 phase 8b: same give/list/msg hooks, wired in the
+            // threaded-console closure so commands work from the real
+            // console thread too.
+            consoleCtx.giveItemHook = [network](const std::string &target,
+                                                const std::string &item, int count) -> bool
+            {
+                return network->giveItem(target, item, count);
+            };
+            consoleCtx.listOnlinePlayersHook = [network]() -> std::vector<std::string>
+            {
+                return network->listOnlinePlayers();
+            };
+            consoleCtx.sendPrivateChatHook = [network](const std::string &target,
+                                                       const std::string &message) -> bool
+            {
+                return network->sendPrivateChat(target, message);
+            };
+            consoleCtx.maxPlayersHook = [network]() -> int
+            {
+                return ConfigManager::getInstance().get<int>("server", "max-players", 100);
+            };
+
             // 0.0.16 world-control hooks: /setworldspawn, /seed, /setblock,
             // /place and /spawnpoint. The threaded console's ctx is not tied
             // to a live session either, so /setblock + /place default to the
@@ -788,7 +835,7 @@ namespace LightweightMC::Core
         IniParser config;
         ConfigManager::getInstance().load("server.properties");
         uint16_t port = ConfigManager::getInstance().get<uint16_t>("server", "port", 25565);
-        int maxPlayers = ConfigManager::getInstance().get<int>("server", "max-players", 50);
+        int maxPlayers = ConfigManager::getInstance().get<int>("server", "max-players", 100);
         std::string motd = ConfigManager::getInstance().getString("server", "motd", "A C++ Minecraft Server");
 
         bool enableAntiScan = ConfigManager::getInstance().getBool("security", "enable-antiscan", true);

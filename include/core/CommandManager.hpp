@@ -340,6 +340,33 @@ struct CommandContext
     // Optional hook used by /give to grant an item to a player. Defaults to no-op.
     std::function<bool(const std::string &target, const std::string &item, int count)> giveItemHook =
         [](const std::string &, const std::string &, int) -> bool { return false; };
+
+    // Optional hook used by /list to enumerate online PLAY sessions.
+    // Server-side implementations wire this to NetworkManager::listOnlinePlayers
+    // so the command can report the real player count and names instead of a
+    // hardcoded placeholder. Defaults to no-op (empty vector).
+    std::function<std::vector<std::string>()> listOnlinePlayersHook =
+        []() -> std::vector<std::string> { return {}; };
+
+    // Optional hook used by /msg and /tell to send a private chat message.
+    // Server-side implementations wire this to NetworkManager::sendPrivateChat
+    // so the whisper actually reaches the target's client. Defaults to no-op
+    // (reports failure so the command can print an error).
+    std::function<bool(const std::string &target, const std::string &message)> sendPrivateChatHook =
+        [](const std::string &, const std::string &) -> bool { return false; };
+
+    // Optional hook used by /list to report the server's configured
+    // maximum player capacity (reads [server] max-players from config).
+    // Defaults to the vanilla-1.8 default of 20 so bare console runs without
+    // NetworkManager wiring still compile and report sensible output.
+    std::function<int()> maxPlayersHook =
+        []() -> int { return 20; };
+
+    // Optional hook used by /give to report the server's keep-inventory
+    // game-rule state for feedback messages.
+    std::function<bool()> keepInventoryHook =
+        []() -> bool { return false; };
+
     // know which plane to write on when the invocation comes from a chat
     // context (the caller's live session knows its PlayerSession::worldId;
     // the console thread defaults to 0 = Overworld unless the caller

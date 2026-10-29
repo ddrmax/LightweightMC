@@ -103,6 +103,32 @@ private:
         // [server]
         emit("server", "port", "25565");
         emit("server", "max-players", "100");
+// Vanilla-1.8 difficulty engine linkage (placeholder toggle).
+emit("server", "difficulty-engine-linkage", "true");
+// Day length in ticks.
+emit("gameplay", "day-length", "24000");
+// Enable weather cycle.
+emit("gameplay", "enable-weather", "true");
+// Enable PVP.
+emit("gameplay", "enable-pvp", "true");
+// Enable mob spawning.
+emit("gameplay", "enable-mob-spawning", "true");
+// Enable spawning.
+emit("gameplay", "enable-spawning", "true");
+// Sit-in toggle.
+emit("gameplay", "sit-in", "false");
+// Share server flag.
+emit("server", "share-server", "true");
+// Roll movement toggle.
+emit("gameplay", "roll-movement", "true");
+// Max ping threshold.
+emit("server", "max-ping", "1000");
+// Chat enabled.
+emit("gameplay", "chat-enabled", "true");
+// Hardcore mode.
+emit("gameplay", "hardcore", "false");
+// Banned agents list.
+emit("security", "banned-agents", "");
 
         // [gameplay]
         // World difficulty fed to JoinGame/Respawn spawn-info packets as a
