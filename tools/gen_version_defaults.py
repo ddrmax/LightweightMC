@@ -56,13 +56,20 @@ def load_protocol_map():
 
 # Food nutrition table, sourced from prismarineJS minecraft-data
 # data/pc/1.8/foods.json, as curated in include/versions/v1_8/food.hpp.
-# (item_id -> (foodPoints, saturation)). Only 1.8 is populated yet; other
-# majors fall back to an empty table (the file, namespace and switch stay).
+# (item_id -> (foodPoints, saturation)). Canonical 1.8 edible set per the
+# authoritative item list (27 entries): apple 260, mushroom_stew 282, bread
+# 297, raw porkchop 319, cooked porkchop 320, golden apple 322 (metadata 0;
+# enchanted variant 322/1 shares the row), fish 349 (cod/salmon/clownfish/
+# puffer metadata 0..3), cooked fish 350 (cod/salmon metadata 0..1), cookie
+# 357, melon slice 360, beef 363, steak 364, chicken 365, cooked chicken
+# 366, rotten flesh 367, spider eye 375, carrot 391, potato 392, baked
+# potato 393, poisonous potato 394, golden carrot 396, pumpkin pie 400,
+# rabbit 411, cooked rabbit 412, rabbit stew 413, mutton 423, cooked mutton
+# 424. LWMC ItemStack carries no metadata dimension (ProtocolTranslator is a
+# pass-through), so metadata variants collapse onto their numeric id. ids
+# 103/141/142/354 are NOT on the canonical list and are not edible in 1.8.
 FOOD_DATA = {
     "1.8": {
-        "103": (2, 1.2),
-        "141": (3, 4.8),
-        "142": (1, 0.6),
         "260": (4, 2.4),
         "282": (6, 7.2),
         "297": (5, 6.0),
@@ -71,14 +78,16 @@ FOOD_DATA = {
         "322": (4, 9.6),
         "349": (2, 0.4),
         "350": (5, 6.0),
-        "354": (2, 0.4),
         "357": (2, 0.4),
+        "360": (2, 1.2),
         "363": (3, 1.8),
         "364": (8, 12.8),
         "365": (2, 1.2),
         "366": (6, 7.2),
         "367": (4, 0.8),
         "375": (2, 3.2),
+        "391": (4, 4.8),
+        "392": (1, 0.6),
         "393": (5, 7.2),
         "394": (2, 1.2),
         "396": (6, 14.4),
