@@ -73,13 +73,36 @@ namespace StatusHandler
         }
         else if (packetId == 0x01) // Ping Request
         {
-            // Ping packet body is exactly 8 bytes (long latency).
+            // Ping packet body is exactly 8 bytes (long latency). A short body
+            // is a decode gap — WARN so it shows up in the log rather than
+            // being silently swallowed.
             if (packetEnd >= offset + 8)
             {
                 std::vector<uint8_t> payload(data + offset, data + offset + 8);
                 net.sendPacket(clientFd, 0x01, payload);
             }
+            else
+            {
+                LightweightMC::Core::Logger::warn("[NET DROP] STATUS ping (0x01) body too short fd=" +
+                                   std::to_string(clientFd) + " haveBytes=" +
+                                   std::to_string(packetEnd > offset ? packetEnd - offset : 0) +
+                                   " need=8 — no reply sent");
+            }
+        }
+        else
+        {
+            // No decoder registered for this packet id in STATUS state — the
+            // frame is dropped. WARN so protocol/behaviour decoding gaps are
+            // visible in the log immediately.
+            char hexBuf[16];
+            std::snprintf(hexBuf, sizeof(hexBuf), "0x%02X", packetId & 0xFF);
+            LightweightMC::Core::Logger::warn(std::string("[NET DROP] STATUS packet ") + hexBuf +
+                               " (" + std::to_string(packetId) + ") has no decoder — dropped fd=" +
+                               std::to_string(clientFd) + " bodyBytes=" +
+                               std::to_string(packetEnd > offset ? packetEnd - offset : 0));
         }
     }
+
+
 
 } // namespace StatusHandler

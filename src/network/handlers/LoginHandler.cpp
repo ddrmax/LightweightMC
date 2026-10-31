@@ -152,6 +152,18 @@ namespace LoginHandler
             LightweightMC::World::EntityManager::getInstance().spawnForSession(
                 session, worldManager.getWorldStorageFor(session.worldId), clientFd, packetSender);
         }
+        else
+        {
+            // LOGIN state only decodes 0x01 (Access Token) and 0x00 (Login
+            // Start). Any other id reaching here has no decoder — WARN so
+            // protocol-decoding gaps in the login flow are visible in logs.
+            char hexBuf[16];
+            std::snprintf(hexBuf, sizeof(hexBuf), "0x%02X", packetId & 0xFF);
+            LightweightMC::Core::Logger::warn(std::string("[NET DROP] LOGIN packet ") + hexBuf +
+                                              " (" + std::to_string(packetId) + ") has no decoder — dropped fd=" +
+                                              std::to_string(clientFd) + " bodyBytes=" +
+                                              std::to_string(packetEnd > offset ? packetEnd - offset : 0));
+        }
     }
 
 } // namespace LoginHandler

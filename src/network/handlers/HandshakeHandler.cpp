@@ -1,4 +1,7 @@
 #include "network/handlers/HandshakeHandler.hpp"
+#include "core/Logger.hpp"
+#include <cstdio>
+#include <string>
 
 namespace HandshakeHandler
 {
@@ -6,7 +9,17 @@ namespace HandshakeHandler
     void handle(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd, int32_t packetId)
     {
         if (packetId != 0x00)
+        {
+            // HANDSHAKE only decodes the Connect (0x00) packet. Any other id
+            // reaching this handler is a protocol-decoding gap — WARN so it is
+            // visible in the log instead of being silently swallowed.
+            LightweightMC::Core::Logger::warn("[NET DROP] HANDSHAKE packet 0x" +
+                               [&]{ char b8[8]; std::snprintf(b8, sizeof(b8), "%02X", packetId & 0xFF); return std::string(b8); }() +
+                               " (" + std::to_string(packetId) + ") has no decoder — dropped fd=" +
+                               std::to_string(clientFd) + " bodyBytes=" +
+                               std::to_string(packetEnd > offset ? packetEnd - offset : 0));
             return;
+        }
 
         int32_t protoVersion = LightweightMC::Network::Packet::readVarIntBounded(data, offset, packetEnd, 1);
         std::string host = LightweightMC::Network::Packet::readStringBounded(data, offset, packetEnd);

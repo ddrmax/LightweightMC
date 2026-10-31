@@ -72,7 +72,8 @@ namespace PlayHandler
             InventoryHandler::handleEnchantItem(clientFd, session, data, offset, packetEnd);
             break;
         case 0x12: // Update Sign
-            WorldHandler::handleUpdateSign(clientFd, session, data, offset, packetEnd, worldStorage);
+            WorldHandler::handleUpdateSign(clientFd, session, data, offset, packetEnd,
+                                           worldStorage, database, net);
             break;
         case 0x13: // Client Abilities
         {
@@ -144,12 +145,21 @@ namespace PlayHandler
             PlayerHandler::handleResourcePackReceive(clientFd, session, data, offset, packetEnd);
             break;
         default:
-            // Unknown C2S ID for protocol 47 — surface in the log but do
-            // not try to consume an arbitrary body length (the framing
-            // already isolated the packet via packetEnd, so skipping is
-            // safe).
-            LightweightMC::Core::Logger::info("[NET] Unknown C2S packet id=" +
-                                              std::to_string(packetId) + " from " + session.username);
+            // No decoder registered for this C2S id in PLAY state — the packet
+            // is dropped (silently ignored behaviour). Logged at WARN so gaps in
+            // protocol/behaviour decoding are visible in the boot log. Body
+            // length + hex preview included to make writing a new decoder easy.
+            {
+                const int rawId = packetId;
+                char hexBuf[16];
+                std::snprintf(hexBuf, sizeof(hexBuf), "0x%02X", rawId & 0xFF);
+                const size_t bodyBytes = (packetEnd > offset) ? (packetEnd - offset) : 0;
+                LightweightMC::Core::Logger::warn(std::string("[NET DROP] PLAY C2S packet ") +
+                                                  hexBuf + " (" + std::to_string(rawId) +
+                                                  ") has no decoder — dropped from " +
+                                                  session.username + " fd=" + std::to_string(clientFd) +
+                                                  " bodyBytes=" + std::to_string(bodyBytes));
+            }
             break;
         }
     }

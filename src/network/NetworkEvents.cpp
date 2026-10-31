@@ -189,9 +189,10 @@ namespace LightweightMC::Network
             if (packetId < 0)
             {
                 // Skip this frame (a corrupt varint should not crash the
-                // whole server); drop just this frame and continue.
-                Core::Logger::debug("[NET RECV] corrupt-varint frame fd=" + std::to_string(clientFd) +
-                                    " droppedLen=" + std::to_string(totalLen));
+                // whole server); drop just this frame and continue. WARN so
+                // malformed/framing-divergent clients are visible in logs.
+                Core::Logger::warn("[NET RECV] corrupt-varint frame fd=" + std::to_string(clientFd) +
+                                   " droppedLen=" + std::to_string(totalLen));
                 session.rxBuffer.erase(session.rxBuffer.begin(),
                                        session.rxBuffer.begin() + totalLen);
                 continue;
@@ -243,6 +244,14 @@ namespace LightweightMC::Network
                 // they are discarded so nothing else references a dead PlayerSession.
                 Core::Logger::debug("[NET DISPATCH] DISCONNECTED fd=" + std::to_string(clientFd) +
                                     " id=" + hexId(packetId) + " dropped (tombstone)");
+                break;
+            default:
+                // Defensive: an unrecognised session state must not pass frames to
+                // handlers. WARN so a state-machine gap is visible in the log.
+                Core::Logger::warn("[NET DROP] fd=" + std::to_string(clientFd) +
+                                   " id=" + hexId(packetId) +
+                                   " unmatched session state=" + std::to_string(static_cast<int>(session.state)) +
+                                   " — frame dropped");
                 break;
             }
 
