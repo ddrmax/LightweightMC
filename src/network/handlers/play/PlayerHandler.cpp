@@ -204,6 +204,16 @@ namespace PlayerHandler
                 return net.grantPlayerXp(name, amount);
             };
 
+            // Phase 18 backend: /food issued from in-game chat previously hit
+            // CommandContext's default setPlayerFood stub (always false), so
+            // online players got "Failed to set food ... (unknown player or
+            // not online)." while the console worked. Wire it to NetworkGameplay.cpp's
+            // NetworkManager entry point exactly like the console contexts in Server.cpp do.
+            ctx.setPlayerFood = [&net](const std::string &name, int32_t foodLevel, float foodSaturation) -> bool
+            {
+                return net.setPlayerFood(name, foodLevel, foodSaturation);
+            };
+
             // Phase 8 world-model backends -- /import-world and /export-world
             // consult NetworkManager::m_worldModel (boot-selected via the
             // `[world] world-model` key) to decide which file format to
