@@ -455,7 +455,12 @@ namespace LightweightMC::Player
         if (selectedSlot < 0 || selectedSlot > 8)
             return false;
 
-        const int16_t slotKey = static_cast<int16_t>(selectedSlot);
+        // Hotbar stacks live at wire keys 36..44 in session.inventory;
+        // selectedSlot is the raw Held Item Change index 0..8. The old code
+        // looked up key `selectedSlot` (a craft-grid/armor slot on the wire),
+        // which made right-click eating fail ("no edible item") and then eat
+        // from a phantom entry, desyncing the real stack back onto the client.
+        const int16_t slotKey = static_cast<int16_t>(36 + selectedSlot);
         auto it = inventory.find(slotKey);
         if (it == inventory.end() || it->second.id <= 0 || it->second.count == 0)
             return false;
@@ -465,6 +470,11 @@ namespace LightweightMC::Player
         // rule used by tickSurvivalDrain/starvation). Feeding adds raw points and
         // saturation gain but stays within legal ranges so clients don't see ghost bars.
         const int32_t previousFood = foodLevel;
+
+        // Vanilla: you cannot eat when your food bar is already full (20).
+        if (previousFood >= 20)
+            return false;
+
         int32_t newFood = previousFood + foodPoints;
         if (newFood < 0)
             newFood = 0;

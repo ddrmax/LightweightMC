@@ -286,11 +286,14 @@ namespace LightweightMC::Network
                 sendPacket(fd, 0x2F, buf);
             };
 
-            // 1. Merge into existing stacks of the same item first
-            //    (slots 0..44: hotbar 0..8 + main inventory 9..35).
+            // 1. Merge into existing stacks of the same item first (hotbar
+            //    wire slots 36..44 + main inventory 9..35). Keys 0..8 are
+            //    craft output / grid / armor on the wire — never merge there.
             for (int slot = 0; slot < 45 && remaining > 0; ++slot)
             {
-                auto it = ses.inventory.find(slot);
+                const int16_t key = (slot < 9) ? static_cast<int16_t>(36 + slot)
+                                               : static_cast<int16_t>(slot);
+                auto it = ses.inventory.find(key);
                 if (it == ses.inventory.end() || it->second.id == -1)
                     continue;
                 if (it->second.id == itemId && it->second.damage == 0)
@@ -300,17 +303,20 @@ namespace LightweightMC::Network
                     {
                         const int addCount = std::min(remaining, space);
                         it->second.count = static_cast<uint8_t>(it->second.count + addCount);
-                        ses.inventory[slot] = it->second;
-                        sendSetSlot(slot, it->second);
+                        ses.inventory[key] = it->second;
+                        sendSetSlot(key, it->second);
                         granted += addCount;
                         remaining -= addCount;
                     }
                 }
             }
 
-            // 2. Fill free slots: hotbar first (slots 0..8), then main
-            //    inventory (slots 9..35). Each stack is capped at 64 items.
-            for (int slot = 0; slot < 9 && remaining > 0; ++slot)
+            // 2. Fill free slots: hotbar first (wire slots 36..44), then main
+            //    inventory (slots 9..35). Keys 0..8 are craft output / grid /
+            //    armor on the wire — never fill them or the client renders the
+            //    item in its crafting grid instead of the hotbar. Each stack is
+            //    capped at 64 items.
+            for (int slot = 36; slot < 45 && remaining > 0; ++slot)
             {
                 auto it = ses.inventory.find(slot);
                 if (it != ses.inventory.end() && it->second.id != -1)

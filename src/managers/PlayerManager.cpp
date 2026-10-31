@@ -334,9 +334,12 @@ namespace LightweightMC::Player
         windowItems.push_back(0);                     // Window ID 0 = Inventory
         Network::Packet::writeShort(windowItems, 45); // 45 slots
 
+        // Wire numbering (window-0 layout): keys 0..8 map to hotbar wire slots
+        // 36..44 so the client renders hotbar stacks in its hotbar strip.
         for (int16_t i = 0; i < 45; ++i)
         {
-            auto it = currentSession.inventory.find(i);
+            const int16_t key = (i < 9) ? static_cast<int16_t>(36 + i) : i;
+            auto it = currentSession.inventory.find(key);
             if (it != currentSession.inventory.end() && it->second.id != -1 && it->second.count > 0)
             {
                 auto translated = Network::Protocol::ProtocolTranslator::translateItemToClient(currentSession.clientProtocol, it->second.id, it->second.count, it->second.damage);
@@ -556,6 +559,10 @@ namespace LightweightMC::Player
         {
             Core::Logger::info("Successfully saved player state to SQLite for UUID [" + data.uuid + "] (" + session.username + ") with " +
                                std::to_string(data.inventoryData.size()) + " bytes of inventory payload.");
+        }
+        else
+        {
+            Core::Logger::error("Failed to save player state to SQLite for UUID [" + data.uuid + "] (" + session.username + ")");
         }
     }
 }

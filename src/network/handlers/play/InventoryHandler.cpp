@@ -15,14 +15,18 @@ namespace InventoryHandler
 
         std::vector<uint8_t> equipPacket;
         LightweightMC::Network::Packet::writeVarInt(equipPacket, clientFd);
-        LightweightMC::Network::Packet::writeShort(equipPacket, 0);
-
-        // Use find() rather than operator[] so we do not accidentally insert
+        // Echo the raw held-item index (0..8) back in the equipment packet —
+        // vanilla clients read this short as an hltm index, not a window key.
+        LightweightMC::Network::Packet::writeShort(equipPacket, slot);
         // a default {0,0,0} entry for empty hotbar slots (block id 0 would
         // be reported to other players as "Air" instead of "empty").
+        // The wire equipment slot of Entity Equipment (S2C 0x04) is the raw
+        // held-item index 0..8 — the client reads it as an index into its hotbar
+        // strip, not a window-0 key. The inventory lookup however uses the
+        // canonical map key: hotbar stacks live at wire keys 36..44.
         int16_t itemId = -1;
-        int16_t itemSlot = slot;
-        if (slot >= 0 && slot < 36)
+        const int16_t itemSlot = static_cast<int16_t>(36 + slot);
+        if (slot >= 0 && slot < 9)
         {
             auto it = session.inventory.find(itemSlot);
             if (it != session.inventory.end() && it->second.id != -1 && it->second.count > 0)
@@ -55,6 +59,16 @@ namespace InventoryHandler
         int16_t actionNumber = LightweightMC::Network::Packet::readShortBounded(data, offset, packetEnd);
         uint8_t mode = static_cast<uint8_t>(LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd));
         int16_t itemId = LightweightMC::Network::Packet::readShortBounded(data, offset, packetEnd);
+
+        // Slot basis (vanilla-1.8 window 0 layout): 0 craft output, 1..4 craft
+        // grid, 5..8 armor, 9..35 main inventory, 36..44 hotbar. session.inventory
+        // now uses this SAME wire numbering so Set Slot (0x2F) / Window Items
+        // (0x30) emit keys verbatim and the client never maps a hotbar write into
+        // its crafting grid. Click Window packets arriving with a raw 0..8 index
+        // for the hotbar region are mapped to 36..44 here to keep one canonical
+        // basis in the session map.
+        if (windowId == 0 && slot >= 0 && slot < 9)
+            slot = static_cast<int16_t>(slot + 36);
 
         // Optional item body (present only when itemId != -1). The wire format
         // for MC 1.8 (protocol 47) is:
@@ -107,19 +121,23 @@ namespace InventoryHandler
                     const Player::ItemStack clicked = before;
                     if (clicked.id != -1 && clicked.count > 0)
                     {
-                        // Vanilla 1.8 layout: 0..8 = hotbar, 9..35 = main inventory.
+                        // Wire layout: hotbar = 36..44, main inv = 9..35. Note
+                        // `slot` was already normalised above (raw 0..8 Click
+                        // Window indices were remapped to 36..44), so a hotbar
+                        // shift-click now targets the main inventory and vice
+                        // versa. Keys 0..8 (craft output/grid/armor) reject.
                         int targetStart = 0, targetEnd = 0;
-                        if (slot >= 0 && slot < 9)
+                        if (slot >= 36 && slot <= 44)
                         {
                             targetStart = 9;  targetEnd = 36; // hotbar → main inventory
                         }
                         else if (slot >= 9 && slot < 36)
                         {
-                            targetStart = 0;  targetEnd = 9;  // main inventory → hotbar
+                            targetStart = 36; targetEnd = 45; // main inventory → hotbar
                         }
                         else
                         {
-                            // Slots 36..44 (armor/off-hand): do not shift-click.
+                            // Keys 0..8 are craft output / grid / armor slots.
                             accepted = false;
                         }
 
@@ -453,6 +471,12 @@ namespace InventoryHandler
         int16_t slot = LightweightMC::Network::Packet::readShortBounded(data, offset, packetEnd);
         int16_t itemId = LightweightMC::Network::Packet::readShortBounded(data, offset, packetEnd);
 
+        // Wire-slot basis — see handleClickWindow. Creative Inventory Action
+        // arrives with the window-0 layout (hotbar at 36..44); a raw 0..8 index
+        // from some client builds is mapped up to the canonical hotbar keys.
+        if (slot >= 0 && slot < 9)
+            slot = static_cast<int16_t>(slot + 36);
+
         if (itemId != -1 && offset + 3 <= packetEnd)
         {
             uint8_t count = data[offset++];
@@ -472,11 +496,13 @@ namespace InventoryHandler
             }
         }
 
-        if (slot == session.selectedSlot)
+        if ((slot >= 36 && slot <= 44) &&
+            static_cast<int16_t>(slot - 36) == session.selectedSlot)
         {
             std::vector<uint8_t> equipPacket;
             LightweightMC::Network::Packet::writeVarInt(equipPacket, clientFd);
-            LightweightMC::Network::Packet::writeShort(equipPacket, 0);
+            // Echo the raw held-item index (0..8), not the window-0 key.
+            LightweightMC::Network::Packet::writeShort(equipPacket, static_cast<int16_t>(slot - 36));
 
             int16_t currentItem = session.inventory[slot].id;
             auto translatedItem = LightweightMC::Network::Protocol::ProtocolTranslator::translateItemToClient(session.clientProtocol, currentItem);
@@ -682,10 +708,14 @@ namespace InventoryHandler
         const int kMaxStack = 64; // vanilla 1.8 protocol 47 stack cap
         int remaining = static_cast<int>(count);
 
-        // 1. Merge into existing matching stacks (slots 0..35: hotbar 0..8 + main inv 9..35)
+        // 1. Merge into existing matching stacks (hotbar 36..44 + main inv
+        //    9..35 only). Keys 0..8 are craft output / grid / armor slots on
+        //    the wire: never merge there.
         for (auto &kv : session.inventory)
         {
-            if (kv.first < 0 || kv.first >= 36)
+            const bool stackableSlot = (kv.first >= 36 && kv.first <= 44) ||
+                                       (kv.first >= 9 && kv.first < 36);
+            if (!stackableSlot)
                 continue;
             if (kv.second.id == itemId && kv.second.damage == damage &&
                 kv.second.count < static_cast<uint8_t>(kMaxStack))
@@ -702,8 +732,9 @@ namespace InventoryHandler
             }
         }
 
-        // 2. Fill empty slots (hotbar 0..8 first, then main inv 9..35)
-        for (int slot = 0; slot < 9 && remaining > 0; ++slot)
+        // 2. Fill empty slots (hotbar 36..44 first, then main inv 9..35). Keys
+        //    0..8 are craft output / grid / armor slots on the wire — never fill.
+        for (int slot = 36; slot < 45 && remaining > 0; ++slot)
         {
             if (session.inventory.find(slot) == session.inventory.end())
             {
@@ -733,9 +764,13 @@ namespace InventoryHandler
         payload.push_back(0); // windowId 0 = player inventory
         LightweightMC::Network::Packet::writeShort(payload, static_cast<int16_t>(45));
 
+        // Wire numbering (window-0 layout): iterate 0..8 then remap the first
+        // nine to hotbar keys 36..44. Keys are emitted verbatim so the client
+        // places hotbar stacks in its hotbar strip rather than its crafting grid.
         for (int16_t i = 0; i < 45; ++i)
         {
-            auto it = session.inventory.find(i);
+            const int16_t key = (i < 9) ? static_cast<int16_t>(36 + i) : i;
+            auto it = session.inventory.find(key);
             if (it != session.inventory.end() && it->second.id != -1 && it->second.count > 0)
             {
                 auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::

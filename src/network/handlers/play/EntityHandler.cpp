@@ -115,7 +115,9 @@ namespace EntityHandler
             int attackKnockback = LightweightMC::World::EntityManager::KNOCKBACK_NONE;
             if (session.selectedSlot >= 0 && session.selectedSlot < 9)
             {
-                auto held = session.inventory.find(session.selectedSlot);
+                // Hotbar items live at wire keys 36..44 in session.inventory;
+                // selectedSlot is the raw wheel index 0..8 from Held Item Change.
+                auto held = session.inventory.find(static_cast<int16_t>(36 + session.selectedSlot));
                 if (held != session.inventory.end() &&
                     held->second.id != -1 && held->second.count > 0)
                 {

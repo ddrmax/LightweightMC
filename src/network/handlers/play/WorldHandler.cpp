@@ -1,5 +1,6 @@
 #include "network/handlers/play/WorldHandler.hpp"
 #include "versions/v1_8/food.hpp"
+#include "network/protocol/PacketCodec47.hpp"
 #include <cmath>
 #include <unordered_map>
 #include <utility>
@@ -94,7 +95,7 @@ namespace WorldHandler
             // packets, so the shatter is logged server-side inside the helper.
             if (status == 2 && session.selectedSlot >= 0 && session.selectedSlot < 9)
             {
-                const int16_t hotbarKey = static_cast<int16_t>(session.selectedSlot);
+                const int16_t hotbarKey = static_cast<int16_t>(36 + session.selectedSlot);
                 const auto held = session.inventory.find(hotbarKey);
                 if (held != session.inventory.end() && InventoryHandler::getMaxDurability(held->second.id) > 0)
                 {
@@ -161,64 +162,101 @@ namespace WorldHandler
             // in maintainer repro, so bars stayed stuck empty. The full payload
             // was already consumed above, so just apply hunger and return:
             // face==255 must NEVER touch world modification logic below.
-            static const std::unordered_map<int32_t, std::pair<int32_t, float>> FOOD_TABLE = {
-                // ID -> {foodPoints, saturationRatio} — Vanilla 1.8 Protocol 47 Nutrition
+            // Nutrition values come from LightweightMC::Versions::V1_8::Food::forItem()
+            // (curated from prismarineJS minecraft-data, see include/versions/v1_8/food.hpp).
 
-                // Basic Produce & Staples
-                {260, {4, 0.3f}}, // Apple (ID 260) -> 4 food (2 shanks), 2.4 saturation
-                {282, {6, 0.6f}}, // Mushroom Stew (ID 282) -> 6 food, 7.2 saturation
-                {297, {5, 0.6f}}, // Bread (ID 297) -> 5 food, 6.0 saturation
-                {357, {2, 0.1f}}, // Cookie (ID 357) -> 2 food, 0.4 saturation
-                {360, {2, 0.3f}}, // Melon Slice (ID 360) -> 2 food, 1.2 saturation
-                {391, {4, 0.6f}}, // Carrot (ID 391) -> 4 food, 4.8 saturation
-                {392, {1, 0.3f}}, // Potato (ID 392) -> 1 food, 0.6 saturation
-                {393, {6, 0.6f}}, // Baked Potato (ID 393) -> 6 food, 7.2 saturation
-                {394, {2, 0.3f}}, // Poisonous Potato (ID 394) -> 2 food, 1.2 saturation
-                {400, {8, 0.3f}}, // Pumpkin Pie (ID 400) -> 8 food, 4.8 saturation
-
-                // Meats (Raw & Cooked)
-                {319, {3, 0.3f}},  // Raw Porkchop (ID 319) -> 3 food, 1.8 saturation
-                {320, {8, 0.8f}},  // Cooked Porkchop (ID 320) -> 8 food, 12.8 saturation
-                {363, {3, 0.3f}},  // Raw Beef (ID 363) -> 3 food, 1.8 saturation
-                {364, {8, 0.8f}},  // Steak (Cooked Beef - ID 364) -> 8 food, 12.8 saturation
-                {365, {2, 0.3f}},  // Raw Chicken (ID 365) -> 2 food, 1.2 saturation
-                {366, {6, 0.6f}},  // Cooked Chicken (ID 366) -> 6 food, 7.2 saturation
-                {367, {4, 0.1f}},  // Rotten Flesh (ID 367) -> 4 food, 0.8 saturation
-                {411, {3, 0.3f}},  // Raw Rabbit (ID 411) -> 3 food, 1.8 saturation
-                {412, {5, 0.6f}},  // Cooked Rabbit (ID 412) -> 5 food, 6.0 saturation
-                {413, {10, 0.6f}}, // Rabbit Stew (ID 413) -> 10 food, 12.0 saturation
-                {423, {2, 0.3f}},  // Raw Mutton (ID 423) -> 2 food, 1.2 saturation
-                {424, {6, 0.8f}},  // Cooked Mutton (ID 424) -> 6 food, 9.6 saturation
-
-                // Fish (ID 349 Raw Fish, ID 350 Cooked Fish - metadata differentiates types if needed)
-                {349, {2, 0.1f}}, // Raw Fish (Cod - ID 349) -> 2 food, 0.4 saturation
-                {350, {5, 0.6f}}, // Cooked Fish (Cod - ID 350) -> 5 food, 6.0 saturation
-
-                // Golden Foods
-                {322, {4, 1.2f}}, // Golden Apple (ID 322) -> 4 food, 9.6 saturation
-                {396, {6, 1.2f}}  // Golden Carrot (ID 396) -> 6 food, 14.4 saturation
-            };
+            LightweightMC::Core::Logger::info("[Food] " + session.username + " right-click eat (face=255)");
 
             if (session.selectedSlot >= 0 && session.selectedSlot < 9)
             {
-                const int16_t slotKey = static_cast<int16_t>(session.selectedSlot);
+                // Single canonical basis: hotbar stacks live at wire keys 36..44
+                // in session.inventory, so the held stack is exactly the entry
+                // consumeSelectedFood() decrements. The old dual-key (slot vs
+                // 36+slot) dance is gone; keys 0..8 are craft-output/grid/armor
+                // slots on the wire and must never hold hotbar stacks.
+                const int16_t slotKey = static_cast<int16_t>(36 + session.selectedSlot);
                 auto heldIt = session.inventory.find(slotKey);
+                int16_t actualKey = slotKey;
+                if (heldIt != session.inventory.end() &&
+                    (heldIt->second.id <= 0 || heldIt->second.count == 0))
+                {
+                    heldIt = session.inventory.end();
+                }
                 if (heldIt != session.inventory.end() && heldIt->second.id > 0 && heldIt->second.count > 0)
                 {
-                    auto n = LightweightMC::Versions::V1_8::Food::forItem(heldIt->second.id);
+                    const int16_t heldId = heldIt->second.id;
+                    const uint8_t heldCount = heldIt->second.count;
+                    auto n = LightweightMC::Versions::V1_8::Food::forItem(heldId);
                     if (n.foodPoints > 0)
                     {
                         const bool eaten = session.consumeSelectedFood(n.foodPoints, n.saturation);
                         if (eaten)
                         {
+                            LightweightMC::Core::Logger::info("[Food] " + session.username +
+                                " ate item id=" + std::to_string(heldId) +
+                                " count=" + std::to_string(heldCount) +
+                                " food+" + std::to_string(n.foodPoints) +
+                                " sat+" + std::to_string(n.saturation));
+
+                            // Persist inventory change (food consumed) immediately
+                            // so it survives a crash/disconnect — mirrors the
+                            // tool-damage path in handleDigging.
+                            Player::PlayerManager::getInstance().savePlayerState(session, database);
+
+                            // Full inventory sync (S2C Window Items 0x30) so the
+                            // client hotbar shows the decremented count — mirrors
+                            // shift-click handling in handleClickWindow. A single
+                            // Set Slot (0x2F) can desync if the client's internal
+                            // slot mapping differs from ours (hotbar 0-8 vs wire
+                            // 36-44); Window Items sends all 45 slots authoritatively.
+                            InventoryHandler::sendPlayerInventoryWindowItems(clientFd, session, net);
+                            LightweightMC::Core::Logger::info("[Food] [WindowItems] sent fd=" + std::to_string(clientFd) +
+                                " slot=" + std::to_string(actualKey) +
+                                " count=" + std::to_string((int)heldIt->second.count));
+
                             std::vector<uint8_t> hpPayload;
                             LightweightMC::Network::Packet::writeFloat(hpPayload, session.health);
                             LightweightMC::Network::Packet::writeVarInt(hpPayload, static_cast<int32_t>(session.foodLevel));
                             LightweightMC::Network::Packet::writeFloat(hpPayload, session.foodSaturationLevel);
                             net.sendPacket(clientFd, 0x06, hpPayload);
                         }
+                        else
+                        {
+                            // foodPoints > 0 but eaten==false means food bar was full (20).
+                            LightweightMC::Core::Logger::warn("[Food] " + session.username +
+                                " food bar full — cannot eat item id=" + std::to_string(heldId));
+                        }
+                    }
+                    else
+                    {
+                        LightweightMC::Core::Logger::warn("[Food] " + session.username +
+                            " held item id=" + std::to_string(heldId) +
+                            " is not food (foodPoints=0) at slot " + std::to_string(slotKey));
                     }
                 }
+                else
+                {
+                    LightweightMC::Core::Logger::warn("[Food] " + session.username +
+                        " no edible item in selected slot " + std::to_string(session.selectedSlot));
+                    // Dump non-empty inventory keys for diagnosis
+                    std::string keys;
+                    for (const auto &kv : session.inventory)
+                    {
+                        if (kv.second.id != -1 && kv.second.count > 0)
+                        {
+                            if (!keys.empty()) keys += ", ";
+                            keys += std::to_string(kv.first) + ":id=" + std::to_string(kv.second.id) +
+                                    " cnt=" + std::to_string(kv.second.count);
+                        }
+                    }
+                    LightweightMC::Core::Logger::warn("[Food] " + session.username +
+                        " inventory non-empty keys: [" + keys + "]");
+                }
+            }
+            else
+            {
+                LightweightMC::Core::Logger::warn("[Food] " + session.username +
+                    " selectedSlot=" + std::to_string(session.selectedSlot) + " out of range");
             }
 
             return;
@@ -638,6 +676,82 @@ namespace WorldHandler
 
         net.broadcastPacket(0x23, blockChange);
 
+        // ---- Tile Entity init: S2C 0x39 Update Block Entity for block types
+        // that carry tile-entity state (chests, signs, furnaces, etc.). This
+        // tells the client to initialise the block entity at this position so
+        // container GUIs, sign text, furnace burn times, etc. render correctly.
+        // For signs placed without prior text we send default blank lines; the
+        // client will send UpdateSign (0x12) when the player edits the sign.
+        // -------------------------------------------------------------------
+        uint16_t placedBlockId = blockData >> 4;
+        bool isBlockEntity = (placedBlockId == 23 || placedBlockId == 54 ||
+                              placedBlockId == 61 || placedBlockId == 62 ||
+                              placedBlockId == 63 || placedBlockId == 68 ||
+                              placedBlockId == 84 || placedBlockId == 116 ||
+                              placedBlockId == 117 || placedBlockId == 130 ||
+                              placedBlockId == 145 || placedBlockId == 146 ||
+                              placedBlockId == 154 || placedBlockId == 158);
+
+        if (isBlockEntity)
+        {
+            // Default sign NBT with blank lines (filled in by UpdateSign later).
+            std::vector<uint8_t> signNbt;
+            signNbt.push_back(0x0A); // TAG_Compound (no name follows)
+            auto nbtStr = [&signNbt](const std::string &nm, const std::string &val)
+            {
+                signNbt.push_back(0x08); // TAG_String
+                uint16_t nlen = static_cast<uint16_t>(nm.size());
+                signNbt.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>(nlen & 0xFF));
+                signNbt.insert(signNbt.end(), nm.begin(), nm.end());
+                uint16_t vlen = static_cast<uint16_t>(val.size());
+                signNbt.push_back(static_cast<uint8_t>((vlen >> 8) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>(vlen & 0xFF));
+                signNbt.insert(signNbt.end(), val.begin(), val.end());
+            };
+            auto nbtInt = [&signNbt](const std::string &nm, int32_t v)
+            {
+                signNbt.push_back(0x03); // TAG_Int
+                uint16_t nlen = static_cast<uint16_t>(nm.size());
+                signNbt.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>(nlen & 0xFF));
+                signNbt.insert(signNbt.end(), nm.begin(), nm.end());
+                signNbt.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>(v & 0xFF));
+            };
+            auto nbtShort = [&signNbt](const std::string &nm, int16_t v)
+            {
+                signNbt.push_back(0x02); // TAG_Short
+                uint16_t nlen = static_cast<uint16_t>(nm.size());
+                signNbt.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>(nlen & 0xFF));
+                signNbt.insert(signNbt.end(), nm.begin(), nm.end());
+                signNbt.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+                signNbt.push_back(static_cast<uint8_t>(v & 0xFF));
+            };
+            if (placedBlockId == 63 || placedBlockId == 68)
+            {
+                nbtStr("Text1", "");
+                nbtStr("Text2", "");
+                nbtStr("Text3", "");
+                nbtStr("Text4", "");
+                nbtInt("x", placeX);
+                nbtShort("y", static_cast<int16_t>(placeY));
+                nbtInt("z", placeZ);
+                nbtStr("id", "Sign");
+            }
+            signNbt.push_back(0x00); // TAG_End
+
+            uint8_t actionType = (placedBlockId == 63 || placedBlockId == 68) ? 0x03 : 0x00;
+            std::vector<uint8_t> bePayload =
+                LightweightMC::Network::Protocol::encodeUpdateBlockEntity(
+                    static_cast<int32_t>(placedBlockId), placeX, placeY, placeZ,
+                    actionType, signNbt);
+            net.broadcastPacket(0x35, bePayload, clientFd);
+        }
+
         // Block placement discount (Bug 3 fix). After a successful block
         // placement the held item's stack is decremented by one. When the
         // count reaches zero the slot is cleared. A Set Slot packet (S2C
@@ -648,7 +762,7 @@ namespace WorldHandler
         // players can duplicate blocks indefinitely.
         if (session.selectedSlot >= 0 && session.selectedSlot < 9)
         {
-            const int16_t heldSlotKey = static_cast<int16_t>(session.selectedSlot);
+            const int16_t heldSlotKey = static_cast<int16_t>(36 + session.selectedSlot);
             auto heldIt = session.inventory.find(heldSlotKey);
             if (heldIt != session.inventory.end() && heldIt->second.id != -1 && heldIt->second.count > 0)
             {
@@ -687,20 +801,19 @@ namespace WorldHandler
 
     // ---------------------------------------------------------------------
     // 0x12 UpdateSign — C2S packet emitted when the client edits a sign
-    // in world. Wire format per protocol_types.hpp
-    // UpdateSign_6cfea0d3::deserialize:
+    // in world. Wire format per protocol_types.hpp:
     //   long location      (8 bytes, same encoding as Digging / Place)
     //   string text1       (up to 15 chars)
     //   string text2
     //   string text3
     //   string text4
-    // The server does not yet model sign text; we consume and log the
-    // coordinates so future sign-persistence code can plug in without
-    // touching the wire path.
+    // The server persists the four text lines to the block_entities table
+    // (keyed by block coordinate) and broadcasts S2C 0x39 (Update Block
+    // Entity, action type 3 = sign) so all nearby clients render the new
+    // text without desync.
     // ---------------------------------------------------------------------
-    void handleUpdateSign(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd, LightweightMC::Storage::WorldStorage &worldStorage)
+    void handleUpdateSign(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd, LightweightMC::Storage::WorldStorage &worldStorage, LightweightMC::Storage::Database &database, LightweightMC::Network::NetworkManager &net)
     {
-        (void)clientFd;
         (void)worldStorage;
         const uint64_t val = LightweightMC::Network::Packet::readUInt64Bounded(data, offset, packetEnd);
         int32_t signX = static_cast<int32_t>(val >> 38);
@@ -716,12 +829,86 @@ namespace WorldHandler
         const std::string s3 = LightweightMC::Network::Packet::readStringBounded(data, offset, packetEnd);
         const std::string s4 = LightweightMC::Network::Packet::readStringBounded(data, offset, packetEnd);
 
+        // ---- Persist sign text to block_entities (chunk_x, chunk_z, rel_x, y, rel_z) ----
+        int chunkX = LightweightMC::Network::Packet::floorDiv(signX, 16.0);
+        int chunkZ = LightweightMC::Network::Packet::floorDiv(signZ, 16.0);
+        int relX = LightweightMC::Network::Packet::floorMod(signX, 16.0);
+        int relZ = LightweightMC::Network::Packet::floorMod(signZ, 16.0);
+
+        // Build sign NBT blob: {Text1..Text4, x, y, z, id:"Sign"}
+        std::vector<uint8_t> nbt;
+        nbt.push_back(0x0A); // TAG_Compound (no name follows)
+        auto nbtStr = [&nbt](const std::string &nm, const std::string &val)
+        {
+            nbt.push_back(0x08); // TAG_String
+            uint16_t nlen = static_cast<uint16_t>(nm.size());
+            nbt.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>(nlen & 0xFF));
+            nbt.insert(nbt.end(), nm.begin(), nm.end());
+            uint16_t vlen = static_cast<uint16_t>(val.size());
+            nbt.push_back(static_cast<uint8_t>((vlen >> 8) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>(vlen & 0xFF));
+            nbt.insert(nbt.end(), val.begin(), val.end());
+        };
+        auto nbtInt = [&nbt](const std::string &nm, int32_t v)
+        {
+            nbt.push_back(0x03); // TAG_Int
+            uint16_t nlen = static_cast<uint16_t>(nm.size());
+            nbt.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>(nlen & 0xFF));
+            nbt.insert(nbt.end(), nm.begin(), nm.end());
+            nbt.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>(v & 0xFF));
+        };
+        auto nbtShort = [&nbt](const std::string &nm, int16_t v)
+        {
+            nbt.push_back(0x02); // TAG_Short
+            uint16_t nlen = static_cast<uint16_t>(nm.size());
+            nbt.push_back(static_cast<uint8_t>((nlen >> 8) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>(nlen & 0xFF));
+            nbt.insert(nbt.end(), nm.begin(), nm.end());
+            nbt.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+            nbt.push_back(static_cast<uint8_t>(v & 0xFF));
+        };
+        nbtStr("Text1", s1);
+        nbtStr("Text2", s2);
+        nbtStr("Text3", s3);
+        nbtStr("Text4", s4);
+        nbtInt("x", signX);
+        nbtShort("y", static_cast<int16_t>(signY));
+        nbtInt("z", signZ);
+        nbtStr("id", "Sign");
+        nbt.push_back(0x00); // TAG_End
+
+        // Sign post = 63, wall sign = 68. Use the block id at the location if
+        // available, otherwise default to sign post (63).
+        uint16_t signBlockData = worldStorage.getBlockAt(chunkX, chunkZ, relX, signY, relZ);
+        uint16_t signBlockId = signBlockData >> 4;
+        if (signBlockId != 63 && signBlockId != 68)
+            signBlockId = 63; // default to sign post
+
+        if (!database.saveContainer(chunkX, chunkZ, relX, signY, relZ,
+                                    static_cast<uint16_t>(signBlockId), nbt))
+        {
+            LightweightMC::Core::Logger::warn(
+                "[Sign] Failed to persist sign text at (" +
+                std::to_string(signX) + ", " + std::to_string(signY) + ", " +
+                std::to_string(signZ) + ") for player " + session.username);
+        }
+
+        // ---- Broadcast S2C 0x39 Update Block Entity (action type 3 = sign) ----
+        std::vector<uint8_t> bePayload =
+            LightweightMC::Network::Protocol::encodeUpdateBlockEntity(
+                static_cast<int32_t>(signBlockId), signX, signY, signZ, 0x03, nbt);
+        net.broadcastPacket(0x35, bePayload, clientFd);
+
         LightweightMC::Core::Logger::info("[Sign] " + session.username +
                                           " updated sign at (" +
                                           std::to_string(signX) + ", " +
                                           std::to_string(signY) + ", " +
                                           std::to_string(signZ) + ") lines: " +
-                                          s1 + " / " + s2 + " / " + s3 + " / " + s4 +
-                                          " (sign-text model pending)");
+                                          s1 + " / " + s2 + " / " + s3 + " / " + s4);
     }
 } // namespace WorldHandler
