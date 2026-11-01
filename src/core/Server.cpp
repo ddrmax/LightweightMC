@@ -132,6 +132,7 @@ namespace LightweightMC::Core
         // --- Entities & Combat ---
         cmdMgr.registerCommand(std::make_shared<BossbarCommand>());
         cmdMgr.registerCommand(std::make_shared<DamageCommand>());
+        cmdMgr.registerCommand(std::make_shared<FoodCommand>());
         cmdMgr.registerCommand(std::make_shared<KillCommand>());
         cmdMgr.registerCommand(std::make_shared<RespawnCommand>()); // aliases /r
         cmdMgr.registerCommand(std::make_shared<LootCommand>());
@@ -166,6 +167,7 @@ namespace LightweightMC::Core
         cmdMgr.registerCommand(std::make_shared<DebugCommand>());
         cmdMgr.registerCommand(std::make_shared<JfrCommand>());
         cmdMgr.registerCommand(std::make_shared<PerfCommand>());
+        cmdMgr.registerCommand(std::make_shared<ComputeCommand>());
     }
 
     // Example of a processing loop for the system console
@@ -304,6 +306,14 @@ namespace LightweightMC::Core
         {
             return m_network.setWorldSeedByName(worldName, seed);
         };
+        consoleCtx.getWorldTicks = [this](const std::string &worldName) -> int64_t
+        {
+            return m_network.getWorldTicksByName(worldName);
+        };
+        consoleCtx.setWorldTicks = [this](const std::string &worldName, int64_t ticks) -> bool
+        {
+            return m_network.setWorldTicksByName(worldName, ticks);
+        };
         consoleCtx.setBlockAtPlane = [this](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool
         {
             return m_network.setBlockAtPlane(planeId, wx, wy, wz, combined);
@@ -335,6 +345,10 @@ namespace LightweightMC::Core
         consoleCtx.grantXpToPlayer = [this](const std::string &name, int32_t amount) -> int
         {
             return m_network.grantPlayerXp(name, amount);
+        };
+        consoleCtx.setPlayerFood = [this](const std::string &name, int32_t foodLevel, float foodSaturation) -> bool
+        {
+            return m_network.setPlayerFood(name, foodLevel, foodSaturation);
         };
 
         // Phase 8 world-model backends -- see the matching block in the
@@ -600,6 +614,14 @@ namespace LightweightMC::Core
             {
                 return network->setWorldSeedByName(worldName, seed);
             };
+            consoleCtx.getWorldTicks = [network](const std::string &worldName) -> int64_t
+            {
+                return network->getWorldTicksByName(worldName);
+            };
+            consoleCtx.setWorldTicks = [network](const std::string &worldName, int64_t ticks) -> bool
+            {
+                return network->setWorldTicksByName(worldName, ticks);
+            };
             consoleCtx.setBlockAtPlane = [network](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool
             {
                 return network->setBlockAtPlane(planeId, wx, wy, wz, combined);
@@ -630,6 +652,10 @@ namespace LightweightMC::Core
             consoleCtx.grantXpToPlayer = [network](const std::string &name, int32_t amount) -> int
             {
                 return network->grantPlayerXp(name, amount);
+            };
+            consoleCtx.setPlayerFood = [network](const std::string &name, int32_t foodLevel, float foodSaturation) -> bool
+            {
+                return network->setPlayerFood(name, foodLevel, foodSaturation);
             };
 
             // Phase 8 world-model backends -- NetworkWorlds.cpp::importWorld/
@@ -936,6 +962,13 @@ namespace LightweightMC::Core
 
                 m_chunkManager.tickActiveChunks(nowMs);
                 Core::Logger::trace("Server is Ticking Active Chunks");
+                // Master game clock (day/night cycle): advance every live
+                // plane by one world tick while the `advance_time` gamerule
+                // holds; wraps at gamerule day_length (default 24 000 = 20
+                // real minutes). Persisted throttled (~10 s) via Network-
+                // Manager::tickWorldTime. Predicates in world/GameTime.hpp
+                // drive mob spawn gating and the zombie sunlight check.
+                m_network.tickWorldTime(nowMs);
                 // Natural-HP regeneration sweep (0x06 refresh per healed session).
                 // Fixed at the same 20 Hz cadence as the world tick so regen timing stays close to vanilla without a second accumulator.
                 m_network.tickRegeneration(nowMs);

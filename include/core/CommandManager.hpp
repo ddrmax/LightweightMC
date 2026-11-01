@@ -184,6 +184,17 @@ struct CommandContext
     std::function<bool(const std::string &worldName, int64_t seed)> setWorldSeed =
         [](const std::string &, int64_t) -> bool { return false; };
 
+    // Optional hooks used by /time. getWorldTicks resolves a plane name to
+    // its current world-tick counter (20 Hz, wraps at gamerule day_length);
+    // NetworkManager wires these to WorldManager's m_worldTicks cache with an
+    // SQLite world_registry fallback. setWorldTicks writes both layers so a
+    // restart resumes at the same phase of day. Defaults let a bare console
+    // run still parse /time without crashing.
+    std::function<int64_t(const std::string &worldName)> getWorldTicks =
+        [](const std::string &) -> int64_t { return 0; };
+    std::function<bool(const std::string &worldName, int64_t ticks)> setWorldTicks =
+        [](const std::string &, int64_t) -> bool { return false; };
+
     // Optional hook used by /setblock <x> <y> <z> <blockName> and
     // /place <block> <x1 y1 z1 x2 y2 z2>. Dispatches to NetworkManager:
     //:setBlockAtPlane -> WorldStorage::saveBlockChange on the target
@@ -229,6 +240,14 @@ struct CommandContext
     // downward, so levels "lost" is reported as a negative count).
     std::function<int(const std::string &playerName, int32_t amount)> grantXpToPlayer =
         [](const std::string &, int32_t) -> int { return 0; };
+
+    // Phase 18 backends (implemented in src/network/NetworkGameplay.cpp).
+    // setPlayerFood force-sets a player's food level and saturation (used by
+    // /food). It returns true on success and false if the player is unknown
+    // or offline. When the player is online it also pushes S2C UpdateHealth
+    // (0x06) so the client HUD updates immediately.
+    std::function<bool(const std::string &playerName, int32_t foodLevel, float foodSaturation)> setPlayerFood =
+        [](const std::string &, int32_t, float) -> bool { return false; };
 
     // ------------------------------------------------------------------------
     // Phase 8 world-model backends (implemented in NetworkWorlds.cpp). The

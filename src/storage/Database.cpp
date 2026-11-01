@@ -639,7 +639,8 @@ namespace LightweightMC::Storage
                 spawn_x DOUBLE DEFAULT 0.5,
                 spawn_y DOUBLE DEFAULT 64.0,
                 spawn_z DOUBLE DEFAULT 0.5,
-                world_seed INTEGER DEFAULT 0
+                world_seed INTEGER DEFAULT 0,
+                world_ticks INTEGER DEFAULT 0
             );
         )";
         char *errMsg = nullptr;
@@ -664,6 +665,7 @@ namespace LightweightMC::Storage
             "spawn_y DOUBLE DEFAULT 64.0",
             "spawn_z DOUBLE DEFAULT 0.5",
             "world_seed INTEGER DEFAULT 0",
+            "world_ticks INTEGER DEFAULT 0",
         };
         for (const char *col : newColumns)
         {
@@ -1058,6 +1060,48 @@ namespace LightweightMC::Storage
             return kDefaultWorldSeed;
         sqlite3_bind_int(stmt, 1, id);
         int64_t out = kDefaultWorldSeed;
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            out = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        return out;
+    }
+
+    // Game clock (day/night cycle). Same UPDATE/SELECT shape as setWorldSeed/
+    // getWorldSeed: the value is a raw world-tick counter (20 Hz, wraps at
+    // gamerule day_length in Server.cpp's tick loop). getWorldTicks returns
+    // 0 for missing/unset rows so legacy planes boot at dawn.
+    bool Database::setWorldTicks(int32_t id, int64_t ticks)
+    {
+        if (!m_db)
+            return false;
+        const char *sql = "UPDATE world_registry SET world_ticks = ? WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setWorldTicks: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int64(stmt, 1, ticks);
+        sqlite3_bind_int(stmt, 2, id);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        if (!ok)
+        {
+            Core::Logger::warn("setWorldTicks: no world_registry row for plane id " + std::to_string(id));
+        }
+        return ok;
+    }
+
+    int64_t Database::getWorldTicks(int32_t id) const
+    {
+        if (!m_db)
+            return 0;
+        const char *sql = "SELECT world_ticks FROM world_registry WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return 0;
+        sqlite3_bind_int(stmt, 1, id);
+        int64_t out = 0;
         if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
             out = sqlite3_column_int64(stmt, 0);
         sqlite3_finalize(stmt);

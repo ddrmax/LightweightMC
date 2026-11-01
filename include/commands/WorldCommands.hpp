@@ -3,6 +3,12 @@
 #include "core/CommandManager.hpp"
 #include "world/MC17BlockIds.hpp"
 #include "core/Logger.hpp"
+// 0.0.15 game-time drop: TimeCommand's /time handler reads the day_length
+// gamerule (world/GameRules.hpp) and answers phase labels through the shared
+// day/night predicates (world/GameTime.hpp) so chat replies match exactly
+// what EntityManager spawn gating and the zombie sunlight check will see.
+#include "world/GameRules.hpp"
+#include "world/GameTime.hpp"
 // 0.0.15 phase 4: /world create's --inventory / --force-gamemode flags need
 // the Storage::kInventoryPolicy* / Storage::kForceGameMode* constexprs and
 // Storage::kDefaultWorldSeed so the parser maps user tokens to the same
@@ -565,18 +571,141 @@ class TimeCommand : public Command
 public:
     std::string getName() const override { return "time"; }
     std::string getDescription() const override { return "Change or view the world's game time."; }
-    std::string getUsage() const override { return "/time <set|add|query> <value>"; }
+    std::string getUsage() const override { return "/time <get|set N|add N|day|night|noon|midnight|dawn|skip> [planeName]"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 2; }
 
+    // Changing the clock changes world state for every player on the wire
+    // (mob despawn / crop growth), so console replies broadcast to clients.
+    bool affectsPlayerState() const override { return true; }
+
     void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
     {
-        if (args.empty())
+        auto &gr = LightweightMC::World::GameRules::getInstance();
+        int64_t dayLength = LightweightMC::Storage::kDefaultDayLength;
+        int64_t ruleLen = 0;
+        if (gr.getInt("day_length", ruleLen) && ruleLen > 0)
+            dayLength = ruleLen;
+
+        // Optional trailing plane name (default: overworld). Only treat the
+        // last token as a plane when it is neither a keyword nor a number.
+        std::string planeName = "overworld";
+        std::vector<std::string> coreArgs = args;
+        if (coreArgs.size() >= 2)
+        {
+            const std::string &last = coreArgs.back();
+            const bool looksKeyword = (last == "get" || last == "set" || last == "add" ||
+                                       last == "day" || last == "night" || last == "noon" ||
+                                       last == "midnight" || last == "dawn" || last == "skip");
+            const bool looksNumber = !last.empty() && ::isdigit(static_cast<unsigned char>(last[0]));
+            if (!looksKeyword && !looksNumber)
+            {
+                planeName = last;
+                coreArgs.pop_back();
+            }
+        }
+
+        if (coreArgs.empty())
         {
             ctx.reply("Usage: " + getUsage());
             return;
         }
-        ctx.reply("Time adjusts.");
+
+        const std::string &sub = coreArgs[0];
+
+        // Wrap helper: keep every write inside [0, dayLength).
+        auto wrap = [dayLength](int64_t t) -> int64_t
+        {
+            int64_t v = t % dayLength;
+            if (v < 0)
+                v += dayLength;
+            return v;
+        };
+
+        // Phase label for the reply, computed with the shared predicates so
+        // what players see matches what mob / crop code decides.
+        auto phaseLabel = [dayLength](int64_t ticks) -> std::string
+        {
+            using namespace LightweightMC::World::GameTime;
+            if (isNight(ticks, dayLength))
+                return "night";
+            const int p = phaseOf(ticks, dayLength);
+            if (p == 0)
+                return "day";
+            if (p == 1)
+                return "sunset";
+            return "sunrise";
+        };
+
+        auto reportClock = [&](int64_t ticks)
+        {
+            const int64_t dayNumber = ticks / LightweightMC::Storage::kDefaultDayLength + 1;
+            ctx.reply("Time of day: " + phaseLabel(ticks) +
+                      " | tick " + std::to_string(ticks) +
+                      " / " + std::to_string(dayLength) +
+                      " (day " + std::to_string(dayNumber) + ")");
+        };
+
+        if (sub == "get")
+        {
+            reportClock(ctx.getWorldTicks(planeName));
+            return;
+        }
+
+        if (sub == "set" || sub == "add")
+        {
+            if (coreArgs.size() < 2)
+            {
+                ctx.reply("Usage: /time " + sub + " <ticks>");
+                return;
+            }
+            const int64_t value = std::strtoll(coreArgs[1].c_str(), nullptr, 10);
+            const int64_t current = ctx.getWorldTicks(planeName);
+            const int64_t target = (sub == "set") ? wrap(value) : wrap(current + value);
+            if (!ctx.setWorldTicks(planeName, target))
+            {
+                ctx.reply("Could not set clock for plane '" + planeName + "'.");
+                return;
+            }
+            LightweightMC::Core::Logger::info("[Time] " + ctx.sender +
+                                              " set clock on '" + planeName + "' to " + std::to_string(target));
+            reportClock(target);
+            return;
+        }
+
+        // Shortcut jumps. Anchors come from GameTime helpers so they follow
+        // day_length changes made via /gamerule.
+        int64_t current = ctx.getWorldTicks(planeName);
+        int64_t target = 0;
+        if (sub == "day")
+            target = 0; // sunrise of a fresh day
+        else if (sub == "noon")
+            target = LightweightMC::World::GameTime::tickAtNoon(dayLength);
+        else if (sub == "night")
+            target = LightweightMC::World::GameTime::phaseBoundary(dayLength, LightweightMC::World::GameTime::kNightStart);
+        else if (sub == "midnight")
+            target = LightweightMC::World::GameTime::tickAtMidnight(dayLength);
+        else if (sub == "dawn")
+            target = LightweightMC::World::GameTime::tickAtDawn(dayLength);
+        else if (sub == "skip")
+        {
+            const int64_t dawn = LightweightMC::World::GameTime::tickAtDawn(dayLength);
+            target = (current >= dawn) ? 0 : dawn;
+        }
+        else
+        {
+            ctx.reply("Unknown subcommand. Usage: " + getUsage());
+            return;
+        }
+
+        if (!ctx.setWorldTicks(planeName, target))
+        {
+            ctx.reply("Could not set clock for plane '" + planeName + "'.");
+            return;
+        }
+        LightweightMC::Core::Logger::info("[Time] " + ctx.sender +
+                                          " jumped clock on '" + planeName + "' to " + std::to_string(target));
+        reportClock(target);
     }
 };
 

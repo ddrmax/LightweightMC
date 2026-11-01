@@ -711,6 +711,101 @@ namespace LightweightMC::Network
         return sqliteOk;
     }
 
+    // ---- Per-plane game clock (day/night cycle) ----------------------------
+    // Same name-resolution path as /seed: lookupWorldId -> WorldManager cache
+    // first, SQLite world_registry world_ticks column as fallback. Unknown
+    // planes report 0 (fresh-world dawn) rather than failing so /time get on
+    // a deactivated plane still answers.
+    int64_t NetworkManager::getWorldTicksByName(const std::string &worldName) const
+    {
+        if (worldName.empty())
+            return 0;
+        const int32_t id = lookupWorldId(worldName);
+        if (id == -2147483648)
+            return 0;
+        const int64_t cached = m_worldManager.getWorldTicks(id);
+        if (cached != 0)
+            return cached;
+        return m_database.getWorldTicks(id);
+    }
+
+    bool NetworkManager::setWorldTicksByName(const std::string &worldName, int64_t ticks)
+    {
+        if (worldName.empty())
+            return false;
+        const int32_t id = lookupWorldId(worldName);
+        if (id == -2147483648)
+        {
+            Core::Logger::warn("setWorldTicksByName: plane \"" + worldName + "\" is not registered");
+            return false;
+        }
+        const bool sqliteOk = m_database.setWorldTicks(id, ticks);
+        m_worldManager.setWorldTicks(id, ticks);
+        // Keep the gamerule mirror in sync so EntityManager / ProcessingTick
+        // see a /time jump immediately, and persist day_length's clock to the
+        // gamerules table too (setInt persists) for cross-restart redundancy.
+        if (id == 0)
+            LightweightMC::World::GameRules::getInstance().setInt("world_ticks", ticks);
+        Core::Logger::info("setWorldTicksByName: plane \"" + worldName +
+                           "\" (id=" + std::to_string(id) + ") world_ticks=" + std::to_string(ticks));
+        return sqliteOk;
+    }
+
+    // Master-clock advance. Called exactly once per world tick from Server.
+    //cpp's fixed 20 Hz accumulator loop. Gates on the vanilla `advance_time`
+    // gamerule (frozen clock when false — /time set still works). Wraps each
+    // plane's counter at gamerule `day_length` so day phase math never sees a
+    // huge tick. SQLite write throttled to every 200 ticks (10 s) per plane:
+    // the in-memory WorldManager cache stays authoritative between flushes,
+    // and a crash costs at most 10 s of clock drift on restart.
+    void NetworkManager::tickWorldTime(int64_t nowMs)
+    {
+        auto &gr = LightweightMC::World::GameRules::getInstance();
+        bool advance = true;
+        if (gr.getBool("advance_time", advance))
+        {
+            // fall through with the gamerule value
+        }
+        else
+        {
+            advance = false;
+        }
+
+        int64_t dayLength = Storage::kDefaultDayLength;
+        int64_t ruleLen = 0;
+        if (gr.getInt("day_length", ruleLen) && ruleLen > 0)
+            dayLength = ruleLen;
+
+        // Throttle bookkeeping: persist each plane when its counter crosses a
+        // 200-tick boundary since the last flush.
+        static int64_t lastPersistMs = 0;
+        const bool dueToPersist = (nowMs - lastPersistMs) >= 10000;
+
+        for (auto &kv : m_worlds)
+        {
+            if (!kv.second)
+                continue;
+            const int32_t planeId = kv.first;
+            if (!advance)
+                continue;
+            int64_t ticks = m_worldManager.getWorldTicks(planeId);
+            ++ticks;
+            if (ticks >= dayLength)
+                ticks = 0; // wrap at the configured day length
+            m_worldManager.setWorldTicks(planeId, ticks);
+            if (dueToPersist)
+                m_database.setWorldTicks(planeId, ticks);
+            // Mirror the Overworld clock into the world_ticks gamerule so
+            // EntityManager / ProcessingTick read it every tick without a
+            // SQLite walk. setIntInMemory keeps this out of the gamerules DB.
+            if (planeId == 0)
+                gr.setIntInMemory("world_ticks", ticks);
+        }
+
+        if (dueToPersist)
+            lastPersistMs = nowMs;
+    }
+
     bool NetworkManager::setBlockAtPlane(int32_t planeId, int wx, int wy, int wz,
                                           uint16_t combined)
     {

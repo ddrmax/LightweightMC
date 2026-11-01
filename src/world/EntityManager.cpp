@@ -1,5 +1,7 @@
 #include "world/EntityManager.hpp"
 #include "world/GameRules.hpp"
+// Day/night predicates for mob spawn gating + zombie sunlight prep (0.0.15).
+#include "world/GameTime.hpp"
 #include "core/Logger.hpp"
 #include "network/Packet.hpp"
 
@@ -327,6 +329,21 @@ namespace LightweightMC::World
         int64_t i;
         if (gr.getInt("max_entity_cramming", i))
             m_maxCramming = i;
+
+        // Day/night gating: read the master clock from the world_ticks gamerule
+        // mirror (NetworkManager::tickWorldTime keeps it current at 20 Hz;
+        // SQLite persistence of the authoritative value stays throttled on
+        // world_registry) and classify with day_length. Hostile mobs spawn in
+        // the dark window (night + sunrise); isSunlightNow feeds the zombie
+        // surface-burn check (predicate exposed, burning not yet applied).
+        int64_t dayLength = LightweightMC::Storage::kDefaultDayLength;
+        int64_t ruleLen = 0;
+        if (gr.getInt("day_length", ruleLen) && ruleLen > 0)
+            dayLength = ruleLen;
+        int64_t ticks = 0;
+        gr.getInt("world_ticks", ticks); // fresh world: tick 0 == sunrise
+        m_isNightSpawn = LightweightMC::World::GameTime::isNight(ticks, dayLength);
+        m_isSunlightNow = LightweightMC::World::GameTime::isSunlight(ticks, dayLength);
     }
 
     // ---------------------------------------------------------------------
@@ -572,6 +589,21 @@ namespace LightweightMC::World
 
             else if (rec.kind == EntityKind::AGGRESSIVE)
             {
+                // Zombie fire behaviour prep (0.0.15 game-time drop): vanilla
+                // catches surface undead alight in direct sunlight at day /
+                // sunset and burns them out at the start of each day phase.
+                // m_isSunlightNow is refreshed every tick from world_ticks /
+                // day_length via refreshRuleCache(); the surface check (sky-
+                // visible column) plus staging a KIND_FIRE ground row through
+                // DirtyWriter lands with the burning tick itself, so this
+                // batch only exposes the predicate -- no log spam per tick.
+                if (m_isSunlightNow && rec.templateKey == "zombie")
+                {
+                    // TODO(game-time phase 9): WorldStorage column scan for a
+                    // sky-visible surface, then dirty.stageGround(...FIRE...)
+                    // + apply the fire_damage gamerule across lifetimeMs.
+                }
+
                 const double ar = rec.aggroRange > 0.0 ? rec.aggroRange : m_aggroRadius;
                 const bool griefOk = m_griefing || m_universalAnger;
                 if (griefOk && hostile && hostileD2 <= ar * ar)
@@ -917,8 +949,10 @@ namespace LightweightMC::World
             place("cow", EntityKind::PASSIVE);
             place("sheep", EntityKind::PASSIVE);
         }
-        // Aggressive: only when the world allows it.
-        if (m_spawnMonsters)
+        // Aggressive: only when the world allows it. Day/night gating (0.0.15
+        // game-time drop): hostile mobs spawn in the dark window only (night +
+        // sunrise) — vanilla-1.8 semantics, daylight keeps them away.
+        if (m_spawnMonsters && m_isNightSpawn)
         {
             place("wolf", EntityKind::AGGRESSIVE);
             place("zombie", EntityKind::AGGRESSIVE);
@@ -1001,7 +1035,7 @@ namespace LightweightMC::World
             place("cow", EntityKind::PASSIVE);
             place("sheep", EntityKind::PASSIVE);
         }
-        if (m_spawnMonsters)
+        if (m_spawnMonsters && m_isNightSpawn)
         {
             place("wolf", EntityKind::AGGRESSIVE);
             place("zombie", EntityKind::AGGRESSIVE);
@@ -1146,7 +1180,7 @@ namespace LightweightMC::World
         }
         for (const auto &key : roster.aggressive)
         {
-            if (!m_spawnMonsters)
+            if (!m_spawnMonsters || !m_isNightSpawn)
                 break;
             place(key, EntityKind::AGGRESSIVE);
         }

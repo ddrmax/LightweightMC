@@ -48,6 +48,14 @@ namespace LightweightMC::World
         // --- Setters (validate type + value, persist on success) ---
         bool setBool(const std::string &name, bool value);
         bool setInt(const std::string &name, int64_t value);
+        // In-memory-only variant used for the hot game clock (`world_ticks`):
+        // Server.cpp's 20 Hz loop updates this every tick while SQLite stays
+        // throttled via NetworkManager::tickWorldTime -> Database::setWorldTicks.
+        // A restart re-hydrates from world_registry, so the in-memory value
+        // must never be persisted per-tick. Returns false for unknown/type-
+        // mismatched rules; a rule set this way only round-trips through the
+        // gamerules table if it was explicitly persisted earlier.
+        bool setIntInMemory(const std::string &name, int64_t value);
 
         // --- Introspection ---
         bool exists(const std::string &name) const;

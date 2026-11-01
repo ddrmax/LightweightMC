@@ -111,6 +111,15 @@ namespace LightweightMC::World
         // --- World Updates ---
         regBool(m_rules, "advance_time", true);
         regBool(m_rules, "advance_weather", true);
+        // Day/night cycle length in world ticks (20 Hz). Vanilla-1.8 default
+        // 24 000 = 20 real minutes per day. Phase boundaries scale
+        // proportionally when this is changed (see include/world/GameTime.hpp).
+        regInt(m_rules, "day_length", Storage::kDefaultDayLength);
+        // Live master clock mirror (in-memory hot copy; SQLite persistence of
+        // the authoritative value lives on world_registry's world_ticks column
+        // and is throttled via NetworkManager::tickWorldTime). EntityManager /
+        // ProcessingTick read this every tick without touching SQLite.
+        regInt(m_rules, "world_ticks", 0);
         regBool(m_rules, "lava_source_conversion", false);
         regInt(m_rules, "max_snow_accumulation_height", 1);
         regInt(m_rules, "random_tick_speed", 3);
@@ -207,6 +216,20 @@ namespace LightweightMC::World
         if (m_db)
             m_db->saveGameRule(it->second);
         return true;
+    }
+
+    bool GameRules::setIntInMemory(const std::string &name, int64_t value)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_rules.find(name);
+        if (it == m_rules.end())
+            return false;
+        if (it->second.type != Storage::GameRuleType::Int)
+            return false; // type mismatch: rule is a boolean
+
+        it->second.intValue = value;
+        return true; // deliberately skips saveGameRule so hot paths
+                     // (game clock every 50 ms) do not touch SQLite per call
     }
 
     bool GameRules::exists(const std::string &name) const

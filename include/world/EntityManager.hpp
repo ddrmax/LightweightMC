@@ -234,6 +234,11 @@ namespace LightweightMC::World
         template <typename Sender>
         void emitDespawn(const std::vector<int32_t> &ids, const Sender &broadcastPacket) const;
 
+        // Day/night spawn gating exposed to callers that want the current
+        // phase without re-deriving it (mob-spawn prep, zombie fire check).
+        bool isNightSpawn() const { return m_isNightSpawn; }
+        bool isSunlightNow() const { return m_isSunlightNow; }
+
     private:
         EntityManager();
         ~EntityManager() = default;
@@ -257,6 +262,14 @@ namespace LightweightMC::World
         bool m_spawnPhantoms{true};
         bool m_spawnTraders{true};
         bool m_spawnWardens{true};
+        // Day/night spawn gating (0.0.15 game-time drop). Refreshed in
+        // refreshRuleCache() from the per-plane WorldManager tick cache +
+        // gamerule day_length: hostile mobs only spawn during the dark
+        // window (night + sunrise) and burn in sunlight at day/sunset —
+        // isNightSpawn gates the roster seed; isSunlightNow feeds the zombie
+        // fire-behaviour predicate (exposed, not yet applied).
+        bool m_isNightSpawn{true};  // dark window: night + sunrise -> spawn hostile mobs
+        bool m_isSunlightNow{false}; // day + sunset: surface mobs catch fire (vanilla)
         bool m_griefing{true};
         bool m_universalAnger{false};
         int64_t m_maxCramming{24};

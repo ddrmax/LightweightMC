@@ -269,6 +269,26 @@ namespace LightweightMC::World
             return Storage::kDefaultWorldSeed;
         }
 
+        // ------------------------------------------------------------------
+        // Game clock (day/night cycle). m_worldTicks mirrors the world_registry
+        // `world_ticks` column per plane so EntityManager / ProcessingTick /
+        // Server.cpp read the clock every 50 ms without touching SQLite. The
+        // authoritative advance happens in Server.cpp's 20 Hz loop; this cache
+        // just carries it. Fresh planes start at tick 0 (dawn).
+        // ------------------------------------------------------------------
+        void setWorldTicks(int32_t planeId, int64_t ticks)
+        {
+            m_worldTicks[planeId] = ticks;
+        }
+
+        int64_t getWorldTicks(int32_t planeId) const
+        {
+            auto it = m_worldTicks.find(planeId);
+            if (it != m_worldTicks.end())
+                return it->second;
+            return 0; // tick 0 == sunrise of a fresh day, vanilla new-world start
+        }
+
     private:
         std::unordered_map<int32_t, std::unique_ptr<Storage::WorldStorage>> &m_worlds;
         std::unordered_map<int32_t, int32_t> m_skyDimension;
@@ -282,6 +302,9 @@ namespace LightweightMC::World
         // /seed reports the plane's runtime seed without walking SQLite
         // on every invocation.
         std::unordered_map<int32_t, int64_t> m_worldSeed;
+        // Per-plane game clock cache (ticks at 20 Hz). Kept hot because
+        // day/night predicates run per entity / per crop-tick.
+        std::unordered_map<int32_t, int64_t> m_worldTicks;
     };
 }
 

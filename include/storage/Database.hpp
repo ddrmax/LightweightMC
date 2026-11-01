@@ -155,6 +155,14 @@ namespace LightweightMC::Storage
     constexpr double kDefaultWorldSpawnZ = 0.5;
     constexpr int64_t kDefaultWorldSeed = 0;
 
+    // -------------------------------------------------------------
+    // Day/night cycle defaults (0.0.15 game-time drop). Vanilla-1.8: one
+    // full day = 24 000 world ticks at 20 Hz = 20 real minutes. The gamerule
+    // `day_length` carries the current value; phase boundaries in
+    // include/world/GameTime.hpp scale proportionally when it changes.
+    // -------------------------------------------------------------
+    constexpr int64_t kDefaultDayLength = 24000;
+
     // 0.0.15 phase 8c: snapshot form used by Database::readLevelDat / write
     // LevelDat below. Mirrors the subset of vanilla-1.8 level.dat that Light
     // weightMC round-trips (spawn, seed, mode, timestamps, format marker).
@@ -395,6 +403,20 @@ namespace LightweightMC::Storage
         // kDefaultWorldSeed when unset so legacy rows match "no seed
         // given" vanilla behaviour.
         int64_t getWorldSeed(int32_t id) const;
+
+        // ---- Per-plane game clock (0.0.15 day/night cycle) -------------
+        //   world_ticks (INTEGER, DEFAULT 0) -- the plane's master clock in
+        //   world ticks (20 Hz). One full day = gamerule `day_length`
+        //   (vanilla-1.8 default 24000 ticks = 20 real minutes). Server.cpp's
+        //   20 Hz loop advances it while the `advance_time` gamerule holds;
+        //   /time set/add/day/night rewrite it. Persisted throttled (~every
+        //   10 s) so a restart resumes at the same phase of day. Fresh CREATE
+        //   tables carry the column; legacy rows pick it up via the same
+        //   ALTER TABLE migration used for world_seed.
+        bool setWorldTicks(int32_t id, int64_t ticks);
+        // Reads the plane's world_ticks column; returns 0 when unset so
+        // pre-cycle planes boot at dawn like vanilla fresh worlds.
+        int64_t getWorldTicks(int32_t id) const;
 
         // Targeted UPDATE of only the spawn_x/spawn_y/spawn_z columns
         // on a player row keyed by UUID. Used by /spawnpoint so it

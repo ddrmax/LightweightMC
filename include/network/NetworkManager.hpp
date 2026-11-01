@@ -224,6 +224,27 @@ namespace LightweightMC::Network
         // generated chunks stay unchanged until re-generated).
         bool setWorldSeedByName(const std::string &worldName, int64_t seed);
 
+        // ---- Per-plane game clock (day/night cycle) -------------------------
+        // worldTicks / setWorldTicks mirror WorldManager's m_worldTicks cache
+        // (authoritative advance happens in Server.cpp's 20 Hz loop via
+        // tickWorldTime). getWorldTicksByName resolves a plane name through
+        // the same world_registry lookup /seed uses so /time reports the
+        // right plane. Returns 0 for unknown/unset planes (fresh-world dawn).
+        int64_t getWorldTicks(int32_t planeId) const { return m_worldManager.getWorldTicks(planeId); }
+        void setWorldTicks(int32_t planeId, int64_t ticks) { m_worldManager.setWorldTicks(planeId, ticks); }
+        int64_t getWorldTicksByName(const std::string &worldName) const;
+        // Writes the WorldManager cache AND the SQLite world_registry world_
+        // ticks column so a restart resumes at the same phase of day. Used by
+        // /time set/add/... which rewrite the clock outright.
+        bool setWorldTicksByName(const std::string &worldName, int64_t ticks);
+
+        // Advance every live plane's clock by one world tick when the
+        // `advance_time` gamerule holds; wraps at gamerule `day_length`.
+        // Persists to SQLite throttled (every 200 ticks = 10 s) so restarts
+        // keep day phase without hammering SQLite at 20 Hz. Called from
+        // Server.cpp's fixed 20 Hz tick loop exactly once per world tick.
+        void tickWorldTime(int64_t nowMs);
+
         // Write a single block on the given plane at absolute world
         // coordinates (wx, wy, wz). `combined` carries the pre-1.13
         // storage form (blockId << 4 | meta) matching WorldStorage's
@@ -312,6 +333,14 @@ namespace LightweightMC::Network
         // Returns the number of levels gained (0-15) so the /experience
         // command can decide whether to fire show_advancement_messages.
         int grantPlayerXp(const std::string &playerName, int32_t amount);
+
+        // Force-set a player's food level and saturation. Used by /food.
+        // When the player is online it also pushes S2C UpdateHealth (0x06)
+        // so the client HUD updates immediately. Returns true on success,
+        // false when the player is unknown or offline.
+        bool setPlayerFood(const std::string &playerName,
+                           int32_t foodLevel,
+                           float foodSaturation);
 
         // Grant an item to a player's inventory. Resolves `itemName` through
         // a lookup table (accepting both LWMC canonical names like "bread"

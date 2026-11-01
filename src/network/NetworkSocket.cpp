@@ -354,6 +354,13 @@ namespace LightweightMC::Network
             storage->setGenerationStyle(spec.style);
             storage->setPlaneWorldId(spec.id);
             m_worlds.emplace(spec.id, std::move(storage));
+            // Game clock boot: resume each plane's day phase from the
+            // world_registry world_ticks column (0 when unset / legacy so a
+            // fresh DB starts at dawn like vanilla). The 20 Hz loop advances
+            // it via NetworkManager::tickWorldTime; /time rewrites it.
+            m_worldManager.setWorldTicks(spec.id, m_database.getWorldTicks(spec.id));
+            if (spec.id == 0)
+                World::GameRules::getInstance().setIntInMemory("world_ticks", m_database.getWorldTicks(spec.id));
         }
 
         // Auto-generate every active plane on first launch (or on
