@@ -981,6 +981,11 @@ namespace LightweightMC::Core
                 // Natural-HP regeneration sweep (0x06 refresh per healed session).
                 // Fixed at the same 20 Hz cadence as the world tick so regen timing stays close to vanilla without a second accumulator.
                 m_network.tickRegeneration(nowMs);
+                // Void / out-of-bounds fall damage sweep (vanilla-1.8: one hit per
+                // 10 game ticks = 500 ms, 4 HP each below y=-64; Aether's sky floor
+                // at -16 teleports the player back to Overworld). Shares the regen
+                // hurt-gate state so void deaths route through autoRespawnDuePlayers.
+                m_network.tickVoidDamage(nowMs);
                 // Auto-respawn sweep (Phase 14b): dead PLAY sessions revive per immediate_respawn / respawn_radius / respawnwaves gamerules so clients don't stay stuck on the death HUD; emits the same 0x08 Position + 0x06 UpdateHealth burst as an explicit /respawn.
                 Core::Logger::trace("Server is Ticking Regeneration");
                 m_network.autoRespawnDuePlayers(nowMs);

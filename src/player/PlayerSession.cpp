@@ -206,6 +206,11 @@ namespace LightweightMC::Player
         // Hunger cadence cursor: first tickSurvivalDrain after login/respawn anchors here so idle depletion starts from a full saturation window rather than an epoch-stale elapsed flood.
         lastHungerTickMs = 0;
 
+        // Void-damage cadence cursor (tickVoidDamage anchors on the fresh position
+        // below the plane's void floor; see PlayerSession.hpp field comment).
+        lastVoidDamageMs = 0;
+        inVoidNow = false;
+
         // Clear transient per-session container windows: on reconnect a fresh
         // window is opened that re-populates its contents from the SQLite
         // block_entities row for the container's coord.
@@ -415,6 +420,8 @@ namespace LightweightMC::Player
         sleepTimer = 0;
         flying = false;
         sprinting = false;
+        lastVoidDamageMs = 0;
+        inVoidNow = false;
         // Same priority order as resetVolatileState: bed first, then world
         // spawn, else literal (0.5, 7.0, 0.5).
         if (hasBedSpawn)

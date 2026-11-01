@@ -163,6 +163,21 @@ namespace LightweightMC::Storage
     // -------------------------------------------------------------
     constexpr int64_t kDefaultDayLength = 24000;
 
+    // -------------------------------------------------------------
+    // Void / out-of-bounds fall damage (vanilla-1.8 Java behaviour, wired
+    // in NetworkGameplay.cpp::tickVoidDamage on the fixed 20 Hz loop):
+    //   * one hit every 10 game ticks = 500 ms wall-clock;
+    //   * 4 HP (two hearts) per interval for players and most entities;
+    //   * normal planes trigger natively below Y = -64. LWMC's Aether sky
+    //     plane instead floors its void at Y = -16 (see AetherGen.cpp) and
+    //     teleports the player back to Overworld once the fall passes that
+    //     line, so kAetherVoidFloor is consulted for worldId == 100.
+    // -------------------------------------------------------------
+    constexpr int64_t kVoidDamageIntervalTicks = 10;   // every half second
+    constexpr double kVoidDamagePerInterval = 4.0;     // two hearts
+    constexpr double kDefaultVoidFloorY = -64.0;       // normal planes
+    constexpr double kAetherVoidFloorY = -16.0;        // Aether sky plane
+
     // 0.0.15 phase 8c: snapshot form used by Database::readLevelDat / write
     // LevelDat below. Mirrors the subset of vanilla-1.8 level.dat that Light
     // weightMC round-trips (spawn, seed, mode, timestamps, format marker).

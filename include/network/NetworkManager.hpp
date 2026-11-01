@@ -376,6 +376,11 @@ namespace LightweightMC::Network
         // 5 s no-damage window + food gate internally, and each healed session gets a fresh S2C Update Health (0x06) refresh
         // so idle/stopped players get their HP bar back without waiting on a damage packet.
         void tickRegeneration(int64_t nowMs);
+        // Void / out-of-bounds fall sweep (vanilla-1.8: one hit per 10 ticks,
+        // 4 HP each, below y=-64; Aether plane id 100 floors at -16 and teleports
+        // the player back to Overworld instead of killing them). Call on the same
+        // 20 Hz cadence as tickRegeneration.
+        void tickVoidDamage(int64_t nowMs);
 
         // Convenience used by /respawnwaves: set the boolean rule globally
         // via GameRules::setBool("respawnwaves", ...) so it persists to

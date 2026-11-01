@@ -119,7 +119,7 @@ namespace LightweightMC::Storage::Gen
     // Minecraft-Legends-style sky world: floating sandstone islands in a
     // void, Greek temples anchored on top of islands, and a "void fall"
     // below y=-16 that teleports the player back to the overworld (handled
-    // in PlayerHandler::handlePlayerMovement, gated on session.worldId == 100).
+    // in NetworkGameplay.cpp::tickVoidDamage, gated on session.worldId == 100).
     //
     // Island shape uses fbm3 at frequency 0.017 (slightly wider than the
     // pre-rework 0.02) and threshold 0.22 (slightly lower than the pre-

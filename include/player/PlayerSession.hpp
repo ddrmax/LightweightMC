@@ -192,6 +192,17 @@ namespace LightweightMC::Player
         bool onFire{false};       // On fire (NBT: OnFire)
         int16_t fire{0};          // Fire ticks remaining (NBT: fire)
 
+        // ---- Void / out-of-bounds fall cadence (session-only, never persisted).
+        // Java 1.8 deals void damage every 10 game ticks (500 ms at the fixed
+        // 20 Hz loop) for 4 HP per interval once an entity is below the plane's
+        // void floor (-64 on normal planes; Aether uses its own -16 sky-floor
+        // convention from AetherGen). lastVoidDamageMs anchors the cadence on
+        // the first tick below the floor so a fresh entry takes one full 500 ms
+        // step before the first hit. inVoidNow caches the current predicate for
+        // handlers that want to react without re-reading the gamerule floor.
+        int64_t lastVoidDamageMs{0};
+        bool inVoidNow{false};
+
         bool sleeping{false};                 // Sleeping in bed (NBT: sleeping)
         uint8_t sleepTimer{0};                // Sleep counter (NBT: sleepTimer)
         bool hasBedSpawn{false};              // Has a bed spawn point (NBT: SpawnForced)

@@ -463,6 +463,103 @@ namespace LightweightMC::Network
         }
     }
 
+    // ---- Void / out-of-bounds fall damage (vanilla-1.8 Java timing rules) ---
+    // Called once per world tick from Server.cpp's fixed 20 Hz loop. Vanilla
+    // deals void damage every 10 game ticks (500 ms) for 4 HP per interval,
+    // triggered natively below Y = -64 on normal planes. LWMC's Aether sky
+    // plane (id 100) instead floors its fall at Y = -16 (AetherGen convention):
+    // damage ticks there too, and once the player passes that line they are
+    // teleported back to Overworld via setPlayerWorldAt's default-spawn path
+    // (the documented aether "void fall" behaviour AetherGen.cpp promises but
+    // which had never been implemented — the missing feature this drop adds).
+    void NetworkManager::tickVoidDamage(int64_t nowMs)
+    {
+        const int64_t intervalMs = Storage::kVoidDamageIntervalTicks * 50; // 20 Hz basis
+        for (auto &[fd, ses] : m_clients)
+        {
+            if (ses.state != ClientState::PLAY || !ses.alive)
+                continue;
+
+            const bool aetherPlane = (ses.worldId == 100);
+            const double floorY = aetherPlane ? Storage::kAetherVoidFloorY
+                                              : Storage::kDefaultVoidFloorY;
+            if (ses.y >= floorY)
+            {
+                // Out of the void: clear the cadence cursor so the next entry
+                // starts a fresh 500 ms window rather than firing instantly.
+                ses.lastVoidDamageMs = 0;
+                ses.inVoidNow = false;
+
+                // Aether documented behaviour: a fall past -16 teleports back to
+                // Overworld before damage would ever kill the player (islands sit
+                // far above -16, so reaching it means an intentional/fall-out drop).
+                if (aetherPlane)
+                {
+                    const std::string pname = ses.username;
+                    if (setPlayerWorldAt(pname, 0, 0.0, 0.0, 0.0, false))
+                    {
+                        Core::Logger::warn("[NET VOID FALL] player=" + pname +
+                                           " fd=" + std::to_string(fd) +
+                                           " fell below aether floor y=" + std::to_string(floorY) +
+                                           " -> teleported to Overworld default spawn");
+                        continue;
+                    }
+                    Core::Logger::warn("[NET VOID FALL] player=" + pname +
+                                       " overworld switch failed; falling back to void damage");
+                }
+                continue;
+            }
+
+            ses.inVoidNow = true;
+            if (ses.lastVoidDamageMs == 0)
+            {
+                // First tick below the floor: anchor, first hit one full interval later.
+                ses.lastVoidDamageMs = nowMs;
+                continue;
+            }
+            if (nowMs - ses.lastVoidDamageMs < intervalMs)
+                continue;
+            // Re-anchor on nowMs rather than += intervalMs: a long gap (lag
+            // spike, respawn freeze) must not fire a catch-up burst of void
+            // hits — vanilla schedules one damage per game tick it actually
+            // processes, and our loop only sees wall-clock snapshots.
+            ses.lastVoidDamageMs = nowMs;
+
+            const float before = ses.health;
+            // Creative/spectator invuln is applyDamage's own gate — reuse it so
+            // void damage honours the same rules as /damage and fall damage.
+            if (!ses.applyDamage(static_cast<float>(Storage::kVoidDamagePerInterval), nowMs, 4))
+                continue;
+
+            std::vector<uint8_t> hp;
+            writeUpdateHealthPayload(hp, ses.health,
+                                     static_cast<int32_t>(ses.foodLevel),
+                                     ses.foodSaturationLevel);
+            sendPacket(fd, 0x06, hp);
+            if (!ses.alive)
+            {
+                std::vector<uint8_t> death;
+                writeDeathCombatPayload(death, fd, 0,
+                                        ses.username + " fell into the void");
+                sendPacket(fd, 0x42, death);
+                Core::Logger::warn("[NET VOID KILL] player=" + ses.username +
+                                   " fd=" + std::to_string(fd) +
+                                   " planeId=" + std::to_string(ses.worldId) +
+                                   " fell below y=" + std::to_string(floorY) +
+                                   " and died — autoRespawnDuePlayers will revive");
+            }
+            else
+            {
+                Core::Logger::warn("[NET VOID DAMAGE] player=" + ses.username +
+                                   " fd=" + std::to_string(fd) +
+                                   " planeId=" + std::to_string(ses.worldId) +
+                                   " y=" + std::to_string(ses.y) +
+                                   " hpBefore=" + std::to_string(before) +
+                                   " hpAfter=" + std::to_string(ses.health));
+            }
+        }
+    }
+
     bool NetworkManager::setRespawnWaves(bool enabled)
     {
         auto &gr = World::GameRules::getInstance();
