@@ -746,9 +746,56 @@ namespace LightweightMC::Network
         // gamerules table too (setInt persists) for cross-restart redundancy.
         if (id == 0)
             LightweightMC::World::GameRules::getInstance().setInt("world_ticks", ticks);
+        // Vanilla immediate trigger: /time set/add or a plane load dispatches
+        // Time Update right away so clients snap to the new phase without
+        // waiting for the next 1 s pulse.
+        dispatchTimeUpdate();
         Core::Logger::info("setWorldTicksByName: plane \"" + worldName +
                            "\" (id=" + std::to_string(id) + ") world_ticks=" + std::to_string(ticks));
         return sqliteOk;
+    }
+
+    // ---- Time Update packet (S2C 0x03, vanilla-1.8 wire op) -----------------
+    // Body is exactly two TAG_BigLong fields (world age + time of day), no varints.
+    static void writeTimeUpdatePayload(std::vector<uint8_t> &out,
+                                       int64_t worldAgeTicks,
+                                       int64_t timeOfDayTicks)
+    {
+        auto be64 = [&out](int64_t v)
+        {
+            for (int i = 7; i >= 0; --i)
+                out.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
+        };
+        be64(worldAgeTicks); // TAG_Long: monotonic world age, never reset by /time
+        be64(timeOfDayTicks); // TAG_Long: dayLength modulo [0, dayLength)
+    }
+
+    // Send Time Update to every PLAY client. Vanilla-1.8 wire op 0x03; era
+    // mapping through s2cWireIdFromLegacy keeps MODERN/LATEST clients on the
+    // translated byte stream (this registry maps the slot identity for pre-
+    // 1.13 protocol; see packet_ids.h kS2CReverse_LEGACY). Negative time-of-
+    // day freezes the client daylight cycle -- never emitted unless a caller
+    // explicitly opts in (map-maker / plugin semantics, TODO later).
+    void NetworkManager::dispatchTimeUpdate()
+    {
+        auto &gr = LightweightMC::World::GameRules::getInstance();
+        int64_t dayLength = Storage::kDefaultDayLength;
+        int64_t ruleLen = 0;
+        if (gr.getInt("day_length", ruleLen) && ruleLen > 0)
+            dayLength = ruleLen;
+
+        for (auto &[fd, ses] : m_clients)
+        {
+            if (ses.state != ClientState::PLAY)
+                continue;
+            // Per-plane clock: the session's worldId picks the plane whose
+            // phase matters to THIS client; worldAge stays monotonic.
+            const int32_t planeId = ses.worldId;
+            const int64_t tod = m_worldManager.getWorldTicks(planeId);
+            std::vector<uint8_t> body;
+            writeTimeUpdatePayload(body, m_worldAge, tod);
+            sendPacket(fd, 0x03, body);
+        }
     }
 
     // Master-clock advance. Called exactly once per world tick from Server.
@@ -794,7 +841,10 @@ namespace LightweightMC::Network
                 ticks = 0; // wrap at the configured day length
             m_worldManager.setWorldTicks(planeId, ticks);
             if (dueToPersist)
+            {
                 m_database.setWorldTicks(planeId, ticks);
+                m_database.setWorldAge(planeId, m_worldAge + ticks);
+            }
             // Mirror the Overworld clock into the world_ticks gamerule so
             // EntityManager / ProcessingTick read it every tick without a
             // SQLite walk. setIntInMemory keeps this out of the gamerules DB.
@@ -802,8 +852,19 @@ namespace LightweightMC::Network
                 gr.setIntInMemory("world_ticks", ticks);
         }
 
+        // Monotonic world age advances with real time even when advance_time
+        // is false: vanilla's Time Update first field tracks elapsed world
+        // time, not the rewritable day cycle. Server.cpp calls us exactly
+        // once per world tick, so ++m_worldAge keeps it 20 Hz-true.
+        ++m_worldAge;
+
         if (dueToPersist)
             lastPersistMs = nowMs;
+
+        // Vanilla drift-correction pulse: Time Update every 20 ticks (1 s).
+        static int timePulseCounter = 0;
+        if ((++timePulseCounter % 20) == 0)
+            dispatchTimeUpdate();
     }
 
     bool NetworkManager::setBlockAtPlane(int32_t planeId, int wx, int wy, int wz,

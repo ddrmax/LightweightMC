@@ -361,6 +361,11 @@ namespace LightweightMC::Network
             m_worldManager.setWorldTicks(spec.id, m_database.getWorldTicks(spec.id));
             if (spec.id == 0)
                 World::GameRules::getInstance().setIntInMemory("world_ticks", m_database.getWorldTicks(spec.id));
+            // Resume monotonic world age too (max across planes; the counter
+            // is server-global so a multiplane restart keeps the largest).
+            const int64_t persistedAge = m_database.getWorldAge(spec.id);
+            if (persistedAge > m_worldAge)
+                m_worldAge = persistedAge;
         }
 
         // Auto-generate every active plane on first launch (or on

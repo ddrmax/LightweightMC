@@ -417,6 +417,14 @@ namespace LightweightMC::Storage
         // Reads the plane's world_ticks column; returns 0 when unset so
         // pre-cycle planes boot at dawn like vanilla fresh worlds.
         int64_t getWorldTicks(int32_t id) const;
+        // Monotonic "age of the world" counter for Time Update's first TAG_
+        // Long. Grows with the clock but is never reset by /time set, matching
+        // vanilla's semantics where the sun cycle can be rewritten while the
+        // age only increases. Same throttled-persistence pattern as ticks.
+        bool setWorldAge(int32_t id, int64_t age);
+        // Reads the plane's world_age column; returns 0 when unset so legacy
+        // rows treat a fresh server as day-zero of a brand-new world.
+        int64_t getWorldAge(int32_t id) const;
 
         // Targeted UPDATE of only the spawn_x/spawn_y/spawn_z columns
         // on a player row keyed by UUID. Used by /spawnpoint so it

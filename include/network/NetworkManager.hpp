@@ -63,6 +63,11 @@ namespace LightweightMC::Network
         // made by tickChunkStreaming; 0 means "never yet", and the first
         // autosave check after boot fires immediately.
         int64_t m_lastAutosaveMs{0};
+        // Monotonic world age in ticks since the server booted (never reset
+        // by /time set -- vanilla's Time Update first TAG_Long is "age of the
+        // world", unaffected by clock rewrites). Persisted alongside world_
+        // ticks on world_registry so restarts resume age without drift.
+        int64_t m_worldAge{0};
         // Server-side entity model (mobs / aggressive mobs / villagers) is
         // accessed via World::EntityManager::getInstance(); no member needed
         // because the singleton is process-lifetime and NetworkManager is
@@ -244,6 +249,15 @@ namespace LightweightMC::Network
         // keep day phase without hammering SQLite at 20 Hz. Called from
         // Server.cpp's fixed 20 Hz tick loop exactly once per world tick.
         void tickWorldTime(int64_t nowMs);
+
+        // Broadcast S2C Time Update (vanilla-1.8 wire op 0x03, body = two
+        // TAG_Long: monotonic world age + time-of-day modulo day_length) to
+        // every PLAY client, each keyed to the plane its session is on. Sent
+        // once per second from tickWorldTime's cadence and immediately after
+        // /time set/add or a plane load (vanilla's drift-correction pulse +
+        // immediate-trigger semantics). A negative time-of-day would freeze
+        // the client daylight cycle; never emitted automatically.
+        void dispatchTimeUpdate();
 
         // Write a single block on the given plane at absolute world
         // coordinates (wx, wy, wz). `combined` carries the pre-1.13

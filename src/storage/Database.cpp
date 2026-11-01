@@ -640,7 +640,8 @@ namespace LightweightMC::Storage
                 spawn_y DOUBLE DEFAULT 64.0,
                 spawn_z DOUBLE DEFAULT 0.5,
                 world_seed INTEGER DEFAULT 0,
-                world_ticks INTEGER DEFAULT 0
+                world_ticks INTEGER DEFAULT 0,
+                world_age INTEGER DEFAULT 0
             );
         )";
         char *errMsg = nullptr;
@@ -666,6 +667,7 @@ namespace LightweightMC::Storage
             "spawn_z DOUBLE DEFAULT 0.5",
             "world_seed INTEGER DEFAULT 0",
             "world_ticks INTEGER DEFAULT 0",
+            "world_age INTEGER DEFAULT 0",
         };
         for (const char *col : newColumns)
         {
@@ -1097,6 +1099,47 @@ namespace LightweightMC::Storage
         if (!m_db)
             return 0;
         const char *sql = "SELECT world_ticks FROM world_registry WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return 0;
+        sqlite3_bind_int(stmt, 1, id);
+        int64_t out = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+            out = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        return out;
+    }
+
+    // Monotonic world age for Time Update's first TAG_Long. Never reset by
+    // /time set (vanilla semantics: the sun/moon cycle can be rewritten but
+    // "age of the world" only ever grows). Same UPDATE/SELECT shape as the
+    // tick counter; persisted throttled next to world_ticks in Network-
+    // Manager::tickWorldTime.
+    bool Database::setWorldAge(int32_t id, int64_t age)
+    {
+        if (!m_db)
+            return false;
+        const char *sql = "UPDATE world_registry SET world_age = ? WHERE id = ?;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            Core::Logger::error("Failed to prepare setWorldAge: " + std::string(sqlite3_errmsg(m_db)));
+            return false;
+        }
+        sqlite3_bind_int64(stmt, 1, age);
+        sqlite3_bind_int(stmt, 2, id);
+        const bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        if (!ok)
+            Core::Logger::warn("setWorldAge: no world_registry row for plane id " + std::to_string(id));
+        return ok;
+    }
+
+    int64_t Database::getWorldAge(int32_t id) const
+    {
+        if (!m_db)
+            return 0;
+        const char *sql = "SELECT world_age FROM world_registry WHERE id = ?;";
         sqlite3_stmt *stmt = nullptr;
         if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK)
             return 0;
