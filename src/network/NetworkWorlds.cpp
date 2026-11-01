@@ -755,6 +755,24 @@ namespace LightweightMC::Network
         return sqliteOk;
     }
 
+    // Plane-direct sibling of setWorldTicksByName for chat commands that
+    // carry no plane argument (implicit /time acts on the sender's current
+    // plane). Same side effects: DB write, WorldManager cache, gamerule
+    // mirror for Overworld, immediate Time Update pulse.
+    bool NetworkManager::setWorldTicksAtPlane(int32_t planeId, int64_t ticks)
+    {
+        if (!m_worlds.count(planeId))
+            return false;
+        const bool sqliteOk = m_database.setWorldTicks(planeId, ticks);
+        m_worldManager.setWorldTicks(planeId, ticks);
+        if (planeId == 0)
+            LightweightMC::World::GameRules::getInstance().setInt("world_ticks", ticks);
+        dispatchTimeUpdate();
+        Core::Logger::info("setWorldTicksAtPlane: plane id=" + std::to_string(planeId) +
+                           " world_ticks=" + std::to_string(ticks));
+        return sqliteOk;
+    }
+
     // ---- Time Update packet (S2C 0x03, vanilla-1.8 wire op) -----------------
     // Body is exactly two TAG_BigLong fields (world age + time of day), no varints.
     static void writeTimeUpdatePayload(std::vector<uint8_t> &out,

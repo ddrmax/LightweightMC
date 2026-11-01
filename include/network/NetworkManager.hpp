@@ -242,6 +242,10 @@ namespace LightweightMC::Network
         // ticks column so a restart resumes at the same phase of day. Used by
         // /time set/add/... which rewrite the clock outright.
         bool setWorldTicksByName(const std::string &worldName, int64_t ticks);
+        // Plane-direct sibling for chat /time without a plane argument —
+        // writes the caller's current plane with the same side effects as
+        // the by-name path (DB, cache, mirror, immediate Time Update).
+        bool setWorldTicksAtPlane(int32_t planeId, int64_t ticks);
 
         // Advance every live plane's clock by one world tick when the
         // `advance_time` gamerule holds; wraps at gamerule `day_length`.

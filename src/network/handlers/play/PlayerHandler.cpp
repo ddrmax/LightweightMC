@@ -169,6 +169,23 @@ namespace PlayerHandler
             {
                 return net.setWorldSeedByName(worldName, seed);
             };
+            // 0.0.17 game-time hooks: chat /time reads/writes the day cycle.
+            // Chat commands carry no plane argument unless typed explicitly,
+            // so an implicit /time acts on the caller's current plane (the
+            // session's worldId) rather than always Overworld — a Nether
+            // admin typing /time set 15000 rewrites Nether's clock.
+            ctx.getWorldTicks = [&net, &session](const std::string &worldName) -> int64_t
+            {
+                if (worldName.empty())
+                    return net.getWorldTicks(session.worldId);
+                return net.getWorldTicksByName(worldName);
+            };
+            ctx.setWorldTicks = [&net, &session](const std::string &worldName, int64_t ticks) -> bool
+            {
+                if (worldName.empty())
+                    return net.setWorldTicksAtPlane(session.worldId, ticks);
+                return net.setWorldTicksByName(worldName, ticks);
+            };
             ctx.setBlockAtPlane = [&net](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool
             {
                 return net.setBlockAtPlane(planeId, wx, wy, wz, combined);

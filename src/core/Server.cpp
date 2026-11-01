@@ -308,10 +308,15 @@ namespace LightweightMC::Core
         };
         consoleCtx.getWorldTicks = [this](const std::string &worldName) -> int64_t
         {
+            // Console /time without a plane argument targets Overworld.
+            if (worldName.empty())
+                return m_network.getWorldTicks(0);
             return m_network.getWorldTicksByName(worldName);
         };
         consoleCtx.setWorldTicks = [this](const std::string &worldName, int64_t ticks) -> bool
         {
+            if (worldName.empty())
+                return m_network.setWorldTicksAtPlane(0, ticks);
             return m_network.setWorldTicksByName(worldName, ticks);
         };
         consoleCtx.setBlockAtPlane = [this](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool
@@ -616,10 +621,14 @@ namespace LightweightMC::Core
             };
             consoleCtx.getWorldTicks = [network](const std::string &worldName) -> int64_t
             {
+                if (worldName.empty())
+                    return network->getWorldTicks(0);
                 return network->getWorldTicksByName(worldName);
             };
             consoleCtx.setWorldTicks = [network](const std::string &worldName, int64_t ticks) -> bool
             {
+                if (worldName.empty())
+                    return network->setWorldTicksAtPlane(0, ticks);
                 return network->setWorldTicksByName(worldName, ticks);
             };
             consoleCtx.setBlockAtPlane = [network](int32_t planeId, int wx, int wy, int wz, uint16_t combined) -> bool

@@ -587,9 +587,11 @@ public:
         if (gr.getInt("day_length", ruleLen) && ruleLen > 0)
             dayLength = ruleLen;
 
-        // Optional trailing plane name (default: overworld). Only treat the
-        // last token as a plane when it is neither a keyword nor a number.
-        std::string planeName = "overworld";
+        // Optional trailing plane name. Empty means "resolve implicitly":
+        // the console maps it to Overworld, while chat maps it to the sender's
+        // current plane (CommandContext::getWorldTicks / setWorldTicks decide),
+        // so a Nether admin typing /time set rewrites Nether's clock.
+        std::string planeName;
         std::vector<std::string> coreArgs = args;
         if (coreArgs.size() >= 2)
         {
@@ -627,13 +629,13 @@ public:
         auto phaseLabel = [dayLength](int64_t ticks) -> std::string
         {
             using namespace LightweightMC::World::GameTime;
-            if (isNight(ticks, dayLength))
-                return "night";
             const int p = phaseOf(ticks, dayLength);
             if (p == 0)
                 return "day";
             if (p == 1)
                 return "sunset";
+            if (p == 2)
+                return "night";
             return "sunrise";
         };
 
