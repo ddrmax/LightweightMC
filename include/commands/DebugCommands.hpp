@@ -32,7 +32,7 @@ class JfrCommand : public Command
 public:
     std::string getName() const override { return "jfr"; }
     std::string getDescription() const override { return "Starts or stops JFR profiling."; }
-    std::string getUsage() const override { return "/jfr. <start|stop>"; }
+    std::string getUsage() const override { return "/jfr <start|stop>"; }
     std::vector<std::string> getAliases() const override { return {}; }
     int getRequiredOpLevel() const override { return 4; }
 

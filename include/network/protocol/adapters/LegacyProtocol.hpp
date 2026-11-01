@@ -4,8 +4,7 @@
 namespace LightweightMC::Network::Protocol
 {
     // ---------------------------------------------------------------------------
-    // LegacyProtocol — 1.7.x through 1.12.x (protocol 4 - 340).
-    //
+    // LegacyProtocol — 1.7.2, 1.7.10, 1.8 (protocol 4 - 47).
     // This era matches the wire format the codebase currently speaks, so every
     // field encoding falls back to the BaseProtocol defaults (double/float
     // positions, §-code chat, UUID+name login success). Only the identity and
@@ -22,7 +21,7 @@ namespace LightweightMC::Network::Protocol
 
         int32_t protocolVersion() const override { return 47; } // representative (1.8)
         Era era() const override { return Era::LEGACY; }
-        std::string versionName() const override { return "1.7.x-1.12.x"; }
+        std::string versionName() const override { return "1.7.2-1.8"; }
 
         int32_t s2cPacketId(PacketKind kind) const override
         {

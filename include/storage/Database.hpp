@@ -11,9 +11,9 @@ namespace LightweightMC::Storage
     {
         std::string uuid;
         std::string username;
-        double spawnX{0.5}, spawnY{7.0}, spawnZ{0.5};
+        double spawnX{0.5}, spawnY{64.0}, spawnZ{0.5};
         float spawnYaw{0.0f}, spawnPitch{0.0f};
-        double lastX{0.5}, lastY{7.0}, lastZ{0.5};
+        double lastX{0.5}, lastY{64.0}, lastZ{0.5};
         float lastYaw{0.0f}, lastPitch{0.0f};
         // -------------------------------------------------------------
         // Inventory slot -- the exact blob the player currently holds
@@ -133,11 +133,11 @@ namespace LightweightMC::Storage
     // (per-plane save mirror), and Database::loadPlayerData (login
     // path) all use these constants so the encoding stays in one
     // place.
-    constexpr int32_t kInventoryPolicySync = 0;      // standard Minecraft behaviour
-    constexpr int32_t kInventoryPolicySeparate = 1;  // per-plane creative-sandbox blob
+    constexpr int32_t kInventoryPolicySync = 0;       // standard Minecraft behaviour
+    constexpr int32_t kInventoryPolicySeparate = 1;   // per-plane creative-sandbox blob
     constexpr int32_t kInventoryPolicyRestricted = 2; // per-plane PVP/PVE blob, one-way
-    constexpr int32_t kForceGameModeInherit = -1;    // no forced mode on entry
-    constexpr int32_t kForceGameModeSurvival = 0;    // matches PlayerSession::gamemode
+    constexpr int32_t kForceGameModeInherit = -1;     // no forced mode on entry
+    constexpr int32_t kForceGameModeSurvival = 0;     // matches PlayerSession::gamemode
     constexpr int32_t kForceGameModeCreative = 1;
     constexpr int32_t kForceGameModeAdventure = 2;
     constexpr int32_t kForceGameModeSpectator = 3;
@@ -173,10 +173,10 @@ namespace LightweightMC::Storage
     //     teleports the player back to Overworld once the fall passes that
     //     line, so kAetherVoidFloor is consulted for worldId == 100.
     // -------------------------------------------------------------
-    constexpr int64_t kVoidDamageIntervalTicks = 10;   // every half second
-    constexpr double kVoidDamagePerInterval = 4.0;     // two hearts
-    constexpr double kDefaultVoidFloorY = -64.0;       // normal planes
-    constexpr double kAetherVoidFloorY = -16.0;        // Aether sky plane
+    constexpr int64_t kVoidDamageIntervalTicks = 10; // every half second
+    constexpr double kVoidDamagePerInterval = 4.0;   // two hearts
+    constexpr double kDefaultVoidFloorY = -64.0;     // normal planes
+    constexpr double kAetherVoidFloorY = -16.0;      // Aether sky plane
 
     // 0.0.15 phase 8c: snapshot form used by Database::readLevelDat / write
     // LevelDat below. Mirrors the subset of vanilla-1.8 level.dat that Light
@@ -187,18 +187,18 @@ namespace LightweightMC::Storage
     // able, and are re-emitted on write with sane defaults.
     struct LevelDatSnapshot
     {
-        int32_t  format           = 0x7FFFFFFF;    // TAG_Int
-        int64_t  seed             = 0;             // TAG_Long (Minecraft seed)
-        int64_t  time             = 0;             // TAG_Long (creation epoch ms)
-        int64_t  modified         = 0;             // TAG_Long (last-saved epoch ms)
-        int32_t  spawnX           = 0;             // TAG_Byte[3] StartPos[0]
-        int32_t  spawnY           = 64;            // TAG_Byte[3] StartPos[1]
-        int32_t  spawnZ           = 0;             // TAG_Byte[3] StartPos[2]
-        int8_t   mode             = 0;             // TAG_Byte (0=normal,1=hardcore,2=creative)
-        std::string gameMode      = "1";           // TAG_String ("1" classic, "0" single, "2" coop, "3" MP)
-        int32_t  usedBlocks       = 0;             // TAG_Int (vanilla used_blocks)
-        int32_t  mapStatChunk     = 0;             // TAG_Int (MapStatChunk)
-        int32_t  mapStatTrack     = 0;             // TAG_Int (MapStatTrackChunks)
+        int32_t format = 0x7FFFFFFF; // TAG_Int
+        int64_t seed = 0;            // TAG_Long (Minecraft seed)
+        int64_t time = 0;            // TAG_Long (creation epoch ms)
+        int64_t modified = 0;        // TAG_Long (last-saved epoch ms)
+        int32_t spawnX = 0;          // TAG_Byte[3] StartPos[0]
+        int32_t spawnY = 64;         // TAG_Byte[3] StartPos[1]
+        int32_t spawnZ = 0;          // TAG_Byte[3] StartPos[2]
+        int8_t mode = 0;             // TAG_Byte (0=normal,1=hardcore,2=creative)
+        std::string gameMode = "1";  // TAG_String ("1" classic, "0" single, "2" coop, "3" MP)
+        int32_t usedBlocks = 0;      // TAG_Int (vanilla used_blocks)
+        int32_t mapStatChunk = 0;    // TAG_Int (MapStatChunk)
+        int32_t mapStatTrack = 0;    // TAG_Int (MapStatTrackChunks)
     };
 
     class Database

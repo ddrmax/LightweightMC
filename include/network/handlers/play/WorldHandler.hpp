@@ -43,14 +43,15 @@ namespace WorldHandler
 
     // 0x12 UpdateSign — C2S packet: long location, four strings (up to 15
     // chars each). Sent when the client edits a sign in world. The server
-    // currently has no sign-text model, so we consume and log only; the
-    // location is decoded for admin traceability so future patches can
-    // persist the strings via WorldStorage without touching the wire path.
+    // persists the sign text to the block_entities table and broadcasts
+    // S2C 0x39 (Update Block Entity) so clients render the new text.
     void handleUpdateSign(int clientFd,
                           LightweightMC::Player::PlayerSession &session,
                           const uint8_t *data,
                           size_t &offset,
                           size_t packetEnd,
-                          LightweightMC::Storage::WorldStorage &worldStorage);
+                          LightweightMC::Storage::WorldStorage &worldStorage,
+                          LightweightMC::Storage::Database &database,
+                          LightweightMC::Network::NetworkManager &net);
 
 } // namespace WorldHandler

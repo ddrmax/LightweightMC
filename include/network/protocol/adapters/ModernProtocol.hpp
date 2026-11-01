@@ -4,7 +4,7 @@
 namespace LightweightMC::Network::Protocol
 {
     // ---------------------------------------------------------------------------
-    // ModernProtocol — 1.13 through 1.20.x (protocol 393 - 769).
+    // ModernProtocol — 1.9-1.20.3 (protocol 107 - 765).
     //
     // Placeholder for the version walk-up: identity and packet ID mapping use the
     // generated MODERN era tables. Field-level overrides (packed positions from
@@ -23,7 +23,7 @@ namespace LightweightMC::Network::Protocol
 
         int32_t protocolVersion() const override { return 491; } // representative (1.14)
         Era era() const override { return Era::MODERN; }
-        std::string versionName() const override { return "1.13-1.20.x"; }
+        std::string versionName() const override { return "1.9-1.20.3"; }
 
         int32_t s2cPacketId(PacketKind kind) const override
         {

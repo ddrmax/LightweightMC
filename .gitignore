@@ -32,3 +32,5 @@ tests/
 MISSING_IMPLEMENTATIONS.md
 tools/check_blockentities.cpp
 repro_durability.py
+database-0.db.level.dat
+void_runner.sh

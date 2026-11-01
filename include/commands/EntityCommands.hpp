@@ -332,6 +332,55 @@ public:
 };
 
 
+class FoodCommand : public Command
+{
+public:
+    std::string getName() const override { return "food"; }
+    std::string getDescription() const override { return "Force-set a player's food level and saturation."; }
+    std::string getUsage() const override { return "/food <player> <foodLevel> [saturation]"; }
+    std::vector<std::string> getAliases() const override { return {"/feed"}; }
+    int getRequiredOpLevel() const override { return 2; }
+    bool affectsPlayerState() const override { return true; }
+
+    void execute(const CommandContext &ctx, const std::vector<std::string> &args) override
+    {
+        if (args.size() < 2)
+        {
+            ctx.reply("Usage: " + getUsage());
+            return;
+        }
+
+        int32_t foodLevel = 0;
+        std::istringstream foodStream(args[1]);
+        if (!(foodStream >> foodLevel) || foodLevel < 0 || foodLevel > 20)
+        {
+            ctx.reply("Food level \"" + args[1] + "\" must be an integer between 0 and 20. Usage: " + getUsage());
+            return;
+        }
+
+        float saturation = 5.0f;
+        if (args.size() >= 3)
+        {
+            std::istringstream satStream(args[2]);
+            if (!(satStream >> saturation) || saturation < 0.0f)
+            {
+                ctx.reply("Saturation \"" + args[2] + "\" must be a non-negative number. Usage: " + getUsage());
+                return;
+            }
+        }
+
+        if (ctx.setPlayerFood(args[0], foodLevel, saturation))
+        {
+            ctx.reply("Set food for " + args[0] + ": level=" + std::to_string(foodLevel) +
+                      " saturation=" + std::to_string(saturation) + ".");
+        }
+        else
+        {
+            ctx.reply("Failed to set food for " + args[0] + " (unknown player or not online).");
+        }
+    }
+};
+
 class TagCommand : public Command
 {
 public:

@@ -248,7 +248,11 @@ namespace LightweightMC::Network::Protocol
 
     // 0x39 Update Block Entity — Play state.
     // Added: 1.4 (proto 13). Still current.
-    std::vector<uint8_t> encodeUpdateBlockEntity(int32_t blockId, int32_t x, int32_t y, int32_t z, uint8_t type);
+    // Wire payload: int x, short y, int z, byte action, byte[] nbtData.
+    // `nbtData` is a raw NBT TagCompound (type byte 0x0A + entries + 0x00 end).
+    std::vector<uint8_t> encodeUpdateBlockEntity(int32_t blockId, int32_t x, int32_t y, int32_t z,
+                                                 uint8_t actionType,
+                                                 const std::vector<uint8_t> &nbtData = {});
 
     // 0x3A Set Particle — Play state.
     // Added: 1.4 (proto 13). Still current.

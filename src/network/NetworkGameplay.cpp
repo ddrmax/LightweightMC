@@ -102,22 +102,22 @@ namespace LightweightMC::Network
                 sendPacket(fd, 0x42, death);
             }
             Core::Logger::warn("[NET DAMAGE] player=" + playerName +
-                                " fd=" + std::to_string(fd) +
-                                " amount=" + std::to_string(amount) +
-                                " type=" + std::to_string(damageTypeCode) +
-                                " hpBefore=" + std::to_string(before) +
-                                " hpAfter=" + std::to_string(ses.health) +
-                                " alive=" + (ses.alive ? "yes" : "no") +
-                                " prevLastHurtMs=" + std::to_string(prevLastHurtMs) +
-                                " elapsedBeforeDamage=" + std::to_string(elapsedBeforeDamage) +
-                                " nextTickGate5000=" + std::string(elapsedBeforeDamage >= 5000 ? "open" : "closed") +
-                                " respawnAtMs=" + std::to_string(ses.respawnAtMs) +
-                                " deathCount=" + std::to_string(ses.deathCount) +
-                                " foodLevel=" + std::to_string(static_cast<int>(ses.foodLevel)) +
-                                " saturation=" + std::to_string(ses.foodSaturationLevel) +
-                                " exhaustion=" + std::to_string(ses.foodExhaustionLevel) +
-                                " onFire=" + (ses.onFire ? "yes" : "no") +
-                                " air=" + std::to_string(ses.air));
+                               " fd=" + std::to_string(fd) +
+                               " amount=" + std::to_string(amount) +
+                               " type=" + std::to_string(damageTypeCode) +
+                               " hpBefore=" + std::to_string(before) +
+                               " hpAfter=" + std::to_string(ses.health) +
+                               " alive=" + (ses.alive ? "yes" : "no") +
+                               " prevLastHurtMs=" + std::to_string(prevLastHurtMs) +
+                               " elapsedBeforeDamage=" + std::to_string(elapsedBeforeDamage) +
+                               " nextTickGate5000=" + std::string(elapsedBeforeDamage >= 5000 ? "open" : "closed") +
+                               " respawnAtMs=" + std::to_string(ses.respawnAtMs) +
+                               " deathCount=" + std::to_string(ses.deathCount) +
+                               " foodLevel=" + std::to_string(static_cast<int>(ses.foodLevel)) +
+                               " saturation=" + std::to_string(ses.foodSaturationLevel) +
+                               " exhaustion=" + std::to_string(ses.foodExhaustionLevel) +
+                               " onFire=" + (ses.onFire ? "yes" : "no") +
+                               " air=" + std::to_string(ses.air));
             return true;
         }
         Storage::PlayerData data;
@@ -489,27 +489,25 @@ namespace LightweightMC::Network
                 // starts a fresh 500 ms window rather than firing instantly.
                 ses.lastVoidDamageMs = 0;
                 ses.inVoidNow = false;
-
-                // Aether documented behaviour: a fall past -16 teleports back to
-                // Overworld before damage would ever kill the player (islands sit
-                // far above -16, so reaching it means an intentional/fall-out drop).
-                if (aetherPlane)
-                {
-                    const std::string pname = ses.username;
-                    if (setPlayerWorldAt(pname, 0, 0.0, 0.0, 0.0, false))
-                    {
-                        Core::Logger::warn("[NET VOID FALL] player=" + pname +
-                                           " fd=" + std::to_string(fd) +
-                                           " fell below aether floor y=" + std::to_string(floorY) +
-                                           " -> teleported to Overworld default spawn");
-                        continue;
-                    }
-                    Core::Logger::warn("[NET VOID FALL] player=" + pname +
-                                       " overworld switch failed; falling back to void damage");
-                }
                 continue;
             }
-
+            // Aether documented behaviour: a fall past -16 teleports back to
+            // Overworld before damage would ever kill the player (islands sit
+            // far above -16, so reaching it means an intentional/fall-out drop).
+            if (aetherPlane)
+            {
+                const std::string pname = ses.username;
+                if (setPlayerWorldAt(pname, 0, 0.0, 0.0, 0.0, false))
+                {
+                    Core::Logger::warn("[NET VOID FALL] player=" + pname +
+                                       " fd=" + std::to_string(fd) +
+                                       " fell below aether floor y=" + std::to_string(floorY) +
+                                       " -> teleported to Overworld default spawn");
+                    continue;
+                }
+                Core::Logger::warn("[NET VOID FALL] player=" + pname +
+                                   " overworld switch failed; falling back to void damage");
+            }
             ses.inVoidNow = true;
             if (ses.lastVoidDamageMs == 0)
             {
