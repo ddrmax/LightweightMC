@@ -1,9 +1,11 @@
 #include "network/handlers/play/WorldHandler.hpp"
 #include "versions/v1_8/food.hpp"
+#include "versions/v1_8/xp.hpp"
 #include "network/protocol/PacketCodec47.hpp"
 #include <cmath>
 #include <unordered_map>
 #include <utility>
+#include <random>
 #include "network/handlers/play/InventoryHandler.hpp"
 #include "world/MC18ItemIds.hpp"
 #include "managers/PlayerManager.hpp"
@@ -80,6 +82,43 @@ namespace WorldHandler
                 // stack or merged count immediately.
                 InventoryHandler::sendPlayerInventoryWindowItems(
                     clientFd, session, net);
+            }
+
+            // Ore XP: destroying an ore block awards random XP per the v1_8
+            // xp.hpp ore table (coal 0..2, quartz/redstone/lapis 2..5,
+            // diamond/emerald 3..7; iron/gold award none — their XP comes from
+            // cooking the meat they drop). Only successful destructions count.
+            if (status == 2 && oldBlockId > 0)
+            {
+                const auto &oreTable = LightweightMC::Versions::V1_8::Xp::ores;
+                for (const auto &o : oreTable)
+                {
+                    if (o.blockId != static_cast<int>(oldBlockId))
+                        continue;
+                    std::uniform_int_distribution<int> oreDist(o.minXp, o.maxXp);
+                    static thread_local std::minstd_rand oreRng{std::random_device{}()};
+                    const int xpAmount = oreDist(oreRng);
+                    if (xpAmount > 0)
+                    {
+                        const int levelsGained = session.grantXp(xpAmount);
+                        LightweightMC::Core::Logger::info("[XP Ore] " + session.username +
+                            " mined block id=" + std::to_string(oldBlockId) +
+                            " xp+" + std::to_string(xpAmount) +
+                            " levels+" + std::to_string(levelsGained));
+
+                        // XP bar refresh (S2C UpdateExperience 0x1f).
+                        std::vector<uint8_t> xpPayload;
+                        LightweightMC::Network::Packet::writeFloat(xpPayload, session.experienceProgress);
+                        LightweightMC::Network::Packet::writeVarInt(xpPayload, static_cast<int32_t>(session.experienceLevel));
+                        LightweightMC::Network::Packet::writeVarInt(xpPayload, session.totalExperience);
+                        net.sendPacket(clientFd, 0x1f, xpPayload);
+
+                        // Persist so XP survives crash/disconnect — same
+                        // rationale as the tool-wear save in this handler.
+                        Player::PlayerManager::getInstance().savePlayerState(session, database);
+                    }
+                    break;
+                }
             }
 
             // Tool wear: the client sends Digging with status 0 (start) and
@@ -186,6 +225,56 @@ namespace WorldHandler
                 {
                     const int16_t heldId = heldIt->second.id;
                     const uint8_t heldCount = heldIt->second.count;
+
+                    // Experience-bottle use mirrors eating: right-click with a
+                    // Bottle o' Enchanting (item id 384) in the selected hotbar
+                    // slot consumes one unit and grants random XP per the v1_8
+                    // xp.hpp bottle table (3..11, avg 7 — vanilla ThrownExpBottle
+                    // yield). Checked before food so bottles never feed hunger.
+                    const auto &bottles = LightweightMC::Versions::V1_8::Xp::bottles;
+                    const LightweightMC::Versions::V1_8::Xp::Bottle *bottleHit = nullptr;
+                    for (const auto &b : bottles)
+                        if (b.itemId == heldId) { bottleHit = &b; break; }
+                    if (bottleHit)
+                    {
+                        static thread_local std::minstd_rand xpRng{std::random_device{}()};
+                        std::uniform_int_distribution<int> dist(bottleHit->minXp, bottleHit->maxXp);
+                        const int xpAmount = dist(xpRng);
+
+                        // Consume exactly one held unit — same slot-basis rules
+                        // consumeSelectedFood applies (hotbar key 36+selectedSlot).
+                        if (heldIt->second.count > 0)
+                            --heldIt->second.count;
+
+                        const int levelsGained = session.grantXp(xpAmount);
+
+                        LightweightMC::Core::Logger::info("[XP Bottle] " + session.username +
+                            " used bottle id=" + std::to_string(heldId) +
+                            " xp+" + std::to_string(xpAmount) +
+                            " levels+" + std::to_string(levelsGained) +
+                            " level=" + std::to_string(session.experienceLevel) +
+                            " total=" + std::to_string(session.totalExperience));
+
+                        // Persist the consumed unit so reconnects don't restore
+                        // a phantom bottle — mirrors the food path.
+                        Player::PlayerManager::getInstance().savePlayerState(session, database);
+
+                        // Full inventory sync so the hotbar shows decremented
+                        // count — same rationale as the food path (0x30 beats
+                        // a single 0x2F for slot-mapping desync safety).
+                        InventoryHandler::sendPlayerInventoryWindowItems(clientFd, session, net);
+
+                        // XP bar refresh (S2C UpdateExperience 0x1f): float
+                        // progress + varint level + varint total.
+                        std::vector<uint8_t> xpPayload;
+                        LightweightMC::Network::Packet::writeFloat(xpPayload, session.experienceProgress);
+                        LightweightMC::Network::Packet::writeVarInt(xpPayload, static_cast<int32_t>(session.experienceLevel));
+                        LightweightMC::Network::Packet::writeVarInt(xpPayload, session.totalExperience);
+                        net.sendPacket(clientFd, 0x1f, xpPayload);
+
+                        return;
+                    }
+
                     auto n = LightweightMC::Versions::V1_8::Food::forItem(heldId);
                     if (n.foodPoints > 0)
                     {

@@ -514,6 +514,69 @@ def emit_food_hpp(filename, version_string, protocol):
     print(f"[gen_version_defaults] Wrote {os.path.join(OUT_ROOT, filename, 'food.hpp')}")
 
 
+# XP / progression data (per major version).
+# Level curve: XP needed to go from level N to N+1.
+#   1.8-era curve per user spec: N in [0,15] -> 2*N + 7;
+#   N in [16,30] -> 5*N - 38; N >= 31 -> 9*N - 158.
+# (This is the classic Java "increasing XP" curve — level is NOT capped at 15;
+# the old flat total/1000 formula locked progression and must be replaced.)
+XP_CURVE = {
+    "1.7.10": ((0, 15, "2 * n + 7"), (16, 30, "5 * n - 38"), (31, None, "9 * n - 158")),
+    "1.8": ((0, 15, "2 * n + 7"), (16, 30, "5 * n - 38"), (31, None, "9 * n - 158")),
+}
+
+# Experience-bottle (Bottle o' Enchanting) use: item id -> (minXp, maxXp).
+XP_BOTTLE_DATA = {
+    "1.7.10": {},          # no experience bottles before 1.9-era registries
+    "1.8": {"384": (3, 11)},
+}
+
+# Ore XP awarded directly when the ore block is destroyed by a player dig
+# (random per-block roll). Keyed by LWMC block ids (include/world/MC18BlockIds.hpp):
+#   COAL_ORE 16 -> 0..2, QUARTZ_ORE 153 / REDSTONE_ORE 73 / LAPIS_ORE 21 -> 2..5,
+#   DIAMOND_ORE 56 / EMERALD_ORE 129 -> 3..7. Iron (15) and gold (14) award no
+#   direct XP in vanilla 1.8 — XP comes from cooking the meat they drop; omitted.
+XP_ORE_DATA = {
+    "1.7.10": {},          # ore XP was not a mechanic before 1.8-era survival
+    "1.8": {"16": (0, 2), "153": (2, 5), "73": (2, 5), "21": (2, 5),
+            "56": (3, 7), "129": (3, 7)},
+}
+
+
+def emit_xp_hpp(filename, version_string, protocol):
+    """Write include/versions/<filename>/xp.hpp."""
+    namespace = "V" + filename[1:]
+    lines = _header_prefix(version_string, protocol)
+    lines.append(f"namespace LightweightMC::Versions::{namespace}::Xp {{")
+    lines.append("// XP required to advance FROM level n to n+1.")
+    lines.append("inline int xpToNext(int n) {")
+    curve = XP_CURVE.get(version_string, XP_CURVE["1.8"])
+    lines.append("    if (n < 0)")
+    lines.append("        return 7; // clamp: pre-level-0 falls back to the first step")
+    for lo, hi, expr in curve:
+        cond = f"n >= {lo}" + (f" && n <= {hi}" if hi is not None else "")
+        lines.append(f"    if ({cond})")
+        lines.append(f"        return {expr};")
+    lines.append("    return 9 * n - 158;")
+    lines.append("}")
+    lines.append("// Experience-bottle use yields random XP in [min, max] per unit.")
+    lines.append("struct Bottle { int itemId; int minXp; int maxXp; };")
+    lines.append("inline const Bottle bottles[] = {")
+    for item_id, (mn, mx) in sorted(XP_BOTTLE_DATA.get(version_string, {}).items()):
+        lines.append(f"    {{ {item_id}, {mn}, {mx} }},")
+    lines.append("};")
+    lines.append("// XP awarded directly when a player destroys an ore block.")
+    lines.append("struct Ore { int blockId; int minXp; int maxXp; };")
+    lines.append("inline const Ore ores[] = {")
+    for block_id, (mn, mx) in sorted(XP_ORE_DATA.get(version_string, {}).items()):
+        lines.append(f"    {{ {block_id}, {mn}, {mx} }},")
+    lines.append("};")
+    lines.append("}")
+    lines.append("")
+    _emit(os.path.join(OUT_ROOT, filename, "xp.hpp"), lines)
+    print(f"[gen_version_defaults] Wrote {os.path.join(OUT_ROOT, filename, 'xp.hpp')}")
+
+
 def emit_health_hpp(filename, version_string, protocol):
     """Write include/versions/<filename>/health.hpp."""
     namespace = "V" + filename[1:]
@@ -619,6 +682,7 @@ def main():
         protocol = protocols[version_string]
         emit_defaults_hpp(directory_name, version_string, protocol)
         emit_food_hpp(directory_name, version_string, protocol)
+        emit_xp_hpp(directory_name, version_string, protocol)
         emit_health_hpp(directory_name, version_string, protocol)
         emit_combat_hpp(directory_name, version_string, protocol)
         emit_hunger_hpp(directory_name, version_string, protocol)

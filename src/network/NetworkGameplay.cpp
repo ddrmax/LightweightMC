@@ -24,6 +24,7 @@
 #include "managers/PlayerManager.hpp"
 #include "storage/Database.hpp"
 #include "world/GameRules.hpp"
+#include "versions/v1_8/xp.hpp"
 #include "core/utils.hpp"
 #include <algorithm>
 #include <cmath>
@@ -213,6 +214,45 @@ namespace LightweightMC::Network
         return m_database.savePlayerData(data);
     }
 
+    bool NetworkManager::setPlayerFood(const std::string &playerName,
+                                       int32_t foodLevel,
+                                       float foodSaturation)
+    {
+        for (auto &[fd, ses] : m_clients)
+        {
+            if (ses.state != ClientState::PLAY || ses.username != playerName)
+                continue;
+            ses.foodLevel = static_cast<int8_t>(foodLevel);
+            ses.foodSaturationLevel = foodSaturation;
+            std::vector<uint8_t> hp;
+            writeUpdateHealthPayload(hp, ses.health,
+                                     static_cast<int32_t>(ses.foodLevel),
+                                     ses.foodSaturationLevel);
+            sendPacket(fd, 0x06, hp);
+            Core::Logger::info("[NET FOOD] player=" + playerName +
+                               " fd=" + std::to_string(fd) +
+                               " foodLevel=" + std::to_string(static_cast<int>(ses.foodLevel)) +
+                               " saturation=" + std::to_string(ses.foodSaturationLevel));
+            return true;
+        }
+        Storage::PlayerData data;
+        data.uuid = Player::PlayerManager::getInstance().getPlayerUuid(playerName);
+        data.username = playerName;
+        Storage::PlayerData existing{};
+        if (m_database.loadPlayerData(data.uuid, existing))
+        {
+            data = existing;
+            data.foodLevel = static_cast<int8_t>(foodLevel);
+            data.foodSaturationLevel = foodSaturation;
+        }
+        else
+        {
+            data.foodLevel = static_cast<int8_t>(foodLevel);
+            data.foodSaturationLevel = foodSaturation;
+        }
+        return m_database.savePlayerData(data);
+    }
+
     int NetworkManager::grantPlayerXp(const std::string &playerName, int32_t amount)
     {
         for (auto &[fd, ses] : m_clients)
@@ -242,12 +282,25 @@ namespace LightweightMC::Network
         if (newTotal < 0)
             newTotal = 0;
         data.totalExperience = static_cast<int32_t>(newTotal);
-        const int32_t newLevel = std::min(15, data.totalExperience / 1000);
-        data.experienceLevel = static_cast<int16_t>(newLevel);
-        data.experienceProgress =
-            static_cast<float>(data.totalExperience - newLevel * 1000) / 1000.0f;
+        // Same piecewise curve as PlayerSession::grantXp — the old flat
+        // min(15, total/1000) formula locked /experience grants at level 15.
+        int32_t remainingXp = data.totalExperience;
+        int level = 0;
+        while (true)
+        {
+            const int step = LightweightMC::Versions::V1_8::Xp::xpToNext(level);
+            if (remainingXp < step)
+                break;
+            remainingXp -= step;
+            ++level;
+        }
+        data.experienceLevel = static_cast<int16_t>(level);
+        data.experienceProgress = (level <= 0)
+                                      ? 0.0f
+                                      : static_cast<float>(remainingXp) /
+                                            static_cast<float>(LightweightMC::Versions::V1_8::Xp::xpToNext(level));
         m_database.savePlayerData(data);
-        return newLevel - prevLevel;
+        return level - prevLevel;
     }
 
     // Phase 14b — auto-respawn sweep. Server.cpp's fixed 20 Hz tick loop calls

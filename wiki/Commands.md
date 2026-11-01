@@ -160,7 +160,7 @@ Source: `include/commands/WorldCommands.hpp`.
 | `forceload` | — | `/forceload <add\|remove\|remove all\|query>` | 2 | ack-only | Forces chunks to remain loaded permanently. | — |
 | `locate` | — | `/locate <structure\|biome\|poi> <name>` | 2 | ack-only | Locate the nearest structure, biome or POINT. | — |
 | `place` | — | `/place <feature\|structure\|template\|jigsaw> ...` | 2 | ack-only | Place a feature, jigsaw or structure. | — |
-| `seed` | — | `/Seed` | 2 | ack-only | Shows the world seed. | Registered lowercase: type `/seed`; the usage string shows `/Seed` (cosmetic). |
+| `seed` | — | `/seed` | 2 | ack-only | Shows the world seed. | Registered lowercase: type `/seed`; the usage string shows `/seed` (cosmetic). |
 | `setblock` | — | `/setblock <pos> <block>` | 2 | ack-only | Replaces a block with another block. | — |
 | `setworldspawn` | — | `/setworldspawn [pos]` | 2 | ack-only | Defines the world spawn point. | — |
 | `spawnpoint` | — | `/spawnpoint [targets] [pos]` | 2 | ack-only | Defines the spawn point of a player. | — |
@@ -775,14 +775,14 @@ Source: `include/commands/WorldCommands.hpp`.
   {
     "command": "seed",
     "aliases": [],
-    "usage": "/Seed",
+    "usage": "/seed",
     "op_level": 2,
     "description": "Shows the world seed.",
     "class": "SeedCommand",
     "source": "WorldCommands.hpp",
     "registered": true,
     "status": "ack-only",
-    "notes": "Registered lowercase: type `/seed`; the usage string shows `/Seed` (cosmetic)."
+    "notes": "Registered lowercase: type `/seed`; the usage string shows `/seed` (cosmetic)."
   },
   {
     "command": "setblock",

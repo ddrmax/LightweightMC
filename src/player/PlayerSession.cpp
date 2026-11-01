@@ -1,5 +1,6 @@
 #include "player/PlayerSession.hpp"
 #include "versions/v1_8/health.hpp"
+#include "versions/v1_8/xp.hpp"
 #include "storage/Database.hpp"
 #include "world/GameRules.hpp"
 #include <algorithm>
@@ -500,11 +501,11 @@ namespace LightweightMC::Player
         return true;
     }
 
-    // Vanilla Java Edition 1.8 XP curve (see minecraft.wiki /w/XP):
-    // linear 1000 XP per level up to level 15. Levels above 15 are not
-    // tracked; totalExperience still accumulates so /experience <set>
-    // can push arbitrary totals.
-
+    // Vanilla Java-Edition XP curve (see minecraft.wiki /w/XP): XP from level
+    // N to N+1 grows per the piecewise formula in include/versions/v1_8/xp.hpp
+    // (2N+7 for 0..15, 5N-38 for 16..30, 9N-158 for 31+). The old flat
+    // totalExperience/1000 formula locked large grants at level 15; grantXp now
+    // walks the curve so big XP drops (bottles, ore) advance several levels.
     int PlayerSession::grantXp(int32_t amount)
     {
         if (amount == 0)
@@ -513,9 +514,24 @@ namespace LightweightMC::Player
         totalExperience += amount;
         if (totalExperience < 0)
             totalExperience = 0;
-        experienceLevel = std::min(15, totalExperience / 1000);
-        const int remainder = totalExperience - experienceLevel * 1000;
-        experienceProgress = static_cast<float>(remainder) / 1000.0f;
+
+        // Recompute level from total by consuming curve steps from the bottom.
+        // Levels stay small integers, so this loop is trivially cheap.
+        int32_t remaining = totalExperience;
+        int level = 0;
+        while (true)
+        {
+            const int step = LightweightMC::Versions::V1_8::Xp::xpToNext(level);
+            if (remaining < step)
+                break;
+            remaining -= step;
+            ++level;
+        }
+        experienceLevel = static_cast<int16_t>(level);
+        experienceProgress = (level <= 0)
+                                 ? 0.0f
+                                 : static_cast<float>(remaining) /
+                                       static_cast<float>(LightweightMC::Versions::V1_8::Xp::xpToNext(level));
         return experienceLevel - prevLevel;
     }
 
