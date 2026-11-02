@@ -320,6 +320,17 @@ namespace InventoryHandler
         }
 
         Player::WindowInfo &win = wIt->second;
+        // The MC 1.8 client addresses container slots with its own UI cell indices,
+        // which can exceed the advertised slot count for a single chest (e.g. slot 49/61
+        // on what the server sized as 27). Rather than reject those clicks (which made
+        // deposits vanish and left the item "stuck in its old slot"), grow the window
+        // vector to cover the requested index up to a sane cap so the write lands where
+        // the client expects. The S2C Window Items advertise uses win.items.size(), so
+        // both sides stay consistent on the next redraw / reconnect.
+        const int kMaxContainerSlots = 96;
+        if (slot >= static_cast<int>(win.items.size()) && slot < kMaxContainerSlots)
+            win.items.resize(static_cast<std::size_t>(slot) + 1, Player::ItemStack{-1, 0, 0});
+
         const int slotCount = static_cast<int>(win.items.size());
         bool accepted = false;
         bool stateChanged = false;
@@ -329,42 +340,96 @@ namespace InventoryHandler
             const Player::ItemStack before = win.items[slot];
             Player::ItemStack after = before;
 
-            if (mode == 0) // grab (take the item out into the player's inventory)
+            if (mode == 0) // left-click on a container slot: GRAB (take out) OR PLACE (deposit)
             {
-                // Prefer the client-supplied item (usually == slot contents);
-                // fall back to the slot's own content when the client did not
-                // include an item on a grab click.
-                const bool claimMatches = hasItem ? (itemId == before.id && itemCount == before.count && itemDamage == before.damage) : (before.id != -1);
-                Player::ItemStack taken = before;
-                if (!claimMatches || before.id == -1)
+                const bool cursorHolds = (session.cursor.id != -1 && session.cursor.count > 0);
+
+                if (cursorHolds)
                 {
-                    after = before;
-                    accepted = false;
-                }
-                else if (taken.id != -1 && taken.count > 0)
-                {
-                    int remaining = mergeItemIntoInventory(
-                        session, taken.id, taken.count, taken.damage);
-                    if (remaining > 0)
+                    // DEPOSIT the held cursor item into this chest slot. Merge into a
+                    // matching stack up to the per-stack cap, otherwise overwrite the
+                    // slot with the cursor stack. Any part that cannot fit stays in the
+                    // cursor so nothing is silently lost (vanilla leaves the remainder).
+                    const Player::ItemStack cur = session.cursor;
+                    Player::ItemStack deposit = cur;
+                    if (before.id == cur.id && before.damage == cur.damage)
                     {
-                        after = {taken.id, static_cast<uint8_t>(remaining), taken.damage};
+                        const int kMaxStack = 64;
+                        const int space = kMaxStack - static_cast<int>(before.count);
+                        const int add = std::min(static_cast<int>(cur.count), space > 0 ? space : 0);
+                        deposit = {before.id,
+                                   static_cast<uint8_t>(static_cast<int>(before.count) + add),
+                                   before.damage};
+                        if (add >= static_cast<int>(cur.count))
+                            session.cursor = {-1, 0, 0};
+                        else
+                            session.cursor = {cur.id,
+                                              static_cast<uint8_t>(static_cast<int>(cur.count) - add),
+                                              cur.damage};
+                    }
+                    else if (before.id == -1 || before.count == 0)
+                    {
+                        deposit = cur;
+                        session.cursor = {-1, 0, 0};
                     }
                     else
                     {
-                        after = {-1, 0, 0};
+                        deposit = cur;
+                        session.cursor = before;
                     }
+                    after = deposit;
+                    accepted = true;
+                }
+                else if (hasItem && !(itemId == before.id && itemCount == before.count && itemDamage == before.damage))
+                {
+                    // MC 1.8 protocol-47 PLACE: the client sends the NEW item directly on
+                    // the wire (button=0, hasItem=T) rather than via a server-side cursor.
+                    // This is a deposit into the chest slot -- NOT a grab. The old code only
+                    // ever treated mode==0 as a grab, so deposits were rejected (accepted=F)
+                    // and cleared on the client ("item vanishes when put into inventory").
+                    // Distinguish place from grab: on a GRAB the wire item equals the slot's
+                    // current content; here it differs, so it is a placement of new content.
+                    auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
+                        translateItemFromClient(session.clientProtocol, itemId, itemCount, itemDamage);
+                    after = {tr.id, tr.count, tr.damage};
+                    accepted = true;
+                }
+                else if (hasItem) // wire item equals slot content -> GRAB into inventory
+                {
+                    const Player::ItemStack taken = before;
+                    int remaining = mergeItemIntoInventory(
+                        session, taken.id, taken.count, taken.damage);
+                    if (remaining > 0)
+                        after = {taken.id, static_cast<uint8_t>(remaining), taken.damage};
+                    else
+                        after = {-1, 0, 0};
                     accepted = true;
 
-                    // Sync player inventory to the client. Without this the
-                    // client never sees items pulled from a container, which
-                    // manifests as "items lost" until reconnect.
                     sendPlayerInventoryWindowItems(clientFd, session, net);
                     Player::PlayerManager::getInstance().savePlayerState(session, database);
                 }
-                else
+                else // hasItem == false on an empty/unknown slot: nothing to do
                 {
-                    after = {-1, 0, 0};
-                    accepted = true;
+                    if (before.id != -1 && before.count > 0)
+                    {
+                        // Grab with no wire item -- take the whole slot out.
+                        const Player::ItemStack taken = before;
+                        int remaining = mergeItemIntoInventory(
+                            session, taken.id, taken.count, taken.damage);
+                        if (remaining > 0)
+                            after = {taken.id, static_cast<uint8_t>(remaining), taken.damage};
+                        else
+                            after = {-1, 0, 0};
+                        accepted = true;
+
+                        sendPlayerInventoryWindowItems(clientFd, session, net);
+                        Player::PlayerManager::getInstance().savePlayerState(session, database);
+                    }
+                    else
+                    {
+                        after = before; // empty slot, nothing to grab/place
+                        accepted = false;
+                    }
                 }
             }
             else if (mode == 1) // shift-click (MC 1.8 protocol: mode 1 = shift)
