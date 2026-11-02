@@ -167,6 +167,15 @@ namespace LightweightMC::Player
         uint8_t openWindowId{0}; // next window ID to assign when opening a container
         std::unordered_map<int, ItemStack> inventory{};
 
+        // Item currently held on the client's inventory cursor (the stack lifted
+        // by a Click Window grab but not yet placed back). Session-only, never
+        // persisted: vanilla keeps this in the open-window UI state and returns
+        // it to the first free slot when the window closes. Tracking it server-
+        // side prevents the "disappearing item" desync — if the player closes
+        // their inventory while still holding a stack, handleCloseWindow() puts
+        // it back instead of letting it vanish into the ether. id == -1 = empty cursor.
+        ItemStack cursor{-1, 0, 0};
+
         // Currently-open container windows for this session (windowId -> state).
         // Contents are flushed to SQLite (block_entities) on every click;
         // this map is cleared on login (see resetVolatileState) so a reconnect
@@ -191,6 +200,14 @@ namespace LightweightMC::Player
         int32_t air{30};          // Air ticks remaining (NBT: air)
         bool onFire{false};       // On fire (NBT: OnFire)
         int16_t fire{0};          // Fire ticks remaining (NBT: fire)
+        // Vanilla resolves fall damage at the tick where the entity transitions
+        // from airborne to standing on ground. LWMC only sees per-packet wire
+        // positions, so prevOnGround carries the previous packet's ground flag
+        // and handlePlayerMovement fires the accumulated fallDistance exactly
+        // once when (!prevOnGround -> onGround). Updated on every accepted
+        // move (login/respawn seed it to the spawn's own state).
+        bool prevOnGround{false};
+
 
         // ---- Void / out-of-bounds fall cadence (session-only, never persisted).
         // Java 1.8 deals void damage every 10 game ticks (500 ms at the fixed
@@ -202,6 +219,26 @@ namespace LightweightMC::Player
         // handlers that want to react without re-reading the gamerule floor.
         int64_t lastVoidDamageMs{0};
         bool inVoidNow{false};
+
+        // ---- Mount / vehicle state (session-only, never persisted).
+        // Vanilla cancels fall damage while riding or steering: sitting on a
+        // horse/pig (UseEntity mount), steering a minecart/boat (SteerVehicle)
+        // or gliding with elytra all suppress the fall-damage check, and the
+        // speed/noclip gate must not fight mount-driven displacement either.
+        // LWMC has no server-side mob model so mounting is inferred from the
+        // wire: mountedDrive is set by SteerVehicle packets (cleared on standUp/
+        // deselect), while rideWindowMs carries a wall-clock expiry timestamp —
+        // EntityAction riding traffic bumps it, and fall/speed checks stay
+        // suppressed only while now < rideWindowMs. The 2 s self-expiry means
+        // detection resumes automatically when a player dismounts and stops
+        // sending mount packets, instead of latching forever (which is what an
+        // ungated boolean would have re-introduced).
+        bool mountedDrive{false}; // true while steering a minecart / boat / mount via SteerVehicle packets
+        int64_t rideWindowMs{0};  // expiry timestamp (ms): fall/speed checks suppressed while now < value
+        // SteerVehicle sets mountedDrive directly (no follow window). A client that boards a boat/minecart
+        // and dismounts may never send the standUp/deselect byte, so mountedDrive needs its own self-expiring
+        // window; PlayerHandler clears it once nowMs passes steerWindowMs, resuming fall/speed checks.
+        int64_t steerWindowMs{0}; // expiry timestamp (ms): mountedDrive self-expires once SteerVehicle traffic stops
 
         bool sleeping{false};                 // Sleeping in bed (NBT: sleeping)
         uint8_t sleepTimer{0};                // Sleep counter (NBT: sleepTimer)

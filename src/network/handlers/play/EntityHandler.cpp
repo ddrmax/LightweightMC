@@ -169,6 +169,16 @@ namespace EntityHandler
             (void)LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd);
         }
 
+        // Mount tracking: bump the self-expiring ride window on follow traffic
+        // (EntityAction action==0 = start following). The 2 s window means fall
+        // detection resumes automatically when a player dismounts and stops
+        // sending riding packets — see PlayerSession.hpp rideWindowMs.
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+        if (action == 0)
+            session.rideWindowMs = nowMs + 2000;
+
         LightweightMC::Core::Logger::debug("[Entity] " + session.username +
                                            " EntityAction target=" + std::to_string(target) +
                                            " action=" + std::to_string(action));
@@ -187,6 +197,27 @@ namespace EntityHandler
         const int32_t strafe = LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd);
         const int32_t standUp = LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd);
         const int32_t deselect = LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd);
+
+        // Mount/vehicle tracking: clients stream SteerVehicle continuously while
+        // driving a minecart or boat. standUp/deselect byte non-zero means the
+        // player is leaving the vehicle, so clear the flag and let fall damage
+        // resume on the landing tick; otherwise mark mountedDrive so movement
+        // gates skip both the speed check and the fall-damage check (vanilla
+        // cancels fall damage while riding).
+        // Steady_clock timestamp so this shares the same wall-clock basis as PlayerHandler's
+        // movement nowMs (see handlePlayerMovement). Mounted/vehicle suppression is time-bounded:
+        // a client that boards a boat/minecart and jumps out may stop sending steer packets without
+        // ever emitting the standUp/deselect byte, so mountedDrive must self-expire instead of latching.
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+        if (standUp != 0 || deselect != 0)
+            session.mountedDrive = false;
+        else
+        {
+            session.mountedDrive = true;
+            session.steerWindowMs = nowMs + 2000; // self-expiring ride window: fall/speed checks resume if steer traffic stops
+        }
 
         LightweightMC::Core::Logger::debug("[Vehicle] " + session.username +
                                            " SteerVehicle f=" + std::to_string(forward) +

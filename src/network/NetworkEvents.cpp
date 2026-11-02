@@ -12,6 +12,8 @@
 #include "network/AntiScan.hpp"
 #include "managers/ScoreboardManager.hpp"
 #include "managers/PlayerManager.hpp"
+#include "world/EntityManager.hpp"
+#include "network/handlers/play/InventoryHandler.hpp"
 #include "network/handlers/HandshakeHandler.hpp"
 #include "network/handlers/StatusHandler.hpp"
 #include "network/handlers/LoginHandler.hpp"
@@ -376,6 +378,81 @@ namespace LightweightMC::Network
                                     std::chrono::steady_clock::now().time_since_epoch())
                                     .count());
 
+        // Ground-item pickup sweep (0x0D Collect Item + 0x13 Destroy Entities).
+        // Runs ~twice a second. Any DROPPED_ITEM entity that has passed its
+        // vanilla 2s pickup delay and sits within ~1.3 blocks of a PLAY client's
+        // feet is offered to that client: merge into the authoritative inventory,
+        // then only destroy the ground entity if at least one unit landed (a full
+        // inventory keeps the item on the ground). A full Window Items (0x30) sync
+        // makes the collected stack visible even if slot mapping drifts.
+        static auto lastPickup = std::chrono::steady_clock::now();
+        const auto pickupNow = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(pickupNow - lastPickup).count() >= 500)
+        {
+            lastPickup = pickupNow;
+            auto &em = LightweightMC::World::EntityManager::getInstance();
+            const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(pickupNow.time_since_epoch()).count();
+            for (const int32_t eid : em.listIds())
+            {
+                const LightweightMC::World::EntityManager::EntityRecord *rec = em.find(eid);
+                if (!rec || rec->kind != LightweightMC::World::EntityManager::EntityKind::DROPPED_ITEM)
+                    continue;
+                if (nowMs - rec->spawnMs < 2000)
+                    continue;
+
+                int bestFd = -1;
+                double bestD2 = 2.25; // vanilla pickup radius ~1.5 blocks (squared)
+                for (const auto &[fd, ses] : m_clients)
+                {
+                    if (ses.state != Player::ClientState::PLAY)
+                        continue;
+                    const double dx = ses.x - rec->x;
+                    const double dy = (ses.y + 0.5) - rec->y; // feet-to-centre offset
+                    const double dz = ses.z - rec->z;
+                    const double d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 < bestD2)
+                    {
+                        bestD2 = d2;
+                        bestFd = fd;
+                    }
+                }
+                if (bestFd < 0)
+                    continue;
+
+                auto sit = m_clients.find(bestFd);
+                if (sit == m_clients.end())
+                    continue;
+                const int32_t itemId = rec->itemId;
+                const uint8_t cnt = static_cast<uint8_t>(rec->stackCount > 0 ? rec->stackCount : 1);
+                const int remaining = ::InventoryHandler::mergeItemIntoInventory(
+                    sit->second, itemId, cnt, 0);
+                // Vanilla keeps the item on the ground when the inventory is
+                // completely full; only collect if at least one unit landed.
+                if (remaining >= cnt)
+                    continue;
+
+                // [WIRE] Collect Item (0x0D) + Destroy Entities (0x13): the client
+                // plays the suck-in animation and stops rendering the ground item.
+                LightweightMC::Core::Logger::warn(std::string("[WIRE Pickup 0x0D+0x13] ")
+                    + "player="+sit->second.username+" eid="+std::to_string(eid)+" itemId="+std::to_string(itemId));
+
+                // Payload-only bodies: sendPacket prepends the wire-ID varint.
+                std::vector<uint8_t> collect;
+                LightweightMC::Network::Packet::writeVarInt(collect, eid);
+                LightweightMC::Network::Packet::writeVarInt(collect, bestFd);
+                packetSender(bestFd, 0x0D, collect);
+
+                std::vector<uint8_t> destroy;
+                LightweightMC::Network::Packet::writeVarInt(destroy, 1);
+                LightweightMC::Network::Packet::writeVarInt(destroy, eid);
+                packetSender(bestFd, 0x13, destroy);
+
+                em.removeItemDrop(eid);
+                LightweightMC::Core::Logger::info("[World] " + sit->second.username +
+                    " picked up item eid=" + std::to_string(eid) +
+                    " itemId=" + std::to_string(itemId));
+            }
+        }
         // Scoreboard / tab-list cadence: refresh at most once per second so
         // clients that have not moved in the last second do not pay the
         // tablist cost every pollEvents tick.

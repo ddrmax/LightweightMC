@@ -4,9 +4,23 @@
 
 #include <chrono>
 #include <unordered_map>
+#include <sstream>
+#include <iomanip>
 
 namespace InventoryHandler
 {
+    static inline std::string hexId(int32_t v)
+    {
+        std::ostringstream o; o << "0x" << std::hex << v; return o.str();
+    }
+
+    static inline std::string hexPreview(const uint8_t *b, size_t n)
+    {
+        std::ostringstream o; const size_t k = n<48?n:48;
+        for (size_t i=0;i<k;++i){ o<<std::hex<<std::setw(2)<<std::setfill('0')<<(unsigned)b[i]; if(i+1<k)o<<' '; }
+        return o.str();
+    }
+
 
     void handleHeldItemChange(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd, LightweightMC::Network::NetworkManager &net)
     {
@@ -52,6 +66,7 @@ namespace InventoryHandler
 
     void handleClickWindow(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd, LightweightMC::Storage::Database &database, LightweightMC::Network::NetworkManager &net)
     {
+        const size_t wireStart = offset;
         uint8_t windowId = static_cast<uint8_t>(LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd));
         int16_t slot = LightweightMC::Network::Packet::readShortBounded(data, offset, packetEnd);
         uint8_t button = static_cast<uint8_t>(LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd));
@@ -90,6 +105,17 @@ namespace InventoryHandler
             if (session.clientProtocol >= 47 && offset < packetEnd)
                 offset++;
         }
+        // Wire diagnostic: dump full Click Window (0x0E) decode + hex for desync tracing.
+        const char *modeName = "?";
+        switch (mode) { case 0: modeName="grab/place"; break; case 1: modeName="shift"; break; case 2: modeName="throw"; break; case 3: modeName="destroy"; break; default: break; }
+        LightweightMC::Core::Logger::warn(std::string("[INV C2S ClickWindow] ")
+            + "win="+std::to_string(windowId)+" slot="+std::to_string(slot)
+            + " btn="+std::to_string(button)+" act="+std::to_string(actionNumber)
+            + " mode="+std::to_string(mode)+"("+modeName+") item="+std::to_string(itemId)
+            + " hasItem="+(hasItem?"T":"F")+" cnt="+std::to_string(itemCount)+" dmg="+std::to_string(itemDamage)
+            + " used="+std::to_string(offset-wireStart)+" body="+std::to_string(packetEnd-wireStart)
+            + " hex="+hexPreview(data+wireStart, packetEnd-wireStart));
+
 
         // windowId == 0 is the player's own inventory window. It is never
         // registered in session.openWindows (that map only tracks container
@@ -111,10 +137,36 @@ namespace InventoryHandler
                                                      : Player::ItemStack{-1, 0, 0};
                 Player::ItemStack after = before;
                 bool skipSetSlot = false;
-                if (mode == 0) // grab (client already picked it up locally)
+                if (mode == 0) // left-click: GRAB (cursor empty) OR PLACE (cursor holding item)
                 {
-                    after = {-1, 0, 0};
-                    accepted = true;
+                    if (session.cursor.id != -1 && session.cursor.count > 0)
+                    {
+                        after = session.cursor;
+                        if (before.id != -1 && before.count > 0) session.cursor = before;
+                        else session.cursor = {-1, 0, 0};
+                        accepted = true;
+                    }
+                    else if (before.id == -1)
+                    {
+                        after = before;
+                        accepted = true;
+                        skipSetSlot = true;
+                    }
+                    else
+                    {
+                        const bool ok = !hasItem ? true : (itemId == before.id && itemCount == before.count);
+                        if (ok)
+                        {
+                            session.cursor = before;
+                            after = {-1, 0, 0};
+                            accepted = true;
+                        }
+                        else
+                        {
+                            after = before;
+                            accepted = false;
+                        }
+                    }
                 }
                 else if (mode == 1) // shift-click
                 {
@@ -230,6 +282,9 @@ namespace InventoryHandler
                         if (session.clientProtocol >= 47)
                             setSlot.push_back(0); // NBT end-of-compound
                     }
+                    // S2C reply trace: what the server forces back to the client (Set Slot 0x2F).
+                    LightweightMC::Core::Logger::warn(std::string("[INV S2C SetSlot] ")
+                        + "win="+std::to_string(windowId)+" slot="+std::to_string(slot)+" hex="+hexPreview(setSlot.data(), setSlot.size()));
                     net.sendPacket(clientFd, 0x2F, setSlot);
                 }
 
@@ -237,6 +292,9 @@ namespace InventoryHandler
                 confirm.push_back(windowId);
                 LightweightMC::Network::Packet::writeShort(confirm, actionNumber);
                 confirm.push_back(accepted ? 1 : 0);
+                // S2C reply trace: what the server sends back for this transaction (Confirm Transaction 0x32).
+                LightweightMC::Core::Logger::warn(std::string("[INV S2C ConfirmTransaction] ")
+                    + "win="+std::to_string(windowId)+" act="+std::to_string(actionNumber)+" accepted="+std::string(confirm.back()?"T":"F")+" hex="+hexPreview(confirm.data(), confirm.size()));
                 net.sendPacket(clientFd, 0x32, confirm);
             }
             return;
@@ -252,6 +310,9 @@ namespace InventoryHandler
             confirm.push_back(windowId);
             LightweightMC::Network::Packet::writeShort(confirm, actionNumber);
             confirm.push_back(0);
+            // S2C reply trace: what the server sends back for this transaction (Confirm Transaction 0x32).
+            LightweightMC::Core::Logger::warn(std::string("[INV S2C ConfirmTransaction] ")
+                + "win="+std::to_string(windowId)+" act="+std::to_string(actionNumber)+" accepted="+std::string(confirm.back()?"T":"F")+" hex="+hexPreview(confirm.data(), confirm.size()));
             net.sendPacket(clientFd, 0x32, confirm);
             LightweightMC::Core::Logger::debug("[Container] Click Window " + std::to_string(windowId) +
                                                " unknown (no registered window for " + session.username + ")");
@@ -273,16 +334,14 @@ namespace InventoryHandler
                 // Prefer the client-supplied item (usually == slot contents);
                 // fall back to the slot's own content when the client did not
                 // include an item on a grab click.
+                const bool claimMatches = hasItem ? (itemId == before.id && itemCount == before.count && itemDamage == before.damage) : (before.id != -1);
                 Player::ItemStack taken = before;
-                if (hasItem)
+                if (!claimMatches || before.id == -1)
                 {
-                    auto tr = LightweightMC::Network::Protocol::ProtocolTranslator::
-                        translateItemFromClient(session.clientProtocol, itemId, itemCount, itemDamage);
-                    taken = {tr.id, tr.count, tr.damage};
+                    after = before;
+                    accepted = false;
                 }
-                // Move into player inventory via the shared merge helper.
-                // Items that can't fit remain in the container slot.
-                if (taken.id != -1 && taken.count > 0)
+                else if (taken.id != -1 && taken.count > 0)
                 {
                     int remaining = mergeItemIntoInventory(
                         session, taken.id, taken.count, taken.damage);
@@ -294,6 +353,7 @@ namespace InventoryHandler
                     {
                         after = {-1, 0, 0};
                     }
+                    accepted = true;
 
                     // Sync player inventory to the client. Without this the
                     // client never sees items pulled from a container, which
@@ -304,8 +364,8 @@ namespace InventoryHandler
                 else
                 {
                     after = {-1, 0, 0};
+                    accepted = true;
                 }
-                accepted = true;
             }
             else if (mode == 1) // shift-click (MC 1.8 protocol: mode 1 = shift)
             {
@@ -456,6 +516,9 @@ namespace InventoryHandler
                 if (session.clientProtocol >= 47)
                     setSlot.push_back(0); // NBT end-of-compound
             }
+            // S2C reply trace: what the server forces back to the client (Set Slot 0x2F).
+            LightweightMC::Core::Logger::warn(std::string("[INV S2C SetSlot] ")
+                + "win="+std::to_string(windowId)+" slot="+std::to_string(slot)+" hex="+hexPreview(setSlot.data(), setSlot.size()));
             net.sendPacket(clientFd, 0x2F, setSlot);
         }
 
@@ -463,6 +526,9 @@ namespace InventoryHandler
         confirm.push_back(windowId);
         LightweightMC::Network::Packet::writeShort(confirm, actionNumber);
         confirm.push_back(accepted ? 1 : 0);
+        // S2C reply trace: what the server sends back for this transaction (Confirm Transaction 0x32).
+        LightweightMC::Core::Logger::warn(std::string("[INV S2C ConfirmTransaction] ")
+            + "win="+std::to_string(windowId)+" act="+std::to_string(actionNumber)+" accepted="+std::string(confirm.back()?"T":"F")+" hex="+hexPreview(confirm.data(), confirm.size()));
         net.sendPacket(clientFd, 0x32, confirm);
     }
 
@@ -527,6 +593,17 @@ namespace InventoryHandler
     {
         (void)clientFd;
         const uint8_t windowId = static_cast<uint8_t>(LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd));
+
+        if (windowId == 0)
+        {
+            if (session.cursor.id != -1 && session.cursor.count > 0)
+            {
+                mergeItemIntoInventory(session, session.cursor.id, session.cursor.count, session.cursor.damage);
+                LightweightMC::Core::Logger::warn("[INV S2C] returned cursor item to inventory for " + session.username);
+                session.cursor = {-1, 0, 0};
+            }
+            return;
+        }
 
         auto wIt = session.openWindows.find(windowId);
         if (wIt != session.openWindows.end())

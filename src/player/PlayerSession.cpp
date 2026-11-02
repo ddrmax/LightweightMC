@@ -177,6 +177,8 @@ namespace LightweightMC::Player
         foodSaturationLevel = 5.0f; /* V1_8 default */
         foodExhaustionLevel = 0.0f;
         fallDistance = 0.0f;
+        // Seed prevOnGround so the first post-login packet can't fake a landing.
+        prevOnGround = false;
         air = 30;
         onFire = false;
         fire = 0;
@@ -211,11 +213,22 @@ namespace LightweightMC::Player
         lastVoidDamageMs = 0;
         inVoidNow = false;
 
+        // Mount/vehicle state is session-only: a reconnect must not inherit a
+        // stale "riding" flag from the previous session window.
+        mountedDrive = false;
+        rideWindowMs = 0;
+        steerWindowMs = 0;
+
         // Clear transient per-session container windows: on reconnect a fresh
         // window is opened that re-populates its contents from the SQLite
         // block_entities row for the container's coord.
         openWindows.clear();
         openWindowId = 0;
+
+        // Reset the cursor-held stack so a reconnect can't inherit a ghost item
+        // lifted onto the cursor in the previous session window (which would
+        // otherwise vanish or double-count when the fresh inventory window opens).
+        cursor = {-1, 0, 0};
 
         // Spawn at the configured spawn point (bed first, then world spawn).
         if (hasBedSpawn)
@@ -416,12 +429,17 @@ namespace LightweightMC::Player
         onFire = false;
         fire = 0;
         onGround = false;
+        prevOnGround = false;
         sleeping = false;
         sleepTimer = 0;
         flying = false;
         sprinting = false;
         lastVoidDamageMs = 0;
         inVoidNow = false;
+        mountedDrive = false;
+        rideWindowMs = 0;
+        steerWindowMs = 0;
+        cursor = {-1, 0, 0}; // respawn starts with an empty cursor
         // Same priority order as resetVolatileState: bed first, then world
         // spawn, else literal (0.5, 7.0, 0.5).
         if (hasBedSpawn)

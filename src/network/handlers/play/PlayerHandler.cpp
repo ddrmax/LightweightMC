@@ -405,7 +405,6 @@ namespace PlayerHandler
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
                     .count());
-
             // Seed the tracker on the login burst so legit respawns/teleports don't log a noclip hit.
             if (session.lastMoveMs == 0)
             {
@@ -419,6 +418,14 @@ namespace PlayerHandler
                 const double dx = session.x - session.lastMoveX;
                 const double dy = session.y - session.lastMoveY;
                 const double dz = session.z - session.lastMoveZ;
+                // Speed/noclip is a strictly HORIZONTAL (2D X/Z) signal: client
+                // speed hacks and noclip warps displace the player laterally.
+                // Measuring the full 3D delta made legitimate vertical drops
+                // (jumps, falls, teleport landings with |dy| large but |dxz| ~ 0)
+                // trip the gate and clamp the fall mid-air — i.e. "speed/noclip
+                // triggers when falling". Fall distance is tracked separately
+                // below from dy; this check must ignore dy entirely.
+                const double dxz = std::sqrt(dx * dx + dz * dz);
                 const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
                 int64_t walkCfg{4};
@@ -434,17 +441,54 @@ namespace PlayerHandler
                     maxBps = static_cast<double>(sprintCfg);
 
                 const double allowance = std::max(1.5, maxBps * elapsedSec);
-                if (dist > allowance && dist > 0.0)
+                // Expire a sticky vehicle flag first: SteerVehicle sets mountedDrive but a client that
+                // boards a boat/minecart and jumps out (or whose steer packets simply stop) may never send
+                // the standUp/deselect byte, leaving mountedDrive latched forever. Mirror the 2 s rideWindowMs
+                // expiry so fall/speed checks resume on their own once now passes the window.
+                if (session.mountedDrive && nowMs >= session.steerWindowMs)
+                    session.mountedDrive = false;
+
+                // Fall tracking FIRST, before the exploit branch: vanilla
+                // accumulates fallDistance every tick it simulates, and only
+                // resolves damage when the entity transitions airborne -> on
+                // ground. Clients send one position packet per frame, so a
+                // fall from a tower or a high /tp lands as a handful of large
+                // dy steps — the accumulation must see them even when the
+                // exploit gate later clamps (or it would swallow the fall),
+                // and the damage check must NOT run mid-air. Mounts, creative/
+                // adventure modes and flight skip the whole tracker (vanilla:
+                // no fall damage while riding/gliding). Elytra glide maps onto
+                // session.flying since LWMC has no separate glide flag.
+                const bool mounted = session.mountedDrive ||
+                                     nowMs < session.rideWindowMs;
+                if (!session.flying && !mounted && session.gamemode == 0)
                 {
-                    // Clamp the illegal delta back onto a vanilla sprint vector and warn once per jump.
-                    const double scale = allowance / dist;
+                    if (dy < 0.0)
+                        session.fallDistance += static_cast<float>(-dy);
+                    else if (dy > 1.0)
+                        session.fallDistance = 0.0f; // genuine upward launch (jump / launchpad): restart the fall.
+                    // Small climbs (sub-block positive dy from packet interpolation or stepping onto a ledge
+                    // mid-fall) must NOT wipe the banked fallDistance, otherwise one jittery packet clears the
+                    // whole bank and a tall drop takes zero damage.
+                }
+
+                if (dxz > allowance && dxz > 0.0 && !mounted)
+                {
+                    // Clamp the illegal delta back onto a vanilla sprint vector.
+                    // The allowance is horizontal-only, so scale only the X/Z
+                    // component of the move; vertical travel (jumps/falls) is
+                    // never clamped back — that was what froze legit drops.
+                    const double scale = allowance / dxz;
                     session.x = session.lastMoveX + dx * scale;
-                    session.y = session.lastMoveY + dy * scale;
+                    // vertical travel is never clamped back: session.y already
+                    // carries the wire Y and must survive the clamp untouched.
                     session.z = session.lastMoveZ + dz * scale;
 
                     LightweightMC::Core::Logger::warn("noclip/speed exploit on " + session.username +
-                                                      " (packet id 0x" + std::to_string(packetId) + ", dist=" +
-                                                      std::to_string(dist) + ", allowance=" + std::to_string(allowance) + ")");
+                                                      " (packet id 0x" + std::to_string(packetId) +
+                                                      ", dxz=" + std::to_string(dxz) +
+                                                      ", dy=" + std::to_string(dy) +
+                                                      ", allowance=" + std::to_string(allowance) + ")");
 
                     session.lastMoveX = session.x;
                     session.lastMoveY = session.y;
@@ -453,25 +497,13 @@ namespace PlayerHandler
                 }
                 else
                 {
-                    // Clean movement accepted: commit the wire coordinates then track falling so a landing
-                    // tick can push fall damage through NetworkManager::applyDamageToPlayer.
-                    if (!session.flying && dy < 0.0)
-                        session.fallDistance += static_cast<float>(-dy);
-
-                    const float threshold = 3.0f; // vanilla 1.8: >3 airborne blocks before touching ground hurts.
-                    if (!session.onGround && session.fallDistance >= threshold)
-                    {
-                        net.applyDamageToPlayer(session.username, session.fallDistance - threshold + 1.0f, nowMs, 1);
-                        session.fallDistance = 0.0f;
-                    }
-                    else if (session.onGround)
-                    {
-                        session.fallDistance = 0.0f;
-                    }
+                    // Clean movement accepted (no clamp applied). Fall damage
+                    // resolution runs once below for BOTH branches so a landing
+                    // is detected whether or not the step was clamped.
 
                     // Approximate vanilla-ish depletion driven by accepted wire-position deltas (clients send movement vectors, not step counters — see wiki/Protocol-and-Clients.md). This hook is intentionally exhaustion-only: each moved block accrues foodExhaustionLevel scaled by motion class + optional hidden gamerule `hunger-decay-rate-percent` (default 100), and NOTHING else. Saturation drain and the starvation step live in PlayerSession::tickSurvivalDrain so standing still also drains saturation on wall-clock cadence — not just when moving — closing the earlier regression where depletion only fired inside handlePlayerMovement / regen gates.
 
-                    if (session.gamemode == 0 && dist > 0.0)
+                    if (session.gamemode == 0 && dist > 0.0 && !mounted)
                     {
                         auto &rules = LightweightMC::World::GameRules::getInstance();
                         int64_t decayPct = 100;
@@ -495,6 +527,37 @@ namespace PlayerHandler
                     session.lastMoveZ = session.z;
                     session.lastMoveMs = nowMs;
                 }
+
+                // ---- Fall damage: resolve once per airborne -> on-ground transition ----
+                // Runs for BOTH the clamped and clean paths so a landing is caught
+                // even when the horizontal step was clamped. fallDistance was
+                // accumulated above from wire dy, so a multi-block fall from a
+                // tower / high /tp is banked across packets and hurt exactly at
+                // the tick where onGround flips false -> true (vanilla semantics).
+                const bool landedThisTick = session.onGround && !session.prevOnGround;
+                if (landedThisTick)
+                {
+                    const float threshold = 3.0f; // vanilla 1.8: first 3 blocks free.
+                    if (!session.flying && !mounted && session.gamemode == 0 &&
+                        session.fallDistance >= threshold)
+                    {
+                        float rawFall = std::floor(session.fallDistance) - threshold;
+                        // Cap to vanilla-1.8 max (~15 half-hearts at a ~25-block lethal drop). A horizontal
+                        // noclip warp that also drops Y banks an absurd fallDistance, so an unclamped value
+                        // would instant-kill on a single clamped packet. Keep the gate's best-effort pacing.
+                        if (rawFall > 15.0f)
+                            rawFall = 15.0f;
+                        const float fallDamage = rawFall;
+                        if (fallDamage > 0.0f)
+                            net.applyDamageToPlayer(session.username, fallDamage, nowMs, 1);
+                    }
+                    session.fallDistance = 0.0f;
+                }
+                else if (session.onGround)
+                {
+                    session.fallDistance = 0.0f; // walking on ground: reset any banked amount
+                }
+                session.prevOnGround = session.onGround;
             }
         }
     }

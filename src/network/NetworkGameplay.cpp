@@ -350,8 +350,8 @@ namespace LightweightMC::Network
 
             const double spawnX = ses.hasBedSpawn ? static_cast<double>(ses.bedX) + 0.5
                                                   : static_cast<double>(ses.spawnX) + 0.5;
-            const double spawnY = ses.hasBedSpawn ? static_cast<double>(ses.bedY)
-                                                  : static_cast<double>(ses.spawnY);
+            // The respawn distance gate is horizontal-only (vanilla measures X/Z to the spawn point);
+            // vertical placement comes from ses.respawn() below, so no spawnY local is needed here.
             const double spawnZ = ses.hasBedSpawn ? static_cast<double>(ses.bedZ) + 0.5
                                                   : static_cast<double>(ses.spawnZ) + 0.5;
             const double dx = ses.x - spawnX;

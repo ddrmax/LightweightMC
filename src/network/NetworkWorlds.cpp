@@ -809,7 +809,13 @@ namespace LightweightMC::Network
             // Per-plane clock: the session's worldId picks the plane whose
             // phase matters to THIS client; worldAge stays monotonic.
             const int32_t planeId = ses.worldId;
-            const int64_t tod = m_worldManager.getWorldTicks(planeId);
+            const int64_t rawTod = m_worldManager.getWorldTicks(planeId);
+            // Wire time-of-day must stay in [0, dayLength). setWorldTicksAtPlane (/time set|add) and DB-
+            // loaded counters can exceed the configured day length; an unwrapped value freezes/glitches the
+            // client daylight cycle (see packet comment above). Wrap with a true-modulo so negatives never leak.
+            int64_t tod = rawTod % dayLength;
+            if (tod < 0)
+                tod += dayLength;
             std::vector<uint8_t> body;
             writeTimeUpdatePayload(body, m_worldAge, tod);
             sendPacket(fd, 0x03, body);
