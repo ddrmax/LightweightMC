@@ -2,16 +2,111 @@
 #include "versions/v1_8/food.hpp"
 #include "versions/v1_8/xp.hpp"
 #include "network/protocol/PacketCodec47.hpp"
+#include <sstream>
+#include <iomanip>
 #include <cmath>
 #include <unordered_map>
 #include <utility>
 #include <random>
 #include "network/handlers/play/InventoryHandler.hpp"
 #include "world/MC18ItemIds.hpp"
+#include "world/EntityManager.hpp"
+#include "world/GameRules.hpp"
+#include "network/Packet.hpp"
 #include "managers/PlayerManager.hpp"
 
 namespace WorldHandler
 {
+    static inline std::string hexId(int32_t v)
+    {
+        std::ostringstream o; o << "0x" << std::hex << v; return o.str();
+    }
+
+    static inline std::string hexPreview(const uint8_t *b, size_t n)
+    {
+        std::ostringstream o; const size_t k = n<48?n:48;
+        for (size_t i=0;i<k;++i){ o<<std::hex<<std::setw(2)<<std::setfill('0')<<(unsigned)b[i]; if(i+1<k)o<<' '; }
+        return o.str();
+    }
+
+    // --- Block-breaking mining model (maps the vanilla 1.8 tier concept onto
+    // LWMC's own tool/item space from include/world/MC18ItemIds.hpp). The user
+    // guide lists vanilla numeric ids (270/274...) which do not exist here; we
+    // key on LWMC tools instead: MATTOCK(85) is the pickaxe-class tool, HOE(84)
+    // digs soft ground, HATCHET(80)/ADZE(83) fell wood, CHISEL(86) is a finer
+    // stone tool. Tier follows the LWMC durability ladder (sturdier tool = can
+    // mine harder blocks). Hand = tier 0. Unknown tools = tier 0. ---
+    static inline int toolTier(int itemId)
+    {
+        switch (itemId)
+        {
+            case 85: return 2; // MATTOCK (pickaxe-class, mid tier)
+            case 86: return 2; // CHISEL
+            case 87: return 3; // HAMMER (sturdiest -> highest tier)
+            case 84: return 1; // HOE (soft ground)
+            case 80: return 1; // HATCHET
+            case 83: return 1; // ADZE
+            default: return 0; // hand / non-tool
+        }
+    }
+
+    // Required mining tier per block id (LWMC block ids from
+    // include/world/MC18BlockIds.hpp). LWMC tool tiers come from toolTier()
+    // above: hand/none = 0, soft-dig tools (HOE/HATCHET/ADZE) = 1, pickaxe-class
+    // (MATTOCK/CHISEL) = 2, sturdiest (HAMMER) = 3. A block whose requiredTier is
+    // above the held tool's tier drops nothing (vanilla "wrong tool" rule). Unlisted
+    // blocks default to 0 (hand-diggable). Covers the common 1.8 diggable set.
+    static inline int blockRequiredTier(int blockId)
+    {
+        switch (blockId)
+        {
+            case 1:  return 1;   // STONE (Granite/Diorite/Andesite via meta)
+            case 4:  return 1;   // COBBLESTONE
+            case 5:  return 1;   // PLANKS / WOOD_PLANK
+            case 7:  return 9;   // BEDROCK -- effectively unbreakable (never < heldTier realistically)
+            case 13: return 1;   // GRAVEL
+            case 14: return 2;   // GOLD_ORE (iron-grade+)
+            case 15: return 2;   // IRON_ORE (stone+ pickaxe-class)
+            case 16: return 1;   // COAL_ORE
+            case 21: return 2;   // LAPIS_ORE
+            case 22: return 2;   // LAPIS_BLOCK
+            case 24: return 1;   // SANDSTONE
+            case 41: return 2;   // GOLD_BLOCK
+            case 42: return 2;   // IRON_BLOCK
+            case 45: return 1;   // BRICK_BLOCK
+            case 47: return 1;   // BOOKSHELF (axe-class, but tier-gated to a tool)
+            case 48: return 1;   // MOSSY_COBBLESTONE
+            case 49: return 3;   // OBSIDIAN (diamond/highest tier)
+            case 56: return 3;   // DIAMOND_ORE
+            case 57: return 3;   // DIAMOND_BLOCK
+            case 73: return 2;   // REDSTONE_ORE
+            case 129:return 2;   // EMERALD_ORE
+            case 153:return 1;   // QUARTZ_ORE (Nether Quartz)
+            case 165:return 3;   // SLIME_BLOCK
+            case 168:return 1;   // PRISMARINE
+            case 172:return 1;   // HARDENED_CLAY / Terracotta
+            case 173:return 1;   // COAL_BLOCK
+            case 179:return 1;   // RED_SANDSTONE
+            default: return 0;   // dirt/sand/grass/leaves/log/etc. hand-diggable
+        }
+    }
+
+    // Drop item per block id. IMPORTANT: LWMC keeps two separate id spaces --
+    // block ids (MC18BlockIds.hpp) and item ids (MC18ItemIds.hpp). A drop value
+    // is consumed as an ITEM (mergeItemIntoInventory / spawnItemDrop), so we only
+    // cross-map when a genuine processed LWMC item exists; otherwise the block
+    // drops itself (drop == blockId), which is how the pre-existing dirt/grass/
+    // log/leaves behaviour already worked. Extend this table as real LWMC items
+    // are added rather than inventing vanilla ids.
+    static inline int blockDropItem(int blockId)
+    {
+        switch (blockId)
+        {
+            case 1:   return 4;     // STONE -> COBBLESTONE
+            case 2:   return 3;     // GRASS_BLOCK -> DIRT
+            default:  return blockId;  // otherwise drop the block itself
+        }
+    }
 
     void handleDigging(int clientFd, LightweightMC::Player::PlayerSession &session, const uint8_t *data, size_t &offset, size_t packetEnd,
                        LightweightMC::Storage::WorldStorage &worldStorage, LightweightMC::Storage::Database &database, LightweightMC::Network::NetworkManager &net)
@@ -33,7 +128,29 @@ namespace WorldHandler
         uint8_t face = static_cast<uint8_t>(LightweightMC::Network::Packet::readByteBounded(data, offset, packetEnd));
         (void)face;
 
-        if (status == 0 || status == 2)
+        // [WIRE C2S] Player Digging (0x07) -- always log the decoded request so a
+        // real client breaking a block produces a WARN even before any world
+        // mutation. status meanings (protocol 47): 0 = Start, 1 = Cancelled,
+        // 2 = Finished. If a client sends anything other than 0/2 the break
+        // branch below is skipped -- this trace makes that visible.
+        LightweightMC::Core::Logger::warn(std::string("[WIRE Digging C2S] ")
+            + "player="+session.username+" status="+std::to_string(status)
+            +" pos=("+std::to_string(x)+","+std::to_string(y)+","+std::to_string(z)+")"
+            +" face="+std::to_string((int)face));
+
+        // Game-mode aware breaking gate (session.gamemode: 0=survival,1=creative,2=adventure,3=spectator).
+        // Vanilla-1.8 protocol-47 Player Digging sends status 0=Start, 1=Cancelled, 2=Finished.
+        //  - Survival/adventure: a block is only destroyed on status 2 (Finished). Status 0 is just
+        //    the click/Start and must NOT clear the cell -- doing so made later status packets read
+        //    Air and dropped nothing (the bug in this report).
+        //  - Creative: instant break -- destroy on status 0 (Start); also honour a lone status 2.
+        //  - Spectator: cannot break blocks at all -- never mutate, never drop, never broadcast.
+        const bool spectator = (session.gamemode == 3);
+        const bool creativeInstant = (session.gamemode == 1);
+        const bool canBreakNow = !spectator &&
+            (status == 2 || (creativeInstant && status == 0));
+
+        if (status == 0 || status == 1 || status == 2)
         {
             int chunkX = LightweightMC::Network::Packet::floorDiv(x, 16.0);
             int chunkZ = LightweightMC::Network::Packet::floorDiv(z, 16.0);
@@ -42,8 +159,48 @@ namespace WorldHandler
 
             // Read the existing block before we overwrite it so block-breaking
             // drops (Bug 4 fix) can be resolved from the real block type.
+            //
+            // The chunk must be generated first: getBlockAt() returns 0 ("air/
+            // unknown") for a not-yet-generated chunk, so reading oldBlockId
+            // before generation would see Air and drop nothing on the very first
+            // dig into a fresh chunk. generateChunk() is idempotent (early-returns
+            // if already generated) and saveBlockChange() does this same guard on
+            // write, so calling it here only makes the read correct -- no extra
+            // cost on later digs of an already-generated chunk.
+            worldStorage.generateChunk(chunkX, chunkZ);
+
             uint16_t oldBlockData = worldStorage.getBlockAt(chunkX, chunkZ, relX, y, relZ);
             uint16_t oldBlockId = oldBlockData >> 4;
+
+            // [WIRE] getBlockAt result at click/dig time -- logs the raw combined
+            // cell value and decoded block id for EVERY Player Digging status (0=Start,
+            // 1=Cancelled, 2=Finished), so you can confirm the correct block is returned
+            // when the client clicks a block to break it, BEFORE any world mutation. If
+            // this shows oldBlockId=<expected> at status 0 but 0 at status 2, the cell was
+            // cleared mid-sequence; if it shows 0 at every status, the server's stored
+            // column has no block where the client renders one (terrain mismatch).
+            LightweightMC::Core::Logger::warn(std::string("[WIRE Digging getBlockAt] ")
+                + "player="+session.username+" status="+std::to_string(status)
+                +" pos=("+std::to_string(x)+","+std::to_string(y)+","+std::to_string(z)+")"
+                +" chunk="+std::to_string(chunkX)+","+std::to_string(chunkZ)
+                +" rel="+std::to_string(relX)+","+std::to_string(relZ)
+                +" rawCombined="+std::to_string(oldBlockData)
+                +" oldBlockId="+std::to_string(oldBlockId));
+
+            // If a break was allowed now but the server's stored column has no block
+            // at this exact cell, client and server terrain disagree here -- log it so
+            // the mismatch is visible rather than silent (no drop).
+            if (canBreakNow && oldBlockId == 0)
+            {
+                LightweightMC::Core::Logger::warn(std::string("[WIRE Digging FINISHED-BUT-AIR] ")
+                    + "player="+session.username+" pos=("+std::to_string(x)+","+std::to_string(y)+","+std::to_string(z)+")"
+                    +" chunk="+std::to_string(chunkX)+","+std::to_string(chunkZ)
+                    +" rel="+std::to_string(relX)+","+std::to_string(relZ)
+                    +" (server sees Air at this cell -- client terrain and server storage disagree; no drop)");
+            }
+
+            if (!canBreakNow)
+                return;
 
             worldStorage.saveBlockChange(chunkX, chunkZ, relX, y, relZ, 0);
 
@@ -58,37 +215,106 @@ namespace WorldHandler
 
             net.broadcastPacket(0x23, blockChange, clientFd);
 
-            // Block-breaking drops (Bug 4 fix). Status 2 == successful
-            // destruction in vanilla protocol 47. Non-air stone-type blocks
-            // drop themselves as a single item unit, which is then offered to
-            // the player's inventory. Matching stacks are merged first, then
-            // empty slots fill in; if nothing fits the item is logged as lost
-            // server-side (future improvement: spawn a ground entity instead).
-            if (status == 2 && oldBlockId > 0 && oldBlockId != 7 /* bedrock */)
+            // Block-breaking drop: we only get here when a break is allowed for this
+            // game mode + status (canBreakNow), so any real block in the cell is broken.
+            if (oldBlockId > 0 && oldBlockId != 7 /* bedrock */)
             {
-                const int16_t dropId = static_cast<int16_t>(oldBlockId);
-                int remaining = InventoryHandler::mergeItemIntoInventory(
-                    session, dropId, 1, 0);
-                if (remaining > 0)
+                // Resolve held tool tier from the hotbar band, then gate the drop
+                // on the block's required mining tier (vanilla 1.8 rule: wrong or
+                // too-weak a tool drops nothing). LWMC tools live at ids 80..88.
+                int heldTier = 0;
+                if (session.selectedSlot >= 0 && session.selectedSlot < 9)
                 {
-                    LightweightMC::Core::Logger::warn(
-                        "[World] No inventory space for dropped block id " +
-                        std::to_string(oldBlockId) + " at (" +
-                        std::to_string(x) + "," + std::to_string(y) + "," +
-                        std::to_string(z) + ") for player " + session.username);
+                    const int16_t hk = static_cast<int16_t>(36 + session.selectedSlot);
+                    const auto h = session.inventory.find(hk);
+                    if (h != session.inventory.end()) heldTier = toolTier(h->second.id);
                 }
+                const int reqTier = blockRequiredTier(static_cast<int>(oldBlockId));
+                const bool canMine = heldTier >= reqTier;
 
-                // Sync the full player inventory so the client sees the new
-                // stack or merged count immediately.
-                InventoryHandler::sendPlayerInventoryWindowItems(
-                    clientFd, session, net);
+                // Drop item resolved through the LWMC drop map (defaults to the
+                // block itself). Empty when the tool cannot mine this block.
+                const int16_t dropId = canMine
+                    ? static_cast<int16_t>(blockDropItem(static_cast<int>(oldBlockId)))
+                    : static_cast<int16_t>(-1);
+
+                // [WIRE] Block Change (0x23) -- tells clients the cell became Air.
+                LightweightMC::Core::Logger::warn(std::string("[WIRE BlockChange 0x23] ")
+                    + "pos=("+std::to_string(x)+","+std::to_string(y)+","+std::to_string(z)+") "
+                    + "old="+std::to_string(oldBlockId)+" new=0 hex="+hexPreview(blockChange.data(), blockChange.size()));
+
+                bool blockDrops = true;
+                LightweightMC::World::GameRules::getInstance().getBool("block_drops", blockDrops);
+                if (!canMine)
+                {
+                    // Tool tier too low for this block: vanilla drops nothing. Log so
+                    // the "wrong tool" case is visible rather than silent.
+                    LightweightMC::Core::Logger::warn(std::string("[WIRE Digging NO-DROP] ")
+                        + "player="+session.username+" blockId="+std::to_string(oldBlockId)
+                        +" reqTier="+std::to_string(reqTier)+" heldTier="+std::to_string(heldTier)
+                        +" (tool too weak -- drops nothing)");
+                }
+                else if (blockDrops && dropId >= 0)
+                {
+                    // Try to collect straight into the inventory first (the item
+                    // is grabbed off the block just broken). Only if the inventory
+                    // cannot accept it do we leave a ground entity for the pickup
+                    // sweep so the drop is not silently lost.
+                    const double cx = x + 0.5, cy = y + 0.5, cz = z + 0.5;
+                    const int remaining = InventoryHandler::mergeItemIntoInventory(session, dropId, 1, 0);
+                    if (remaining >= 1)
+                    {
+                        LightweightMC::World::EntityManager::getInstance().spawnItemDrop(
+                            std::string(), cx, cy, cz, dropId, remaining);
+
+                        // [WIRE] Item spawn on the ground -- decoded fields plus the
+                        // encoded varint payload in hex so the drop is traceable.
+                        std::vector<uint8_t> spawnPayload;
+                        LightweightMC::Network::Packet::writeVarInt(spawnPayload, dropId);
+                        LightweightMC::Core::Logger::warn(std::string("[WIRE SpawnItem] ")
+                            + "player="+session.username+" itemId="+std::to_string(dropId)
+                            +" count="+std::to_string(remaining)
+                            +" pos=("+std::to_string(cx)+","+std::to_string(cy)+","+std::to_string(cz)+")"
+                            +" payloadHex="+hexPreview(spawnPayload.data(), spawnPayload.size()));
+                    }
+
+                    // [WIRE] Inventory update (Window Items 0x30) -- authoritative full
+                    // inventory sync so the collected item is visible on the client.
+                    LightweightMC::Core::Logger::warn(std::string("[WIRE InvAdd 0x30] ")
+                        + "player="+session.username+" itemId="+std::to_string(dropId)+" +1 "
+                        + "accepted="+(remaining<1?"T":"F")+" (remaining="+std::to_string(remaining)+")");
+
+                    if (remaining < 1)
+                    {
+                        InventoryHandler::sendPlayerInventoryWindowItems(clientFd, session, net);
+                        LightweightMC::Core::Logger::info("[World] " + session.username +
+                            " broke block id=" + std::to_string(oldBlockId) +
+                            " collected itemId=" + std::to_string(dropId) +
+                            " at (" + std::to_string(x) + "," + std::to_string(y) + "," +
+                            std::to_string(z) + ")");
+                    }
+                    else
+                    {
+                        // Inventory full: the item stays on the ground (the entity we
+                        // spawned above); log so it is not silently lost.
+                        LightweightMC::Core::Logger::warn("[World] inventory full for " + session.username +
+                            ": broke id=" + std::to_string(oldBlockId) + " drop stays on ground");
+                    }
+                }
+                else
+                {
+                    LightweightMC::Core::Logger::debug("[World] block_drops=false for " + session.username +
+                        " broke id=" + std::to_string(oldBlockId));
+                }
             }
 
             // Ore XP: destroying an ore block awards random XP per the v1_8
             // xp.hpp ore table (coal 0..2, quartz/redstone/lapis 2..5,
             // diamond/emerald 3..7; iron/gold award none — their XP comes from
-            // cooking the meat they drop). Only successful destructions count.
-            if (status == 2 && oldBlockId > 0)
+            // cooking the meat they drop). We only reach here when a break was
+            // actually allowed for this game mode + status, so any real block is
+            // a successful destruction.
+            if (oldBlockId > 0)
             {
                 const auto &oreTable = LightweightMC::Versions::V1_8::Xp::ores;
                 for (const auto &o : oreTable)
@@ -121,18 +347,10 @@ namespace WorldHandler
                 }
             }
 
-            // Tool wear: the client sends Digging with status 0 (start) and
-            // status 2 (successful destruction). Only successful destructions
-            // consume durability, mirroring vanilla. The held item lives in
-            // the hotbar band at inventory[selectedSlot]; tools are the
-            // LWMC durability class (ids 80..88) and getMaxDurability == 0
-            // marks everything else as bearing no wear. applyToolDamage also
-            // clears a shattered stack and mirrors both outcomes with an S2C
-            // Set Slot packet so the client UI shows crack progression or the
-            // emptied slot. Particles / breakage sounds are not broadcast:
-            // this codebase maps neither entity-status nor sound-effect S2C
-            // packets, so the shatter is logged server-side inside the helper.
-            if (status == 2 && session.selectedSlot >= 0 && session.selectedSlot < 9)
+            // Tool wear: consume durability whenever a real block was actually broken
+            // (we only reach here when canBreakNow held). Survival wears on Finished
+            // (status 2); creative-instant wears on the Start packet that broke it.
+            if (session.selectedSlot >= 0 && session.selectedSlot < 9)
             {
                 const int16_t hotbarKey = static_cast<int16_t>(36 + session.selectedSlot);
                 const auto held = session.inventory.find(hotbarKey);
