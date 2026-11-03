@@ -89,6 +89,26 @@ namespace LightweightMC::Network
             writeInt(vec, 1);
             writeShort(vec, 0); writeShort(vec, 0); writeShort(vec, 0);
         }
+        // Era-correct ground-item announcement: SPAWN_ENTITY (vanilla-1.8 op 0x19 /
+        // wire 25 per packet_ids_1.8.json), matching the proven mob spawn field order
+        // (varint entityId + type byte + three int32 coords scaled x*32 + yaw/pitch/headPitch
+        // bytes + three velocity shorts (scale 5000) + 0x7F metadata terminator). Uses full
+        // int32 coords so far drops do not wrap (unlike the legacy Spawn Object shorts).
+        static inline void writeSpawnEntityItem(std::vector<uint8_t> &vec, int32_t entityId,
+                                                double x, double y, double z) {
+            writeVarInt(vec, entityId);
+            vec.push_back(2); // type byte: 2 = item / object
+            writeInt(vec, static_cast<int32_t>(x * 32));
+            writeInt(vec, static_cast<int32_t>(y * 32));
+            writeInt(vec, static_cast<int32_t>(z * 32));
+            vec.push_back(0); // yaw
+            vec.push_back(0); // pitch
+            vec.push_back(0); // headPitch
+            writeShort(vec, 0); // velocity x (fixed 5000)
+            writeShort(vec, 0); // velocity y
+            writeShort(vec, 0); // velocity z
+            vec.push_back(0x7F); // metadata terminator (127) -- keeps client decoder self-terminating
+        }
         static inline void writeEntityMetadataItem(std::vector<uint8_t> &vec, int32_t entityId, int16_t itemId, uint8_t count, uint16_t damage) {
             writeVarInt(vec, 0x1C);
             writeVarInt(vec, entityId);

@@ -29,6 +29,7 @@
 #include <cstring>
 #include <chrono>
 #include <vector>
+#include <set>   // announced-drop eid tracking (A1 ground-item spawn announcement)
 #include <sstream>
 #include <iomanip>
 #include "network/BanList.hpp"
@@ -377,6 +378,74 @@ namespace LightweightMC::Network
         flushPendingDisconnects(std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now().time_since_epoch())
                                     .count());
+
+        // ---- Ground-item spawn announcement (S2C Spawn Entity 0x19) --------------
+        // A1 fidelity fix: DROPPED_ITEM entities exist in the simulation and the
+        // pickup sweep below collects them, but vanilla clients were never told the
+        // item exists on the ground, so nothing renders it until pickup. Emit one
+        // Spawn Entity (0x19 / SPAWN_ENTITY wire 25 per packet_ids_1.8.json) per
+        // entity to the nearest PLAY client once (announce-then-forget), matching
+        // vanilla where a dropped item becomes visible when first seen. Reuses the
+        // proven mob-spawn field order via writeSpawnEntityItem (full int32 coords
+        // scaled x*32 -- no legacy-0x0E short wrap for far drops). Announced eids are
+        // remembered in a static set so a still-on-the-ground item is not re-spammed
+        // every sweep; it is pruned when the entity despawns (pickup / lifetime) via listIds.
+        static std::set<int32_t> announcedDrops;
+        {
+            auto &emAnn = LightweightMC::World::EntityManager::getInstance();
+            // Prune announcements for entities that no longer exist so their ids can
+            // be re-announced if reused, and keep the set bounded.
+            {
+                const std::vector<int32_t> liveIds = emAnn.listIds();
+                std::set<int32_t> liveSet(liveIds.begin(), liveIds.end());
+                for (auto it = announcedDrops.begin(); it != announcedDrops.end();)
+                {
+                    if (!liveSet.count(*it))
+                        it = announcedDrops.erase(it);
+                    else
+                        ++it;
+                }
+            }
+            constexpr double kDropRenderD2 = 24.0 * 24.0; // ~render-distance announce radius
+            for (const int32_t eid : emAnn.listIds())
+            {
+                if (announcedDrops.count(eid))
+                    continue;
+                const LightweightMC::World::EntityManager::EntityRecord *rec = emAnn.find(eid);
+                if (!rec || rec->kind != LightweightMC::World::EntityManager::EntityKind::DROPPED_ITEM)
+                    continue;
+                // Announce to the nearest PLAY client within render distance so the
+                // item renders on that client's ground. One announce per entity is
+                // enough (items are world-global; each client learns it when close).
+                int bestFd = -1;
+                double bestD2 = kDropRenderD2;
+                for (const auto &[fd, ses] : m_clients)
+                {
+                    if (ses.state != Player::ClientState::PLAY)
+                        continue;
+                    const double dx = ses.x - rec->x;
+                    const double dy = ses.y - rec->y;
+                    const double dz = ses.z - rec->z;
+                    const double d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 < bestD2)
+                    {
+                        bestD2 = d2;
+                        bestFd = fd;
+                    }
+                }
+                if (bestFd < 0)
+                    continue;
+                std::vector<uint8_t> spawnObj;
+                LightweightMC::Network::Packet::writeSpawnEntityItem(spawnObj, eid, rec->x, rec->y, rec->z);
+                packetSender(bestFd, 0x19, spawnObj);
+                announcedDrops.insert(eid);
+                LightweightMC::Core::Logger::warn(std::string("[WIRE SpawnEntity 0x19] ")
+                    + "player=" + m_clients[bestFd].username
+                    + " eid=" + std::to_string(eid)
+                    + " itemId=" + std::to_string(rec->itemId)
+                    + " pos=(" + std::to_string(rec->x) + "," + std::to_string(rec->y) + "," + std::to_string(rec->z) + ")");
+            }
+        }
 
         // Ground-item pickup sweep (0x0D Collect Item + 0x13 Destroy Entities).
         // Runs ~twice a second. Any DROPPED_ITEM entity that has passed its
