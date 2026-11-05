@@ -575,6 +575,23 @@ namespace WorldHandler
         int targetRelX = LightweightMC::Network::Packet::floorMod(targetX, 16);
         int targetRelZ = LightweightMC::Network::Packet::floorMod(targetZ, 16);
 
+        // A2 reconnect chunk-streaming fix: getBlockAt() returns 0 ("air/unknown") for a
+        // not-yet-generated chunk. On reconnect the login burst streams chunks lazily, so a
+        // ClickWindow arriving before the chest's chunk is on disk would read Air -> existingBlockId=0
+        // -> the container never opens and its persisted contents look lost ("chest block gone").
+        // Mirror the digging handler (WorldHandler.cpp:163-172) which generates the chunk before
+        // reading it. generateChunk is idempotent (early-returns when already generated), so this
+        // only costs a one-time sync hitch on a truly-fresh chunk -- the same precedent saveBlockChange
+        // accepts for its first edit. Pre-generate the target plus its four horizontal neighbour
+        // chunks so double-chest pairing (getBlockAt on the adjacent half, below) also sees real data.
+        {
+            worldStorage.generateChunk(targetChunkX, targetChunkZ);
+            if (targetRelX + 1 >= 16) worldStorage.generateChunk(targetChunkX + 1, targetChunkZ);
+            if (targetRelX - 1 < 0)   worldStorage.generateChunk(targetChunkX - 1, targetChunkZ);
+            if (targetRelZ + 1 >= 16) worldStorage.generateChunk(targetChunkX, targetChunkZ + 1);
+            if (targetRelZ - 1 < 0)   worldStorage.generateChunk(targetChunkX, targetChunkZ - 1);
+        }
+
         uint16_t existingBlockData = worldStorage.getBlockAt(targetChunkX, targetChunkZ, targetRelX, targetY, targetRelZ);
         uint16_t existingBlockId = existingBlockData >> 4;
 
