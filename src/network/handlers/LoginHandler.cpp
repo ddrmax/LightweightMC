@@ -149,8 +149,23 @@ namespace LoginHandler
             // that don't map them); an admin can still call
             // EntityManager::setNetworkSync(false) to force byte-aligned
             // wire for H1Z1 replay recording.
-            LightweightMC::World::EntityManager::getInstance().spawnForSession(
-                session, worldManager.getWorldStorageFor(session.worldId), clientFd, packetSender);
+            // (Phase 15 login-crash hotfix) Removed login-time mob seed.
+            // EntityManager::spawnForSession(session, worldStorage, fd, packetSender)
+            // ran synchronously inside the login handler and did a terrain-aware
+            // 2-air-column scan with many WorldStorage::getBlockAt calls against
+            // lazily-streamed chunks. On reconnect to a warm existing world, each
+            // getBlockAt could hit an un-generated chunk and force a
+            // generateChunk() hitch inside the login burst -- that hitch is what
+            // the boot log records as "Server can't keep up", what makes a real
+            // vanilla client time out on the login handshake and reset its socket,
+            // and what feeds the resulting broken-pipe WARN cascade that the
+            // client reads as a login crash. The login burst is now a pure chunk
+            // stream + spawn roster = zero. Mob population is a follow-up that
+            // belongs on EntityManager::tick (which currently only advances
+            // existing entities + despawns expired ones and never spawns).
+            // See CHANGELOG 0.0.15 entry "Remove login-time mob seed".
+            // LightweightMC::World::EntityManager::getInstance().spawnForSession(
+            //     session, worldManager.getWorldStorageFor(session.worldId), clientFd, packetSender);
         }
         else
         {
