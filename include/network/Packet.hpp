@@ -89,25 +89,20 @@ namespace LightweightMC::Network
             writeInt(vec, 1);
             writeShort(vec, 0); writeShort(vec, 0); writeShort(vec, 0);
         }
-        // Era-correct ground-item announcement: SPAWN_ENTITY (vanilla-1.8 op 0x19 /
-        // wire 25 per packet_ids_1.8.json), matching the proven mob spawn field order
-        // (varint entityId + type byte + three int32 coords scaled x*32 + yaw/pitch/headPitch
-        // bytes + three velocity shorts (scale 5000) + 0x7F metadata terminator). Uses full
-        // int32 coords so far drops do not wrap (unlike the legacy Spawn Object shorts).
+        // Ground-item drop announcement (S2C Spawn Object, legacy wire 0x0E). This is the
+        // packet a vanilla 1.8 client decodes for an item on the ground: varint entityId +
+        // type byte 2 (= item) + three fixed-point shorts scaled x*32, and NOTHING after --
+        // the client's decoder consumes exactly those bytes (block_drop_probe.check_spawn_object
+        // asserts consumed == len(body)). Do NOT append yaw/pitch/headPitch or velocity shorts:
+        // an earlier SPAWN_ENTITY (0x19) variant carrying that mob-shaped tail crashed the JVM
+        // client with "Packet 0/25 (0x19) ... found 22 bytes extra whilst reading packet 25".
         static inline void writeSpawnEntityItem(std::vector<uint8_t> &vec, int32_t entityId,
                                                 double x, double y, double z) {
             writeVarInt(vec, entityId);
-            vec.push_back(2); // type byte: 2 = item / object
-            writeInt(vec, static_cast<int32_t>(x * 32));
-            writeInt(vec, static_cast<int32_t>(y * 32));
-            writeInt(vec, static_cast<int32_t>(z * 32));
-            vec.push_back(0); // yaw
-            vec.push_back(0); // pitch
-            vec.push_back(0); // headPitch
-            writeShort(vec, 0); // velocity x (fixed 5000)
-            writeShort(vec, 0); // velocity y
-            writeShort(vec, 0); // velocity z
-            vec.push_back(0x7F); // metadata terminator (127) -- keeps client decoder self-terminating
+            vec.push_back(2); // type byte: 2 = item / Spawn Object (vanilla-1.8)
+            writeShort(vec, static_cast<int16_t>(x * 32));
+            writeShort(vec, static_cast<int16_t>(y * 32));
+            writeShort(vec, static_cast<int16_t>(z * 32));
         }
         static inline void writeEntityMetadataItem(std::vector<uint8_t> &vec, int32_t entityId, int16_t itemId, uint8_t count, uint16_t damage) {
             writeVarInt(vec, 0x1C);

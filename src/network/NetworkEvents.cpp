@@ -379,17 +379,19 @@ namespace LightweightMC::Network
                                     std::chrono::steady_clock::now().time_since_epoch())
                                     .count());
 
-        // ---- Ground-item spawn announcement (S2C Spawn Entity 0x19) --------------
+        // ---- Ground-item spawn announcement (S2C Spawn Object 0x0E) --------------
         // A1 fidelity fix: DROPPED_ITEM entities exist in the simulation and the
         // pickup sweep below collects them, but vanilla clients were never told the
         // item exists on the ground, so nothing renders it until pickup. Emit one
-        // Spawn Entity (0x19 / SPAWN_ENTITY wire 25 per packet_ids_1.8.json) per
-        // entity to the nearest PLAY client once (announce-then-forget), matching
-        // vanilla where a dropped item becomes visible when first seen. Reuses the
-        // proven mob-spawn field order via writeSpawnEntityItem (full int32 coords
-        // scaled x*32 -- no legacy-0x0E short wrap for far drops). Announced eids are
-        // remembered in a static set so a still-on-the-ground item is not re-spammed
-        // every sweep; it is pruned when the entity despawns (pickup / lifetime) via listIds.
+        // Spawn Object (legacy wire 0x0E) per entity to the nearest PLAY client once
+        // (announce-then-forget), matching vanilla where a dropped item becomes visible
+        // when first seen. Reuses writeSpawnEntityItem's probe-blessed body (varint entityId
+        // + type byte 2=item + three fixed-point shorts scaled x*32, no trailing mob tail).
+        // NOTE: the earlier SPAWN_ENTITY (0x19) variant crashed the JVM client ("Packet 0/25
+        // ... found 22 bytes extra whilst reading packet 25") because that wire id decodes as
+        // Spawn Entity Living and our mob-shaped tail overflowed it; 0x0E is what the client
+        // actually expects for an item on the ground. Announced eids are remembered in a static
+        // set so a still-on-the-ground item is not re-spammed every sweep; pruned against listIds.
         static std::set<int32_t> announcedDrops;
         {
             auto &emAnn = LightweightMC::World::EntityManager::getInstance();
@@ -437,9 +439,9 @@ namespace LightweightMC::Network
                     continue;
                 std::vector<uint8_t> spawnObj;
                 LightweightMC::Network::Packet::writeSpawnEntityItem(spawnObj, eid, rec->x, rec->y, rec->z);
-                packetSender(bestFd, 0x19, spawnObj);
+                packetSender(bestFd, 0x0E, spawnObj);
                 announcedDrops.insert(eid);
-                LightweightMC::Core::Logger::warn(std::string("[WIRE SpawnEntity 0x19] ")
+                LightweightMC::Core::Logger::warn(std::string("[WIRE SpawnObject 0x0E] ")
                     + "player=" + m_clients[bestFd].username
                     + " eid=" + std::to_string(eid)
                     + " itemId=" + std::to_string(rec->itemId)
