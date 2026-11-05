@@ -379,83 +379,22 @@ namespace LightweightMC::Network
                                     std::chrono::steady_clock::now().time_since_epoch())
                                     .count());
 
-        // ---- Ground-item spawn announcement (S2C Spawn Object 0x0E) --------------
-        // A1 fidelity fix: DROPPED_ITEM entities exist in the simulation and the
-        // pickup sweep below collects them, but vanilla clients were never told the
-        // item exists on the ground, so nothing renders it until pickup. Emit one
-        // Spawn Object (legacy wire 0x0E) per entity to the nearest PLAY client once
-        // (announce-then-forget), matching vanilla where a dropped item becomes visible
-        // when first seen. Reuses writeSpawnEntityItem's probe-blessed body (varint entityId
-        // + type byte 2=item + three fixed-point shorts scaled x*32, no trailing mob tail).
-        // NOTE: the earlier SPAWN_ENTITY (0x19) variant crashed the JVM client ("Packet 0/25
-        // ... found 22 bytes extra whilst reading packet 25") because that wire id decodes as
-        // Spawn Entity Living and our mob-shaped tail overflowed it; 0x0E is what the client
-        // actually expects for an item on the ground. Announced eids are remembered in a static
-        // set so a still-on-the-ground item is not re-spammed every sweep; pruned against listIds.
-        static std::set<int32_t> announcedDrops;
-        {
-            auto &emAnn = LightweightMC::World::EntityManager::getInstance();
-            // Prune announcements for entities that no longer exist so their ids can
-            // be re-announced if reused, and keep the set bounded.
-            {
-                const std::vector<int32_t> liveIds = emAnn.listIds();
-                std::set<int32_t> liveSet(liveIds.begin(), liveIds.end());
-                for (auto it = announcedDrops.begin(); it != announcedDrops.end();)
-                {
-                    if (!liveSet.count(*it))
-                        it = announcedDrops.erase(it);
-                    else
-                        ++it;
-                }
-            }
-            constexpr double kDropRenderD2 = 24.0 * 24.0; // ~render-distance announce radius
-            for (const int32_t eid : emAnn.listIds())
-            {
-                if (announcedDrops.count(eid))
-                    continue;
-                const LightweightMC::World::EntityManager::EntityRecord *rec = emAnn.find(eid);
-                if (!rec || rec->kind != LightweightMC::World::EntityManager::EntityKind::DROPPED_ITEM)
-                    continue;
-                // Announce to the nearest PLAY client within render distance so the
-                // item renders on that client's ground. One announce per entity is
-                // enough (items are world-global; each client learns it when close).
-                int bestFd = -1;
-                double bestD2 = kDropRenderD2;
-                for (const auto &[fd, ses] : m_clients)
-                {
-                    if (ses.state != Player::ClientState::PLAY)
-                        continue;
-                    const double dx = ses.x - rec->x;
-                    const double dy = ses.y - rec->y;
-                    const double dz = ses.z - rec->z;
-                    const double d2 = dx * dx + dy * dy + dz * dz;
-                    if (d2 < bestD2)
-                    {
-                        bestD2 = d2;
-                        bestFd = fd;
-                    }
-                }
-                if (bestFd < 0)
-                    continue;
-                std::vector<uint8_t> spawnObj;
-                LightweightMC::Network::Packet::writeSpawnEntityItem(spawnObj, eid, rec->x, rec->y, rec->z);
-                packetSender(bestFd, 0x0E, spawnObj);
-                announcedDrops.insert(eid);
-                LightweightMC::Core::Logger::warn(std::string("[WIRE SpawnObject 0x0E] ")
-                    + "player=" + m_clients[bestFd].username
-                    + " eid=" + std::to_string(eid)
-                    + " itemId=" + std::to_string(rec->itemId)
-                    + " pos=(" + std::to_string(rec->x) + "," + std::to_string(rec->y) + "," + std::to_string(rec->z) + ")");
-            }
-        }
-
-        // Ground-item pickup sweep (0x0D Collect Item + 0x13 Destroy Entities).
-        // Runs ~twice a second. Any DROPPED_ITEM entity that has passed its
-        // vanilla 2s pickup delay and sits within ~1.3 blocks of a PLAY client's
-        // feet is offered to that client: merge into the authoritative inventory,
-        // then only destroy the ground entity if at least one unit landed (a full
-        // inventory keeps the item on the ground). A full Window Items (0x30) sync
-        // makes the collected stack visible even if slot mapping drifts.
+        // ---- Ground-item / mob-loot pickup sweep -------------------------------
+        // A1 fidelity (final): we do NOT dance on the client-side ground-entity
+        // wires for drops. The legacy Spawn Object (0x0E), Entity Metadata
+        // (0x1C), Collect Item (0x0D) and Destroy Entities (0x13) trio that
+        // used to announce+despawn a DROPPED_ITEM proved unsafe against
+        // vanilla-1.8 decoders in this branch (0x0E body underflow, 0x1C
+        // layout unverified, 0x19 overflowed Spawn Entity Living by 22 bytes,
+        // bare 0x0E without metadata produced "Entity Type: null" /
+        // NullPointerException on tick). Instead we mirror the proven block-
+        // break drop path (WorldHandler.cpp:264 / 281-283) so mob loot and
+        // overflowed block-break drops both land authoritatively: merge the
+        // stack into the client's inventory server-side, then push the
+        // complete inventory to the client with Window Items (0x30). The
+        // client never needs a ground render and no fragile body layout is
+        // involved. Runs ~twice a second so a client that walks into a loot
+        // pile picks it up within half a second.
         static auto lastPickup = std::chrono::steady_clock::now();
         const auto pickupNow = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(pickupNow - lastPickup).count() >= 500)
@@ -502,25 +441,21 @@ namespace LightweightMC::Network
                 if (remaining >= cnt)
                     continue;
 
-                // [WIRE] Collect Item (0x0D) + Destroy Entities (0x13): the client
-                // plays the suck-in animation and stops rendering the ground item.
-                LightweightMC::Core::Logger::warn(std::string("[WIRE Pickup 0x0D+0x13] ")
-                    + "player="+sit->second.username+" eid="+std::to_string(eid)+" itemId="+std::to_string(itemId));
-
-                // Payload-only bodies: sendPacket prepends the wire-ID varint.
-                std::vector<uint8_t> collect;
-                LightweightMC::Network::Packet::writeVarInt(collect, eid);
-                LightweightMC::Network::Packet::writeVarInt(collect, bestFd);
-                packetSender(bestFd, 0x0D, collect);
-
-                std::vector<uint8_t> destroy;
-                LightweightMC::Network::Packet::writeVarInt(destroy, 1);
-                LightweightMC::Network::Packet::writeVarInt(destroy, eid);
-                packetSender(bestFd, 0x13, destroy);
+                // [WIRE] Inventory update (Window Items 0x30) -- authoritative full
+                // inventory sync so the collected stack is visible on the client.
+                // Same helper the block-break drop path uses (WorldHandler.cpp
+                // 281-283) so mob loot and block-break overflow share one proven
+                // wire; no 0x0D / 0x13 / 0x0E / 0x1C ground-entity dance involved.
+                InventoryHandler::sendPlayerInventoryWindowItems(bestFd, sit->second, *this);
+                LightweightMC::Core::Logger::warn(std::string("[WIRE InvAdd 0x30] ")
+                    + "player=" + sit->second.username
+                    + " eid=" + std::to_string(eid)
+                    + " itemId=" + std::to_string(itemId)
+                    + " cnt=" + std::to_string(static_cast<int>(cnt)));
 
                 em.removeItemDrop(eid);
                 LightweightMC::Core::Logger::info("[World] " + sit->second.username +
-                    " picked up item eid=" + std::to_string(eid) +
+                    " auto-collected item eid=" + std::to_string(eid) +
                     " itemId=" + std::to_string(itemId));
             }
         }

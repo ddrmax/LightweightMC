@@ -69,6 +69,21 @@ namespace LightweightMC::Network
 
         auto &session = it->second;
 
+        // Tombstone guard: handleDisconnect parks the session in
+        // ClientState::DISCONNECTED and only erases the map entry at tick
+        // boundary (flushPendingDisconnects). Any sendPacket(fd, ...) that
+        // arrives later in the same tick used to push a fresh frame into a
+        // dead socket and log "Broken pipe" -- LoginHandler's login burst
+        // (spawn roster + chunk stream + Window Items + tablist) fires
+        // dozens of these in a row, producing a WARN flood that reads as a
+        // crash on vanilla reconnect. Drop the packet here instead.
+        if (session.state == LightweightMC::Player::ClientState::DISCONNECTED)
+        {
+            Core::Logger::debug("[NET SEND] abort fd=" + std::to_string(fd) +
+                                " — session in DISCONNECTED tombstone (packet dropped)");
+            return;
+        }
+
         // Translate the 1.8 wire ID to this client's era. Callers use the
         // literal 1.8 IDs everywhere so we look them up by (era, 1.8 wire
         // ID) via the generated reverse tables. Unmapped IDs (-1) or
