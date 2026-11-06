@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) 
 ---
 ## [0.0.15] - 2026-10-13
 
+### Fixed
+
+- **Item-id / login-burst Window Items desync fix (src/network/protocol/ProtocolTranslator.cpp::translateItemToClient)**: translateItemToClient was an identity passthrough that pushed LWMC OWN internal item ids (include/world/MC18ItemIds.hpp, LEATHER=0 .. TOOLS=80-88) straight onto the wire. LWMC id 0 collides with the vanilla-1.8 (protocol 47) no-item sentinel, so a persisted mob-loot stack (LEATHER=0) in a warm save blob (build1/ server_data.db) made the login-burst Window Items (S2C 0x30) body emit short(0) for a FILLED slot; the JVM 1.8 InventoryWindow reads type 0, treats the slot as empty and never consumes the trailing count/damage/NBT bytes, so the 45-slot window decode runs out of alignment and NPEs on login reconnect (client shutdown plus crash report). This is data- and code-revision independent: the id-0 item is already baked into build1, so reverting the spawn code alone cannot clear it. Fix: translateItemToClient now maps the LWMC 0-88 space onto grounded vanilla-1.8 minecraft-data item codes (PrismarineJS minecraft-data data/pc/1.8: leather 334, beef 363, steak 364, sugar canes 338, clay_ball 337, wooden planks 5, bread 297, cooked fish 350, mushroom_stew 282; the same numbering basis already used in include/versions/v1_8/food.hpp). NONE maps to -1, every real item maps to a valid NON-ZERO in-range id so the client decoder never mis-aligns again, and LWMC ids without a vanilla-1.8 analog collapse onto rotten_flesh 367 so the client renders a legal placeholder instead of crashing. Verified: incremental build rc=0, boot ERR=0, chest_test.py login reconnect Window-Items decode PASS. LWMC_VER unchanged
+
 ### Added
 
 <!-- FUTURE WORK (deferred, non-blocking; usability-over-optimization policy): the
