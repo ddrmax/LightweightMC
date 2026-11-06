@@ -128,6 +128,18 @@ namespace LightweightMC::Network
         return val;
     }
 
+    float Packet::readFloat(const uint8_t *buffer, size_t &offset)
+    {
+        uint32_t bits = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            bits = (bits << 8) | buffer[offset++];
+        }
+        float val;
+        std::memcpy(&val, &bits, sizeof(val));
+        return val;
+    }
+
     int32_t Packet::readVarIntBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd, size_t minBytes)
     {
         if (offset + minBytes > packetEnd)
@@ -159,6 +171,25 @@ namespace LightweightMC::Network
             return 0.0;
         const size_t save = offset;
         double v = Packet::readDouble(buffer, offset);
+        if (offset > packetEnd)
+            offset = save;
+        return v;
+    }
+
+    // Symmetric bounds-checked sibling of readDoubleBounded — 4-byte float read.
+    // Matches writeFloat on the wire. Used by handlePlayerMovement for C2S Look
+    // / Position_Rotation yaw+pitch: LWMC's own wire uses float (see
+    // BaseProtocol::encodePosition / NetworkGameplay.cpp S2C Position 0x08).
+    // Reading yaw+pitch as one 8-byte double concatenates two floats into one
+    // huge IEEE-754 double (e.g. bytes 43 18 00 00 00 00 00 00 -> 1.688e15),
+    // which then persists into server_data.db / player_positions DBs. See
+    // 0.0.15 CHANGELOG "C2S Look yaw/pitch wire-decode".
+    float Packet::readFloatBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd)
+    {
+        if (offset + 4 > packetEnd)
+            return 0.0f;
+        const size_t save = offset;
+        float v = Packet::readFloat(buffer, offset);
         if (offset > packetEnd)
             offset = save;
         return v;

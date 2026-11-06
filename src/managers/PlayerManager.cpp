@@ -141,12 +141,28 @@ namespace LightweightMC::Player
             currentSession.x = playerData.lastX;
             currentSession.y = playerData.lastY;
             currentSession.z = playerData.lastZ;
-            currentSession.yaw = std::fmod(playerData.lastYaw, 360.0f);
-            if (currentSession.yaw < 0.0f)
+            // Sanity guard for corrupt yaw/pitch persisted by the wire-decode
+            // bug at PlayerHandler.cpp:392 (see 0.0.15 CHANGELOG "C2S Look
+            // yaw/pitch wire-decode fix"). Values outside a legal angle range
+            // (|v| > 4pi) or non-finite are rejected on load so a legacy
+            // corrupt DB row cannot leak an obviously-bad angle into the
+            // login burst / scoreboard / plane switch. Once the wire fix
+            // has applied to all legacy rows the guard becomes a no-op.
             {
-                currentSession.yaw += 360.0f;
+                auto saneAngle = [](double v) -> double {
+                    if (!std::isfinite(v)) return 0.0;
+                    if (v > 12.5664 || v < -12.5664) return 0.0;
+                    return v;
+                };
+                const double cleanYaw   = saneAngle(playerData.lastYaw);
+                const double cleanPitch = saneAngle(playerData.lastPitch);
+                currentSession.yaw   = std::fmod(cleanYaw,   360.0f);
+                if (currentSession.yaw < 0.0f)
+                {
+                    currentSession.yaw += 360.0f;
+                }
+                currentSession.pitch = cleanPitch;
             }
-            currentSession.pitch = playerData.lastPitch;
             // Restore the plane the previous session was on so a player who
             // /gotor'd to Nether / End / Aether / a custom world reconnects on
             // the same plane instead of silently walking back to Overworld.

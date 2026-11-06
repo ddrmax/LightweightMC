@@ -389,8 +389,17 @@ namespace PlayerHandler
 
         if (packetId == 0x05 || packetId == 0x06) // Look OR Position+Look
         {
-            session.yaw = LightweightMC::Network::Packet::readDoubleBounded(data, offset, packetEnd);
-            session.pitch = LightweightMC::Network::Packet::readDoubleBounded(data, offset, packetEnd);
+            // 4-byte float yaw + 4-byte float pitch (matches LWMC's
+            // writeFloat / BaseProtocol::encodePosition wire, mirrored on
+            // the S2C Position 0x08 that NetworkGameplay.cpp emits). Reading
+            // these two fields as one 8-byte double was concatenating two
+            // floats into one huge IEEE-754 double (float yaw 152.0 next to
+            // float pitch 0.0 -> double 1.688e15), which then persisted
+            // back into server_data.db's last_yaw AND player_positions.yaw
+            // on logout, poisoning the reconnect login burst with an
+            // obviously-non-sane angle. readFloatBounded matches the wire.
+            session.yaw   = LightweightMC::Network::Packet::readFloatBounded(data, offset, packetEnd);
+            session.pitch = LightweightMC::Network::Packet::readFloatBounded(data, offset, packetEnd);
         }
 
         if (packetId == 0x03 || packetId == 0x04 || packetId == 0x05 || packetId == 0x06)

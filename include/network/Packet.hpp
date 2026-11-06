@@ -21,6 +21,10 @@ namespace LightweightMC::Network
         static void writeDouble(std::vector<uint8_t> &vec, double val);
         static void writeFloat(std::vector<uint8_t> &vec, float val);
         static void writeInt(std::vector<uint8_t> &vec, int32_t val);
+        // Symmetric with writeFloat: reads a big-endian 4-byte IEEE-754 float.
+        // Used by C2S Player Look / Position_Rotation wire (yaw/pitch) — see
+        // BaseProtocol::decodePosition / PlayerHandler::handlePlayerMovement.
+        static float readFloat(const uint8_t *buffer, size_t &offset);
 
         static uint64_t readUInt64(const uint8_t *buffer, size_t &offset);
         static int16_t readShort(const uint8_t *buffer, size_t &offset);
@@ -59,6 +63,7 @@ namespace LightweightMC::Network
         static int32_t readVarIntBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd, size_t minBytes);
         static int16_t readShortBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd);
         static double readDoubleBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd);
+        static float  readFloatBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd);
         static uint64_t readUInt64Bounded(const uint8_t *buffer, size_t &offset, size_t packetEnd);
         static int32_t readByteBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd);
         static std::string readStringBounded(const uint8_t *buffer, size_t &offset, size_t packetEnd);

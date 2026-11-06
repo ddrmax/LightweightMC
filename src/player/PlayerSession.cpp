@@ -4,6 +4,7 @@
 #include "storage/Database.hpp"
 #include "world/GameRules.hpp"
 #include <algorithm>
+#include <cmath>
 
 namespace LightweightMC::Player
 {
@@ -13,8 +14,29 @@ namespace LightweightMC::Player
         x = data.lastX;
         y = data.lastY;
         z = data.lastZ;
-        yaw = data.lastYaw;
-        pitch = data.lastPitch;
+        // ---- Yaw / pitch sanity guard (login-crash hotfix, 0.0.15) ---------
+        // Historically a C2S Look packet decoding bug (yaw+pitch read as one
+        // 8-byte double in handlePlayerMovement -- since fixed to readFloatBounded
+        // in src/network/handlers/play/PlayerHandler.cpp) persisted garbage
+        // doubles into server_data.db's last_yaw AND player_positions.yaw
+        // (observed on ddrmax: -8.5e14 at top-level, 1.688e15 at build1).
+        // Those raw values flow through loadFrom -> session.yaw -> save
+        // (applyTo) -> DB, so a single bad login could propagate the corruption
+        // across every subsequent logout and every plane switch (NetworkWorlds
+        // setPlayerWorldAt). This guard sanitises non-finite or absurd angles
+        // (yaw/pitch must be inside a small multiple of pi) on read so the
+        // session is always sane, independent of whether the wire-decode fix
+        // has reached every legacy DB row yet.
+        auto saneAngle = [](double v) -> double {
+            if (!std::isfinite(v)) return 0.0;
+            // Angles outside [-4pi, 4pi] cannot be legal in LWMC's wire (see
+            // writeFloat on wire / readFloatBounded at PlayerHandler.cpp).
+            // Rejecting >12.57 also rejects the 8.5e14 corruption signature.
+            if (v > 12.5664 || v < -12.5664) return 0.0;
+            return v;
+        };
+        yaw   = saneAngle(data.lastYaw);
+        pitch = saneAngle(data.lastPitch);
 
         // player.dat-mirrored persistent fields.
         health = std::clamp(data.health, 0.0f, 20.0f);
